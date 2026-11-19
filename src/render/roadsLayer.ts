@@ -3,6 +3,7 @@ import { LANE_WIDTH, RoadClass } from '../shared/constants';
 import type { EdgeView, NodeView } from '../shared/protocol';
 import { GB } from './geomBuilder';
 import { U } from './uniforms';
+import { bendLine, junction, type Arm } from './junctions';
 
 const COL = {
   asphalt: new THREE.Color(0x3d4044), asphaltOld: new THREE.Color(0x4a4c4f), dirt: new THREE.Color(0x9b7f5a), earth: new THREE.Color(0x7d6243),
@@ -56,6 +57,8 @@ function dashes(g: GB, pl: PL, s0: number, s1: number, off: number, w: number, d
 
 export class RoadsLayer {
   group = new THREE.Group();
+  /** terrain height sampler (set by the app) so junction surfaces never sink under the ground */
+  ground: (x: number, z: number) => number = () => -1e9;
   nodes = new Map<number, NodeView>();
   edges = new Map<number, EdgeView>();
   private mesh: THREE.Mesh | null = null;
@@ -122,7 +125,8 @@ export class RoadsLayer {
     let r = this.nodeRCache.get(id);
     if (r === undefined) {
       r = 3;
-      for (const e of this.edgesAt(id)) r = Math.max(r, edgeHalfWidth(e) + 1.2);
+      // mouths sit beyond the widest crossing road plus room for a kerb fillet
+      for (const e of this.edgesAt(id)) r = Math.max(r, edgeHalfWidth(e) + (n.control === 3 ? 1.2 : 5.5));
       if (n.control === 3) r += 9;
       this.nodeRCache.set(id, r);
     }
@@ -207,10 +211,33 @@ export class RoadsLayer {
     const q = new THREE.Quaternion();
     const up = new THREE.Vector3(0, 1, 0);
     this.edgeMeshIndex = [];
+    // smooth bends: deg-2 nodes where the road turns get a curved joint instead of a sharp vertex
+    const plCache = new Map<number, PL>();
+    const plOf = (e: EdgeView) => { let p = plCache.get(e.id); if (!p) plCache.set(e.id, (p = toPL(e.pts))); return p; };
+    const armOf = (nid: number, e: EdgeView, r: number): Arm => {
+      const pl = plOf(e), len = pl.s[pl.s.length - 1];
+      const fromA = e.a === nid;
+      const q = at(pl, fromA ? Math.min(r, len) : Math.max(0, len - r));
+      const walk = e.cls !== RoadClass.Dirt && e.cls !== RoadClass.Highway && !e.bridge && !e.elevated;
+      return { x: q[0], y: q[1], z: q[2], dx: fromA ? q[3] : -q[3], dz: fromA ? q[4] : -q[4], hw: edgeHalfWidth(e), walk };
+    };
+    const bendR = new Map<number, number>();
+    for (const n of this.nodes.values()) {
+      if (n.deg !== 2) continue;
+      const inc = this.edgesAt(n.id);
+      if (inc.length !== 2) continue;
+      const A = armOf(n.id, inc[0], 0), B = armOf(n.id, inc[1], 0);
+      const turn = Math.acos(Math.max(-1, Math.min(1, -(A.dx * B.dx + A.dz * B.dz))));
+      if (turn < 0.1) continue;
+      const lenA = plOf(inc[0]).s.at(-1)!, lenB = plOf(inc[1]).s.at(-1)!;
+      const hw = Math.max(A.hw, B.hw);
+      bendR.set(n.id, Math.min(hw * (1 + turn) + 3, lenA * 0.35, lenB * 0.35));
+    }
+    const trimAt = (nid: number) => this.nodeR(nid) * 0.92 || (bendR.get(nid) ?? 0);
     for (const e of this.edges.values()) {
-      const pl = toPL(e.pts);
+      const pl = plOf(e);
       const len = pl.s[pl.s.length - 1];
-      const ra = this.nodeR(e.a) * 0.92, rb = this.nodeR(e.b) * 0.92;
+      const ra = trimAt(e.a), rb = trimAt(e.b);
       const s0 = Math.min(ra, len / 2), s1 = Math.max(len - rb, len / 2);
       const hw = edgeHalfWidth(e);
       const startV = g.count;
@@ -343,7 +370,26 @@ export class RoadsLayer {
       if (n.deg === 2) {
         // smooth joint between two segments
         const inc = this.edgesAt(n.id);
-        if (inc.length) {
+        const br = bendR.get(n.id);
+        if (br !== undefined && inc.length === 2) {
+          const [e1, e2] = inc;
+          const A = armOf(n.id, e1, br), B = armOf(n.id, e2, br);
+          const bpl = toPL(bendLine(A, B, n.x, n.y, n.z));
+          const L = bpl.s[bpl.s.length - 1];
+          const hw = Math.max(A.hw, B.hw);
+          const dirt = e1.cls === RoadClass.Dirt && e2.cls === RoadClass.Dirt;
+          ribbon(g, bpl, 0, L, -hw, hw, 0.004, dirt ? COL.dirt : COL.asphalt, 3);
+          if (A.walk && B.walk) {
+            ribbon(g, bpl, 0, L, hw, hw + 2.6, 0.12, COL.walk, 3);
+            ribbon(g, bpl, 0, L, -hw - 2.6, -hw, 0.12, COL.walk, 3);
+            ribbon(g, bpl, 0, L, hw, hw + 0.25, 0.14, COL.curb, 3);
+            ribbon(g, bpl, 0, L, -hw - 0.25, -hw, 0.14, COL.curb, 3);
+          }
+          if (!dirt && !e1.oneway && !e2.oneway) {
+            if (e1.cls >= RoadClass.Avenue && e2.cls >= RoadClass.Avenue) ribbon(g, bpl, 0, L, -0.8, 0.8, 0.18, COL.median, 3);
+            else if (e1.cls !== RoadClass.Highway) { ribbon(g, bpl, 0, L, -0.2, -0.06, 0.03, COL.yellow, 3); ribbon(g, bpl, 0, L, 0.06, 0.2, 0.03, COL.yellow, 3); }
+          }
+        } else if (inc.length) {
           g.setTransform(n.x, n.y, n.z, 0);
           disc(g, 0, 0.004, 0, Math.max(...inc.map((e) => edgeHalfWidth(e))), 14, inc.every((e) => e.cls === RoadClass.Dirt) ? COL.dirt : COL.asphalt);
           g.setTransform(0, 0, 0, 0);
@@ -367,15 +413,19 @@ export class RoadsLayer {
           bg.setTransform(0, 0, 0, 0);
         }
       }
-      g.setTransform(n.x, n.y, n.z, 0);
       const anyDirt = this.edgesAt(n.id).every((e) => e.cls === RoadClass.Dirt);
       const nr = this.nodeR(n.id);
-      disc(g, 0, 0.01, 0, nr, 16, anyDirt ? COL.dirt : COL.asphalt);
       if (n.control === 3) {
-        disc(g, 0, 0.21, 0, nr * 0.5, 16, COL.curb);
-        disc(g, 0, 0.22, 0, nr * 0.45, 16, COL.median);
+        g.setTransform(n.x, n.y, n.z, 0);
+        disc(g, 0, 0.01, 0, nr, 24, anyDirt ? COL.dirt : COL.asphalt);
+        disc(g, 0, 0.21, 0, nr * 0.5, 20, COL.curb);
+        disc(g, 0, 0.22, 0, nr * 0.45, 20, COL.median);
+        g.setTransform(0, 0, 0, 0);
+      } else {
+        // filleted junction: kerbs curve from one road mouth to the next
+        const arms = this.edgesAt(n.id).map((e) => armOf(n.id, e, Math.min(nr * 0.92, plOf(e).s.at(-1)! / 2)));
+        junction(g, n.x, n.y, n.z, arms, { surface: anyDirt ? COL.dirt : COL.asphalt, walk: COL.walk, curb: COL.curb }, this.ground);
       }
-      g.setTransform(0, 0, 0, 0);
       if (n.control === 2 || n.control === 4) {
         const inc = this.edgesAt(n.id);
         inc.forEach((e, idx) => {

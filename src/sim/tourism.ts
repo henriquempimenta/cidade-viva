@@ -76,7 +76,7 @@ export class Tourism {
   private arrive(hotel: Building): boolean {
     const w = this.w, C = w.citizens;
     const size = w.rng.int(1, 3);
-    if (C.max - C.count < 100) return false;
+    
     const h = C.newHousehold(hotel.id, 2, true);
     h.car = w.rng.chance(0.3);
     h.money = 3000;

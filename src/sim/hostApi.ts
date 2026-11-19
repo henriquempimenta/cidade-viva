@@ -6,8 +6,8 @@ import { TERM_LABELS } from './siting';
 import type { World } from './world';
 
 type Ext = World & {
-  traffic?: { fillSnapshot(veh: Float32Array): number; count: number; virtualTrips: number; inspect(id: number): unknown };
-  peds?: { fillSnapshot(ped: Float32Array, cam: { x: number; z: number; h: number }): number; count: number };
+  traffic?: { fillSnapshot(veh: Float32Array): number; count: number; max: number; virtualTrips: number; inspect(id: number): unknown };
+  peds?: { fillSnapshot(ped: Float32Array, cam: { x: number; z: number; h: number }): number; count: number; max: number };
   trains?: { fillSnapshot(arr: Float32Array): number; count: number };
   signalsSnapshot?: () => Int32Array;
   crossingsSnapshot?: () => Uint8Array;
@@ -21,8 +21,8 @@ type Ext = World & {
 
 export function makeSnapshot(w: World, cam: { x: number; z: number; h: number }): Snapshot {
   const x = w as Ext;
-  const veh = new Float32Array(MAX_VEHICLES * VEH_STRIDE);
-  const ped = new Float32Array(MAX_PEDS * PED_STRIDE);
+  const veh = new Float32Array((x.traffic?.max ?? MAX_VEHICLES) * VEH_STRIDE);
+  const ped = new Float32Array((x.peds?.max ?? MAX_PEDS) * PED_STRIDE);
   const train = new Float32Array(MAX_TRAIN_CARS * TRAIN_STRIDE);
   const vehCount = x.traffic ? x.traffic.fillSnapshot(veh) : 0;
   const pedCount = x.peds ? x.peds.fillSnapshot(ped, cam) : 0;
@@ -105,6 +105,7 @@ export function inspect(w: World, kind: string, id: number): unknown {
     return {
       id: b.id, name: b.name, kind: b.kind, label: KINDS[b.kind].label, cat: b.def.cat, level: b.level, wealth: b.wealth, floors: b.floors,
       state: b.state, progress: b.progress, district: w.districts[b.district]?.name ?? '', builtDay: b.builtDay, abandoned: b.abandoned,
+      decay: b.decay, squatted: b.squatted, stalled: b.stalledUntil >= 0, stalledUntil: b.stalledUntil, abandonedYears: b.abandoned ? (w.day - b.abandonedDay) / 12 : 0, corruption: w.fields.sample('corruption', b.x, b.z),
       households: b.households.length, hhCap: b.hhCap, workers: b.workers.length, jobs: b.jobCap.reduce((a, c) => a + c, 0), students: b.students.length,
       profit: b.profit, powered: b.powered, watered: b.watered, heritage: b.heritage, garbage: b.garbage, visitors: b.visitors,
       x: b.x, z: b.z, y: b.y, height: b.height,
@@ -137,6 +138,14 @@ export function inspect(w: World, kind: string, id: number): unknown {
       volume: e.volume, capacity: w.roads.capacity(e), vc: Math.max(e.volume[0], e.volume[1]) / w.roads.capacity(e),
       history: e.vcHistory, congestedDays: e.congestedDays, busLane: e.busLane, upgrading: e.upgrading,
       od: Object.entries(od).sort((a, b) => b[1] - a[1]).slice(0, 8), pairs,
+      noise: (() => {
+        const m = e.sndMean;
+        if (!m) return null;
+        const power = m[0] + m[1] + m[2];
+        const bins = Math.max(1, e.len / 55);
+        return { light: m[0], moto: m[1], heavy: m[2], power, index: Math.min(1, Math.log1p((power / bins) * 0.93) * 0.37), speed: m[4] > 0.02 ? m[3] / m[4] : 0, samples: m[4] };
+      })(),
+      mid: (() => { const p = e.pts, k = Math.floor(p.length / 6) * 3; return { x: p[k], y: p[k + 1], z: p[k + 2], hx: p[Math.min(p.length - 3, k + 3)] - p[k], hz: p[Math.min(p.length - 1, k + 5)] - p[k + 2] }; })(),
       upgrade: (w as unknown as { lastUpgrade?: Map<number, unknown> }).lastUpgrade?.get(e.id) ?? null,
     };
   }

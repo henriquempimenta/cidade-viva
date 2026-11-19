@@ -29,6 +29,8 @@ export interface SimParams {
   baseCrime: number; // 0..2
   policeEfficiency: number; // 0..2
   initialEducation: number; // 0..1
+  corruption: number; // 0..1 propensão de base à corrupção
+  transparency: number; // 0..1 imprensa, controle e transparência
   // Eventos
   disasterFreq: number; // 0..3
   festivalFreq: number; // 0..3
@@ -58,6 +60,8 @@ export const DEFAULT_PARAMS: SimParams = {
   initialEducation: 0.35,
   disasterFreq: 1,
   festivalFreq: 1,
+  corruption: 0.35,
+  transparency: 0.5,
 };
 
 export const RESTART_KEYS: (keyof SimParams)[] = ['seed', 'terrain', 'mapSize'];
@@ -73,10 +77,10 @@ export const PRESETS: Record<string, Partial<SimParams>> = {
   },
   'Metrópole caótica': {
     immigration: 2, maxDensity: 5, transitPriority: 0.1, gridGrowth: 0.1, inequality: 0.85,
-    baseCrime: 1.6, policeEfficiency: 0.6, pollutionTolerance: 0.7, budgetMult: 0.7,
+    baseCrime: 1.6, policeEfficiency: 0.6, pollutionTolerance: 0.7, budgetMult: 0.7, corruption: 0.75, transparency: 0.2,
   },
   'Cidade sustentável planejada': {
     vocation: 'servicos', transitPriority: 0.95, gridGrowth: 0.9, pollutionTolerance: 0.1,
-    envPreservation: 0.9, inequality: 0.2, initialEducation: 0.7, budgetMult: 1.4, baseCrime: 0.6,
+    envPreservation: 0.9, inequality: 0.2, initialEducation: 0.7, budgetMult: 1.4, baseCrime: 0.6, corruption: 0.1, transparency: 0.9,
   },
 };

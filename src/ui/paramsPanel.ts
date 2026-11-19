@@ -1,6 +1,5 @@
 import type { App } from '../app';
 import { PRESETS, RESTART_KEYS, type SimParams } from '../shared/params';
-import type { Stats } from '../shared/protocol';
 import { btn, el } from './hud';
 
 type Def = { key: keyof SimParams; label: string; min?: number; max?: number; step?: number; options?: [string, string][]; group: string; hint?: string };
@@ -26,6 +25,8 @@ const DEFS: Def[] = [
   { group: 'Sociedade', key: 'baseCrime', label: 'Criminalidade base', min: 0, max: 2, step: 0.05 },
   { group: 'Sociedade', key: 'policeEfficiency', label: 'Eficiência policial', min: 0, max: 2, step: 0.05 },
   { group: 'Sociedade', key: 'initialEducation', label: 'Educação inicial', min: 0, max: 1, step: 0.05 },
+  { group: 'Sociedade', key: 'corruption', label: 'Propensão à corrupção', min: 0, max: 1, step: 0.05 },
+  { group: 'Sociedade', key: 'transparency', label: 'Transparência e imprensa', min: 0, max: 1, step: 0.05 },
   { group: 'Eventos', key: 'disasterFreq', label: 'Frequência de desastres', min: 0, max: 3, step: 0.1 },
   { group: 'Eventos', key: 'festivalFreq', label: 'Frequência de festivais', min: 0, max: 3, step: 0.1 },
 ];
@@ -33,25 +34,29 @@ const DEFS: Def[] = [
 export class ParamsPanel {
   private panel: HTMLElement;
   private pendingRestart: Partial<SimParams> = {};
-  private demand!: HTMLElement;
 
-  constructor(private app: App, root: HTMLElement) {
-    this.panel = el('div', 'panel leftbar', root);
+  constructor(private app: App, container: HTMLElement) {
+    this.panel = el('div', '', container);
     this.build();
   }
-  toggle() { this.panel.classList.toggle('open'); }
 
   private build() {
     const p = this.app.params;
     const P = this.panel;
-    P.innerHTML = '<h3 style="margin:0 0 4px">Parâmetros</h3><div style="color:var(--mut)">Mudanças valem ao vivo. Itens do "Mundo" (seed, terreno, tamanho) reiniciam a cidade.</div>';
-    const pr = el('div', '', P);
-    pr.innerHTML = '<h4>Presets</h4>';
-    for (const name of Object.keys(PRESETS)) btn(name, pr, () => this.applyPreset(name)).style.margin = '2px';
+    P.innerHTML = '<div class="section-heading"><h2>Parâmetros</h2></div><p class="hint">Mudanças valem ao vivo e a cidade reage nas próximas horas de jogo. Itens do “Mundo” (seed, terreno, tamanho) geram uma nova cidade.</p>';
+    el('h4', '', P).textContent = 'Predefinições';
+    const pr = el('div', 'presets', P);
+    for (const name of Object.keys(PRESETS)) btn(name, pr, () => this.applyPreset(name));
     let group = '';
+    let box: HTMLElement = P;
     for (const d of DEFS) {
-      if (d.group !== group) { group = d.group; el('h4', '', P).textContent = group; }
-      const w = el('div', 'param', P);
+      if (d.group !== group) {
+        group = d.group;
+        box = el('details', 'settings', P);
+        if (group === 'Mundo' || group === 'Planejamento') box.setAttribute('open', '');
+        el('summary', '', box).textContent = group;
+      }
+      const w = el('div', 'param', box);
       const lab = el('label', '', w);
       const val = String(p[d.key]);
       if (d.options) {
@@ -67,12 +72,14 @@ export class ParamsPanel {
         r.onchange = () => this.set(d.key, Number(r.value));
       }
     }
-    const restart = btn('↻ Reiniciar com o novo mundo', P, () => this.app.restart({ ...this.app.params, ...this.pendingRestart }));
-    restart.style.marginTop = '8px';
-    restart.className = 'btn restart';
+    const restart = btn('↻ Gerar novo mundo', P, () => this.app.restart({ ...this.app.params, ...this.pendingRestart }));
+    restart.style.marginTop = '10px';
+    restart.className = 'button primary restart';
     restart.style.display = 'none';
-    el('h4', '', P).textContent = 'Visual';
-    const vis = el('div', '', P);
+    const visBox = el('details', 'settings', P);
+    visBox.setAttribute('open', '');
+    el('summary', '', visBox).textContent = 'Visual';
+    const vis = el('div', '', visBox);
     const tilt = el('div', 'param', vis);
     tilt.innerHTML = '<label><span>Tilt-shift (diorama)</span></label>';
     const tr = el('input', '', tilt) as HTMLInputElement;
@@ -88,14 +95,12 @@ export class ParamsPanel {
     const qs = el('select', '', q) as HTMLSelectElement;
     for (const k of ['baixa', 'média', 'alta']) { const o = document.createElement('option'); o.value = k; o.textContent = k; if (k === this.app.rig.quality) o.selected = true; qs.appendChild(o); }
     qs.onchange = () => this.app.rig.setQuality(qs.value as 'baixa');
-    el('h4', '', P).textContent = 'Demanda (RCI)';
-    this.demand = el('div', '', P);
   }
 
   private set(key: keyof SimParams, v: number | string) {
     if (RESTART_KEYS.includes(key)) {
       (this.pendingRestart as Record<string, unknown>)[key] = v;
-      (this.panel.querySelector('.restart') as HTMLElement).style.display = 'block';
+      (this.panel.querySelector('.restart') as HTMLElement).style.display = 'flex';
       return;
     }
     (this.app.params as unknown as Record<string, unknown>)[key] = v;
@@ -115,14 +120,8 @@ export class ParamsPanel {
     Object.assign(this.app.params, live);
     this.app.send({ type: 'params', params: live });
     this.build();
-    this.panel.classList.add('open');
     this.app.hud.toast(`Preset aplicado: ${name}`);
   }
 
-  onStats(s: Stats) {
-    if (!this.demand) return;
-    const bar = (l: string, v: number, c: string) => `<div class="term"><span>${l}</span><div class="tb"><i style="${v >= 0 ? `left:50%;width:${Math.min(50, v * 1.5)}%` : `left:${50 - Math.min(50, -v * 1.5)}%;width:${Math.min(50, -v * 1.5)}%`};background:${c}"></i></div><span class="v">${v.toFixed(0)}</span></div>`;
-    this.demand.innerHTML = bar('Residencial', s.demand.res, '#5fd38a') + bar('Comercial', s.demand.com, '#54a0ff') + bar('Industrial', s.demand.ind, '#f2b705') + bar('Escritórios', s.demand.off, '#c56cf0');
-  }
 }
 const fmtV = (v: number) => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2));

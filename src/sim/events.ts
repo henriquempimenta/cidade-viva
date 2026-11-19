@@ -6,12 +6,15 @@ export class EventBus {
   pending: SimEvent[] = [];
   chronicle: SimEvent[] = [];
   counts = new Map<string, number>();
+  /** optional tap (tests, tools) */
+  onEmit: ((e: SimEvent) => void) | null = null;
   constructor(private clock: () => { t: number; day: number }) {}
 
   emit(type: string, x: number, z: number, mag: number, text: string, extra: Partial<SimEvent> = {}): SimEvent {
     const c = this.clock();
     const ev: SimEvent = { id: this.nextId++, type, t: c.t, day: c.day, x, z, mag, text, ...extra };
     this.pending.push(ev);
+    this.onEmit?.(ev);
     this.counts.set(type, (this.counts.get(type) ?? 0) + 1);
     if (ev.headline) {
       this.chronicle.push(ev);

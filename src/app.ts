@@ -118,6 +118,7 @@ export class App {
     this.trees = new TreesView(init.trees);
     scene.add(this.trees.group);
     this.roads = new RoadsLayer();
+    this.roads.ground = (x, z) => this.terrain.heightAt(x, z);
     scene.add(this.roads.group);
     this.rail = new RailLayer();
     scene.add(this.rail.group);
@@ -227,7 +228,8 @@ export class App {
       this.director.push(ev);
       this.effects.onEvent(ev);
       this.audio.onEvent(ev);
-      if (ev.headline) { this.chronicle.push(ev); this.hud.addChronicle(ev); }
+      if (ev.headline) this.chronicle.push(ev);
+      this.hud.addEvent(ev);
       if (ev.type === 'era' || ev.type === 'landmark' || ev.type === 'district') this.hud.toast(ev.text);
     }
   }
@@ -393,7 +395,7 @@ export class App {
     this.smoke.update(dt, -0.05, 0.05);
     this.glow.update(dt, 2, 0.3);
     this.dust.update(dt, 0.2, 0.6);
-    const scale = window.innerHeight / (2 * Math.tan((cam.fov * Math.PI) / 360));
+    const scale = this.canvas.clientHeight / (2 * Math.tan((cam.fov * Math.PI) / 360));
     this.smoke.setScale(scale); this.glow.setScale(scale); this.dust.setScale(scale);
     this.audio.update(cam.position, this);
     this.hud.frame(dt);
@@ -430,4 +432,60 @@ export class App {
   }
 
   maxVehicles() { return MAX_VEHICLES; }
+
+  /** zoom buttons: dolly toward/away from the current focus in any mode */
+  zoom(f: number) {
+    if (this.mode !== 'free') this.enterFree(true);
+    const cam = this.rig.camera, t = this.controls.target;
+    const d = cam.position.clone().sub(t).multiplyScalar(f);
+    if (d.length() < 15) d.setLength(15);
+    if (d.length() > 3500) d.setLength(3500);
+    cam.position.copy(t).add(d);
+    this.lastInput = performance.now();
+  }
+
+  /** "Seguir cidadão": pick someone visible on the street near the camera */
+  followSomeone() {
+    const c = this.curSnap;
+    if (!c) return;
+    const cam = this.rig.camera.position;
+    let best = -1, bd = Infinity;
+    const ped = c.ped;
+    for (let i = 0; i < ped.length / 7; i++) {
+      const o = i * 7;
+      if (!(ped[o + 4] >= 0) || ped[o + 6] < 0) continue;
+      const d = Math.hypot(ped[o] - cam.x, ped[o + 2] - cam.z);
+      if (d < bd) { bd = d; best = ped[o + 6]; }
+    }
+    if (best < 0) for (let i = 0; i < c.veh.length / 9; i++) { const o = i * 9; if (c.veh[o + 4] && c.veh[o + 8] >= 0) { best = c.veh[o + 8]; break; } }
+    if (best < 0) { this.hud.toast('Ninguém nas ruas por perto agora — tente de novo em instantes'); return; }
+    this.hud.inspector.showCitizen(best);
+    this.followEntity({ kind: 'citizen', id: best });
+  }
+
+  /** chronicle click: the director cuts to the story */
+  showEvent(ev: SimEvent) {
+    if (this.mode !== 'auto' && this.mode !== 'cinematic') this.setMode('auto');
+    this.director.feature(ev);
+  }
+
+  lookAtBuilding(id: number) {
+    const b = this.buildings.get(id);
+    if (!b) return;
+    this.enterFree(true);
+    this.controls.target.set(b.x, b.y + b.height * 0.4, b.z);
+    const r = Math.max(70, b.height * 2.4);
+    this.rig.camera.position.set(b.x + r, b.y + b.height + r * 0.55, b.z + r * 0.8);
+    this.lastInput = performance.now();
+  }
+
+  /** "Ouvir este trecho": drop the camera to the curb and switch the ambience on */
+  listenAt(m: { x: number; y: number; z: number; hx: number; hz: number }) {
+    this.enterFree(true);
+    const l = Math.hypot(m.hx, m.hz) || 1, nx = -m.hz / l, nz = m.hx / l;
+    this.controls.target.set(m.x, m.y + 1.5, m.z);
+    this.rig.camera.position.set(m.x + nx * 16 + (m.hx / l) * 10, m.y + 4.5, m.z + nz * 16 + (m.hz / l) * 10);
+    this.lastInput = performance.now() + 20000; // stay here a while before the director resumes
+    if (!this.audio.enabled) { this.audio.toggle?.(); document.querySelector('.scene-tools .icon-button')?.classList.add('active'); this.hud.toast('Áudio ambiente ligado — ouvindo o trecho'); }
+  }
 }

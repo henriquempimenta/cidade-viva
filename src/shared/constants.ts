@@ -7,9 +7,9 @@ export const DAYS_PER_SEASON = 3;
 export const DAYS_PER_YEAR = DAYS_PER_SEASON * 4;
 export const SEASONS = ['Primavera', 'Verão', 'Outono', 'Inverno'] as const;
 
-export const MAX_VEHICLES = 3200;
-export const MAX_PEDS = 5000;
-export const MAX_CITIZENS = 14000;
+export const MAX_VEHICLES = 1024; // initial storage only — grows on demand
+export const MAX_PEDS = 2048; // initial storage only — grows on demand
+export const MAX_CITIZENS = 4096; // initial storage only — grows on demand
 export const MAX_TRAIN_CARS = 400;
 
 export const FIELD_CELL = 25; // meters per heatmap cell

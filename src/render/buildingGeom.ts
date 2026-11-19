@@ -45,10 +45,34 @@ export function buildingGeometry(b: BuildingView): BuildResult {
     case 'ind': industry(ctx); break;
     default: publicB(ctx); break;
   }
-  if (b.abandoned) {
+  const decay = b.decay ?? 0;
+  if (b.abandoned || decay > 0) {
+    // neglect: grime and desaturation first, then moss creeping up from the ground, broken windows,
+    // and in the last stage the top storeys crumble (vertices above a ragged line sink)
+    const col = g.col, pos = g.pos;
+    const grime = b.abandoned ? 0.55 + decay * 0.3 : decay * 0.5;
+    const H = Math.max(3, b.height);
+    for (let i = 0; i < col.length; i += 3) {
+      const l = (col[i] + col[i + 1] + col[i + 2]) / 3;
+      const keep = 1 - grime;
+      col[i] = col[i] * keep + l * 0.82 * grime; col[i + 1] = col[i + 1] * keep + l * 0.8 * grime; col[i + 2] = col[i + 2] * keep + l * 0.72 * grime;
+      const y = pos[i + 1] - b.y;
+      const moss = decay > 0.2 ? Math.max(0, 1 - y / (1.5 + decay * H * 0.6)) * (decay - 0.2) * 1.2 : 0;
+      if (moss > 0) { col[i] = col[i] * (1 - moss) + 0.27 * moss; col[i + 1] = col[i + 1] * (1 - moss) + 0.38 * moss; col[i + 2] = col[i + 2] * (1 - moss) + 0.18 * moss; }
+    }
+    if (b.abandoned || decay >= 0.5) for (let i = 3; i < g.win.length; i += 4) if (g.win[i] > 0 && g.win[i] < 6 && (b.abandoned || ((i * 2654435761) >>> 0) % 3 === 0)) g.win[i] = 5;
+    if (decay >= 0.75) {
+      for (let i = 0; i < pos.length; i += 3) {
+        const y = pos[i + 1] - b.y;
+        const ragged = H * (0.62 + 0.18 * Math.sin(pos[i] * 0.9 + pos[i + 2] * 1.3 + b.seed));
+        if (y > ragged) pos[i + 1] = b.y + ragged + (y - ragged) * 0.15;
+      }
+    }
+  }
+  if (b.squatted) {
+    // improvised life: patched colours on the facade
     const col = g.col;
-    for (let i = 0; i < col.length; i += 3) { const l = (col[i] + col[i + 1] + col[i + 2]) / 3; col[i] = col[i] * 0.4 + l * 0.35; col[i + 1] = col[i + 1] * 0.4 + l * 0.33; col[i + 2] = col[i + 2] * 0.4 + l * 0.3; }
-    for (let i = 3; i < g.win.length; i += 4) if (g.win[i] > 0 && g.win[i] < 6) g.win[i] = 5;
+    for (let i = 0; i < col.length; i += 9) { const h = ((i * 40503) >>> 0) % 5; if (h === 0) { col[i] = 0.7; col[i + 1] = 0.35; col[i + 2] = 0.25; } else if (h === 1) { col[i] = 0.3; col[i + 1] = 0.45; col[i + 2] = 0.6; } }
   }
   return { geo: g.toGeometry(), smoke: toWorld(b, smoke), blades: toWorldBlades(b, blades), lights: toWorld(b, lights) };
 }

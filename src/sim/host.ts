@@ -17,6 +17,7 @@ export class SimHost {
   private simAccum = 0;
   private realAccum = 0;
   speedActual = 0;
+  stalls = 0;
   camera = { x: 0, z: 0, h: 300 };
 
   constructor(public world: World, private post: (m: FromWorker, t?: Transferable[]) => void) {}
@@ -41,6 +42,8 @@ export class SimHost {
     const t0 = performance.now();
     let simulated = 0;
     while (this.debt >= MOTION_DT && performance.now() - t0 < 12) {
+      // routing threads still working on the batch due next step: wait for them (keeps determinism)
+      if (!this.world.roads.routingReady()) { this.stalls++; break; }
       this.world.step(MOTION_DT);
       this.debt -= MOTION_DT;
       simulated += MOTION_DT;
@@ -57,7 +60,7 @@ export class SimHost {
     if (now - this.lastDiff > 120) {
       this.lastDiff = now;
       const d = this.world.collectDiff();
-      if (now - this.lastStats > 500) { this.lastStats = now; d.stats = buildStats(this.world, this.speedActual); }
+      if (now - this.lastStats > 500) { this.lastStats = now; d.stats = buildStats(this.world, this.speedActual); d.stats.threads = 1 + this.world.roads.backend.threads; d.stats.stalls = this.stalls; }
       if (now - this.lastField > 1500) {
         this.lastField = now;
         const fp = fieldPayload(this.world, this.overlay);

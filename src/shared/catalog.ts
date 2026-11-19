@@ -11,7 +11,7 @@ export const FIELD_NAMES = [
   'landValue', 'airPollution', 'waterPollution', 'soilPollution', 'noise', 'crime', 'accessibility',
   'beauty', 'tourism', 'cov_health', 'cov_education', 'cov_police', 'cov_fire', 'cov_parks', 'cov_culture',
   'happiness', 'resDensity', 'jobDensity', 'transit', 'railAccess', 'highwayAccess', 'footfall', 'complaint',
-  'power', 'waterSupply', 'garbage', 'elevation', 'congestion',
+  'power', 'waterSupply', 'garbage', 'elevation', 'congestion', 'corruption',
 ] as const;
 export type FieldName = (typeof FIELD_NAMES)[number];
 export const FIELD_INDEX: Record<FieldName, number> = Object.fromEntries(FIELD_NAMES.map((n, i) => [n, i])) as Record<FieldName, number>;
@@ -24,7 +24,7 @@ export const FIELD_LABELS: Partial<Record<FieldName, string>> = {
   cov_parks: 'Parques', cov_culture: 'Cultura e lazer', happiness: 'Felicidade', resDensity: 'Densidade residencial',
   jobDensity: 'Densidade de empregos', transit: 'Acesso a transporte público', railAccess: 'Acesso ferroviário',
   highwayAccess: 'Acesso rodoviário', footfall: 'Fluxo de pedestres', complaint: 'Potencial de reclamação',
-  power: 'Energia', waterSupply: 'Água', garbage: 'Lixo acumulado', elevation: 'Altitude', congestion: 'Congestionamento',
+  power: 'Energia', waterSupply: 'Água', garbage: 'Lixo acumulado', elevation: 'Altitude', congestion: 'Congestionamento', corruption: 'Corrupção local',
 };
 
 export interface ServiceDef { type: 'health' | 'education' | 'police' | 'fire' | 'parks' | 'culture'; radius: number; capacity: number }

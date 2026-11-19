@@ -27,7 +27,15 @@ export class CityHall {
   log: CityHallLog[] = [];
   lastCrimeReaction = -10;
   queue: string[] = [];
+  /** money in/out, newest first (shown in the Prefeitura tab) */
+  ledger: { day: number; text: string; value: number }[] = [];
+  breakdown = { taxes: 0, tariffs: 0, transfers: 0, tourism: 0, upkeep: 0, roads: 0, staff: 0, transit: 0, interest: 0 };
   constructor(private w: World) {}
+
+  book(text: string, value: number) {
+    this.ledger.unshift({ day: this.w.day, text, value: Math.round(value) });
+    if (this.ledger.length > 40) this.ledger.pop();
+  }
 
   get money() { return this.w.budget.money; }
 
@@ -36,10 +44,11 @@ export class CityHall {
     const w = this.w, B = w.budget, p = w.params;
     let maint = 0;
     for (const b of w.buildings.list) if (b.def.public && b.state === 'done') maint += b.def.maint * 6;
+    const upkeep = maint;
     let roadKm = 0;
     for (const e of w.roads.edges) if (e.alive && e.progress >= 1) roadKm += e.len / 1000;
-    maint += roadKm * (10 + w.era * 6) + w.population * (0.9 + w.era * 0.45);
-    maint += (w.transitCost?.() ?? 0);
+    const roads = roadKm * (10 + w.era * 6), staff = w.population * (0.9 + w.era * 0.45), transit = (w.transitCost?.() ?? 0);
+    maint += roads + staff + transit;
     const tariffs = w.population * 0.35 * w.economy.priceIndex; // water/power/garbage fees
     const transfers = (250 + w.population * 0.25) * p.budgetMult; // state & federal transfers
     const municipalTax = w.population * p.taxRate * 18 * w.economy.priceIndex; // IPTU/ISS-like, bounded per capita
@@ -47,14 +56,19 @@ export class CityHall {
     const interest = B.debt * 0.004;
     B.income = income; B.expenses = maint + interest;
     B.money += income - maint - interest;
+    const tourism = w.tourismTax?.() ?? 0;
+    this.breakdown = { taxes: municipalTax * p.budgetMult, tariffs, transfers, tourism, upkeep, roads, staff, transit, interest };
+    this.book('Resultado do dia (receitas − custeio)', income - maint - interest);
     // loans: take when broke and critical needs exist, repay when rich
     if (B.money < -500 && B.debt < 8000 + w.population * 3) {
       const loan = 4000 + w.population;
       B.debt += loan; B.money += loan;
+      this.book('Empréstimo contratado', loan);
       w.events.emit('loan', w.center.x, w.center.z, 0.3, `Prefeitura contrai empréstimo de $${Math.round(loan).toLocaleString('pt-BR')}`, { headline: w.rng.chance(0.4) ? 'Prefeitura recorre a empréstimo para manter investimentos' : undefined });
     } else if (B.money > 20000 && B.debt > 0) {
       const pay = Math.min(B.debt, B.money - 15000);
       B.debt -= pay; B.money -= pay;
+      if (pay > 0) this.book('Amortização da dívida', -pay);
     }
   }
 
@@ -72,8 +86,14 @@ export class CityHall {
     for (const pr of projects) {
       if (active >= maxWorks) { rejected.push(`${pr.label} (limite de obras simultâneas)`); continue; }
       if (pr.cost > budget && !(pr.critical && pr.cost < budget + 6000)) { rejected.push(`${pr.label} (sem orçamento: $${Math.round(pr.cost)})`); continue; }
-      const ok = pr.run ? pr.run() : !!this.build(pr);
-      if (ok) { budget -= pr.cost; w.budget.money -= pr.cost; chosen.push(`${pr.label} — ${pr.motive}`); active++; }
+      const built = pr.run ? null : this.build(pr);
+      const ok = pr.run ? pr.run() : !!built;
+      if (ok) {
+        budget -= pr.cost; w.budget.money -= pr.cost; chosen.push(`${pr.label} — ${pr.motive}`); active++; this.book(pr.label, -pr.cost);
+        const leak = w.integrity?.divert(pr.label, pr.cost) ?? 0;
+        w.budget.money -= leak;
+        if (built) w.integrity?.maybeStall(built);
+      }
       else rejected.push(`${pr.label} (sem local viável)`);
     }
     this.log.push({ day: w.day, chosen, rejected: rejected.slice(0, 8), money: w.budget.money });

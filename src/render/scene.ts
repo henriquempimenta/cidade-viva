@@ -31,6 +31,17 @@ const TiltShift = {
     }`,
 };
 
+const Sanitize = {
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; varying vec2 vUv;
+    void main(){
+      vec4 c = texture2D(tDiffuse, vUv);
+      if (any(isnan(c))) c = vec4(0.0, 0.0, 0.0, 1.0); // +Inf is handled by the clamp below
+      gl_FragColor = vec4(clamp(c.rgb, 0.0, 48.0), clamp(c.a, 0.0, 1.0));
+    }`,
+};
+
 export class SceneRig {
   renderer: THREE.WebGLRenderer;
   scene = new THREE.Scene();
@@ -42,6 +53,7 @@ export class SceneRig {
   sky: Sky;
   stars: THREE.Points;
   bloom: UnrealBloomPass;
+  sanitize: ShaderPass;
   tilt: ShaderPass;
   gtao: GTAOPass | null = null;
   bokeh: BokehPass;
@@ -53,13 +65,13 @@ export class SceneRig {
   constructor(canvas: HTMLCanvasElement, private mapSize: number) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.setSize(canvas.clientWidth || window.innerWidth, canvas.clientHeight || window.innerHeight, false);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 0.9;
     this.renderer.localClippingEnabled = true;
-    this.camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 1.5, 14000);
+    this.camera = new THREE.PerspectiveCamera(42, (canvas.clientWidth || 16) / (canvas.clientHeight || 9), 1.5, 14000);
     this.scene.fog = new THREE.FogExp2(0xb8cde0, 0.00028);
     U.uMapSize.value = mapSize;
 
@@ -111,7 +123,12 @@ export class SceneRig {
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.5, 0.6, 0.82);
+    // HDR guard: the sky's sun disc and specular glints can exceed half-float range (Inf) and
+    // a single NaN/Inf pixel is smeared by the bloom mip chain into large black squares.
+    // Clamp and scrub the HDR buffer before any post effect reads it.
+    this.sanitize = new ShaderPass(Sanitize);
+    this.composer.addPass(this.sanitize);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(canvas.clientWidth || 800, canvas.clientHeight || 600), 0.5, 0.6, 0.82);
     this.composer.addPass(this.bloom);
     this.bokeh = new BokehPass(this.scene, this.camera, { focus: 300, aperture: 0.00012, maxblur: 0.006 });
     this.bokeh.enabled = false;
@@ -120,6 +137,8 @@ export class SceneRig {
     this.tilt = new ShaderPass(TiltShift);
     this.composer.addPass(this.tilt);
     this.resize();
+    // the viewer is a panel inside the page, not the window
+    new ResizeObserver(() => this.resize()).observe(canvas.parentElement ?? canvas);
     window.addEventListener('resize', () => this.resize());
   }
 
@@ -131,7 +150,7 @@ export class SceneRig {
     this.sun.shadow.map = null;
     this.renderer.setPixelRatio(q === 'baixa' ? 1 : Math.min(window.devicePixelRatio, q === 'alta' ? 2 : 1.5));
     if (q === 'alta' && !this.gtao) {
-      this.gtao = new GTAOPass(this.scene, this.camera, window.innerWidth, window.innerHeight);
+      this.gtao = new GTAOPass(this.scene, this.camera, this.renderer.domElement.clientWidth, this.renderer.domElement.clientHeight);
       this.gtao.blendIntensity = 0.7;
       this.composer.insertPass(this.gtao, 1);
     }
@@ -141,10 +160,11 @@ export class SceneRig {
   }
 
   resize() {
-    const w = window.innerWidth, h = window.innerHeight;
+    const c = this.renderer.domElement;
+    const w = Math.max(64, c.clientWidth), h = Math.max(64, c.clientHeight);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(w, h);
+    this.renderer.setSize(w, h, false);
     this.composer.setSize(w, h);
     (this.tilt.uniforms.uRes.value as THREE.Vector2).set(w, h);
   }
@@ -193,7 +213,19 @@ export class SceneRig {
     this.bloom.threshold = 0.85 - 0.25 * this.night;
     // clouds drift with the wind
     const cm = (this.clouds.children[0]?.children[0] as THREE.Mesh)?.material as THREE.MeshStandardMaterial;
-    if (cm) { cm.opacity = 0.6 + rain * 0.35; cm.color.setScalar(0.95 - rain * 0.5).multiplyScalar(0.4 + 0.6 * day); }
+    if (cm) {
+      // clouds never go darker than the sky behind them: at night an unlit flat-shaded
+      // icosahedron reads as a black block in front of the city, so they glow with the
+      // fog colour and thin out instead
+      cm.opacity = (0.6 + rain * 0.35) * (0.35 + 0.65 * day);
+      cm.color.setScalar(0.95 - rain * 0.5).multiplyScalar(0.5 + 0.5 * day);
+      cm.emissive.copy(this.fogColor).multiplyScalar(0.55 + 0.35 * (1 - day));
+    }
+    const cp = this.camera.position;
+    for (const c of this.clouds.children) {
+      const d = Math.hypot(c.position.x - cp.x, c.position.y - cp.y, c.position.z - cp.z);
+      c.visible = d > 260; // never let a cloud fill the frame
+    }
     for (const c of this.clouds.children) {
       c.position.x += dt * (6 + U.uWind.value * 10);
       if (c.position.x > this.mapSize * 1.4) c.position.x = -this.mapSize * 0.4;

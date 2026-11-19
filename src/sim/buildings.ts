@@ -44,6 +44,16 @@ export interface Building {
   alive: boolean;
   abandoned: boolean;
   abandonedDays: number;
+  /** years of neglect, 0..1 (1 = about to collapse) */
+  decay: number;
+  /** abandoned since (game day) */
+  abandonedDay: number;
+  /** occupied by squatters */
+  squatted: boolean;
+  /** public works frozen until this day (−1 = running) */
+  stalledUntil: number;
+  /** consecutive days without any household (residential) */
+  emptyDays: number;
   fire: number;
   garbage: number;
   name: string;
@@ -101,6 +111,8 @@ export class Buildings {
   removed: number[] = [];
   treesRemoved: number[] = [];
   underConstruction = new Set<number>();
+  /** buildings currently being torn down (avoids scanning the whole city every step) */
+  demolishing: Building[] = [];
 
   constructor(private occ: Occupancy, private terrain: Terrain, private rng: RNG) {}
 
@@ -115,7 +127,7 @@ export class Buildings {
       floors, height: floors * floorHeight(kind) + (def.cat === 'ind' ? 2 : 0.6), era: opts.era, seed: this.rng.int(0, 1e9),
       state: opts.instant ? 'done' : 'site', progress: opts.instant ? 1 : 0,
       buildSecs: Math.max(0.15, def.buildDays * (0.6 + 0.12 * floors) ) * DAY_SECONDS * 0.5,
-      edge: c.edge, edgeT: c.t, side: c.side, access: c.access, alive: true, abandoned: false, abandonedDays: 0, fire: 0, garbage: 0,
+      edge: c.edge, edgeT: c.t, side: c.side, access: c.access, alive: true, abandoned: false, abandonedDays: 0, decay: 0, abandonedDay: -1, squatted: false, stalledUntil: -1, emptyDays: 0, fire: 0, garbage: 0,
       name: this.nameFor(kind), variant: opts.variant ?? 0, heritage: false, builtDay: opts.day,
       hhCap: 0, households: [], jobCap: [0, 0, 0, 0], workers: [], students: [],
       profit: 0, revenue: 0, customers: 0, badDays: 0, stockIn: 0, stockOut: 0,
@@ -206,6 +218,7 @@ export class Buildings {
     if (b.state === 'demolishing') return;
     b.state = 'demolishing';
     b.progress = 0;
+    this.demolishing.push(b);
     this.underConstruction.delete(b.id);
     this.dirty.add(b.id);
   }
@@ -229,7 +242,7 @@ export class Buildings {
     return {
       id: b.id, kind: b.kind, level: b.level, wealth: b.wealth, x: b.x, z: b.z, y: b.y, angle: b.angle, w: b.w, d: b.d,
       floors: b.floors, height: b.height, era: b.era, seed: b.seed, state: b.state, progress: b.progress,
-      abandoned: b.abandoned, fire: b.fire, name: b.name, variant: b.variant, heritage: b.heritage, garbage: b.garbage,
+      abandoned: b.abandoned, decay: Math.floor(b.decay * 4) / 4, stalled: b.stalledUntil >= 0, squatted: b.squatted, fire: b.fire, name: b.name, variant: b.variant, heritage: b.heritage, garbage: b.garbage,
     };
   }
 }

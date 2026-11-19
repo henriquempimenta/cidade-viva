@@ -10,7 +10,7 @@ import type { RoadNetwork } from './roads';
 import type { Terrain } from './terrain';
 
 export const TERM_LABELS: Record<string, string> = {
-  access: 'Acessibilidade', beauty: 'Paisagem / vista', air: 'Poluição do ar', noise: 'Ruído', crime: 'Criminalidade',
+  permit: 'Licença facilitada (corrupção)', access: 'Acessibilidade', beauty: 'Paisagem / vista', air: 'Poluição do ar', noise: 'Ruído', crime: 'Criminalidade',
   services: 'Serviços públicos', parks: 'Parques próximos', transit: 'Transporte público', footfall: 'Fluxo de pessoas',
   resDensity: 'Clientes / moradores próximos', labor: 'Mão de obra próxima', highway: 'Acesso rodoviário', rail: 'Acesso ferroviário',
   landCost: 'Custo do terreno', connCost: 'Custo de conexão (via, água, energia)', nimby: 'Rejeição dos vizinhos',
@@ -24,6 +24,8 @@ export interface SiteContext {
   terrain: Terrain; roads: RoadNetwork; occ: Occupancy; fields: Fields; rng: RNG; params: SimParams;
   center: { x: number; z: number };
   cityRadius: number;
+  /** corruption at a location: share of the neighbours' rejection that gets waved through */
+  bribe?: (x: number, z: number) => number;
 }
 
 /** Sample candidate lots along usable roads (and optionally off the network). */
@@ -165,6 +167,12 @@ export function evaluate(ctx: SiteContext, c: Candidate, kind: string, prof: Pro
     const v = wgt * raw[k];
     terms[k] = v;
     total += v;
+  }
+  // eased permits: in captured districts the neighbours' objection is partly bought off.
+  // Shown as its own (positive) term so "Por que aqui?" exposes it.
+  if (terms.nimby !== undefined && terms.nimby < -0.01 && ctx.bribe) {
+    const b = ctx.bribe(x, z);
+    if (b > 0.02) { const t = -terms.nimby * b; terms.permit = t; total += t; }
   }
   c.total = total;
   c.terms = terms;

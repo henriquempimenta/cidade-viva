@@ -36,6 +36,8 @@ const BASE: Record<string, { shot: ShotType; w: number }> = {
   bankruptcy: { shot: 'orbit', w: 0.6 }, landmark: { shot: 'reveal', w: 2.0 }, stadium_game: { shot: 'establishing', w: 1.3 }, storm: { shot: 'establishing', w: 1.2 },
   epidemic: { shot: 'establishing', w: 1.0 }, immigration: { shot: 'chase', w: 0.9 }, megafactory: { shot: 'crane', w: 1.5 }, crisis: { shot: 'establishing', w: 1.1 },
   power_line: { shot: 'flyover', w: 0.8 }, rail_build: { shot: 'travelling', w: 1.1 }, bus_line: { shot: 'chase', w: 1.0 }, city_hall: { shot: 'orbit', w: 0.7 },
+  collapse: { shot: 'orbit', w: 2.1 }, occupation: { shot: 'orbit', w: 1.0 }, investigation: { shot: 'establishing', w: 1.3 }, election: { shot: 'reveal', w: 1.5 },
+  mayor: { shot: 'orbit', w: 1.0 }, works_stalled: { shot: 'crane', w: 1.1 }, works_resumed: { shot: 'crane', w: 1.2 }, expropriation: { shot: 'orbit', w: 0.8 }, abandoned: { shot: 'orbit', w: 0.45 },
   outbreak: { shot: 'orbit', w: 0.8 }, accident: { shot: 'orbit', w: 0.8 }, police_station: { shot: 'orbit', w: 1.1 },
 };
 
@@ -135,6 +137,12 @@ export class Director {
   private shotInvalid(s: Shot): boolean {
     if (s.type === 'chase' || s.type === 'shoulder') return this.subjectPos(s) === null && s.t > 1.5;
     return false;
+  }
+
+  /** cut to a specific story now (chronicle click) */
+  feature(ev: SimEvent) {
+    this.cands = this.cands.filter((c) => c.ev.id !== ev.id);
+    this.start(this.makeShot(ev));
   }
 
   takeOver(p: Pose) {

@@ -22,43 +22,43 @@ export const ST_IN = 0, ST_WALK = 1, ST_CAR = 2, ST_TRANSIT = 3, ST_VIRTUAL = 4,
 export interface Household { id: number; members: number[]; home: number; car: boolean; wealth: number; money: number; movedDay: number; searching: boolean; unhappyDays: number; tourist: boolean; leaveDay: number }
 
 export class Citizens {
-  readonly max = MAX_CITIZENS;
-  alive = new Uint8Array(MAX_CITIZENS);
-  age = new Float32Array(MAX_CITIZENS);
-  sex = new Uint8Array(MAX_CITIZENS);
-  hh = new Int32Array(MAX_CITIZENS);
-  edu = new Uint8Array(MAX_CITIZENS);
-  studying = new Uint8Array(MAX_CITIZENS); // 0 no,1 daycare,2 school,3 high,4 university
-  school = new Int32Array(MAX_CITIZENS).fill(-1);
-  job = new Int32Array(MAX_CITIZENS).fill(-1);
-  jobEdu = new Uint8Array(MAX_CITIZENS);
-  income = new Float32Array(MAX_CITIZENS);
-  money = new Float32Array(MAX_CITIZENS);
-  health = new Float32Array(MAX_CITIZENS);
-  traits = new Uint8Array(MAX_CITIZENS);
-  needs = new Float32Array(MAX_CITIZENS * 8);
-  state = new Uint8Array(MAX_CITIZENS);
-  loc = new Int32Array(MAX_CITIZENS).fill(-1);
-  act = new Uint8Array(MAX_CITIZENS);
-  actUntil = new Float32Array(MAX_CITIZENS);
-  lastUpd = new Float32Array(MAX_CITIZENS);
-  slot = new Int32Array(MAX_CITIZENS).fill(-1);
-  tripDest = new Int32Array(MAX_CITIZENS).fill(-1);
-  tripAct = new Uint8Array(MAX_CITIZENS);
-  tripDur = new Float32Array(MAX_CITIZENS);
-  tripMode = new Uint8Array(MAX_CITIZENS);
-  first = new Uint16Array(MAX_CITIZENS);
-  last = new Uint16Array(MAX_CITIZENS);
-  birthYear = new Int16Array(MAX_CITIZENS);
-  partner = new Int32Array(MAX_CITIZENS).fill(-1);
-  happiness = new Float32Array(MAX_CITIZENS);
-  shiftStart = new Float32Array(MAX_CITIZENS);
-  workedDay = new Int32Array(MAX_CITIZENS).fill(-1);
-  friends = new Int32Array(MAX_CITIZENS * 3).fill(-1);
-  tourist = new Uint8Array(MAX_CITIZENS);
+  max = 0;
+  alive = new Uint8Array(0);
+  age = new Float32Array(0);
+  sex = new Uint8Array(0);
+  hh = new Int32Array(0);
+  edu = new Uint8Array(0);
+  studying = new Uint8Array(0); // 0 no,1 daycare,2 school,3 high,4 university
+  school = new Int32Array(0);
+  job = new Int32Array(0);
+  jobEdu = new Uint8Array(0);
+  income = new Float32Array(0);
+  money = new Float32Array(0);
+  health = new Float32Array(0);
+  traits = new Uint8Array(0);
+  needs = new Float32Array(0);
+  state = new Uint8Array(0);
+  loc = new Int32Array(0);
+  act = new Uint8Array(0);
+  actUntil = new Float32Array(0);
+  lastUpd = new Float32Array(0);
+  slot = new Int32Array(0);
+  tripDest = new Int32Array(0);
+  tripAct = new Uint8Array(0);
+  tripDur = new Float32Array(0);
+  tripMode = new Uint8Array(0);
+  first = new Uint16Array(0);
+  last = new Uint16Array(0);
+  birthYear = new Int16Array(0);
+  partner = new Int32Array(0);
+  happiness = new Float32Array(0);
+  shiftStart = new Float32Array(0);
+  workedDay = new Int32Array(0);
+  friends = new Int32Array(0);
+  tourist = new Uint8Array(0);
   modeCount = [0, 0, 0, 0, 0];
-  bio: { year: number; text: string }[][] = new Array(MAX_CITIZENS);
-  agenda: { h: number; act: Act; done: boolean }[][] = new Array(MAX_CITIZENS);
+  bio: { year: number; text: string }[][] = [];
+  agenda: { h: number; act: Act; done: boolean }[][] = [];
   households = new Map<number, Household>();
   private nextHH = 1;
   private free: number[] = [];
@@ -68,8 +68,48 @@ export class Citizens {
   deathsToday = 0;
   birthsToday = 0;
 
-  constructor(private w: World) {
-    for (let i = MAX_CITIZENS - 1; i >= 0; i--) this.free.push(i);
+  constructor(private w: World) { this.grow(MAX_CITIZENS); }
+
+  /** population storage grows on demand — there is no hard population cap */
+  private grow(n: number) {
+    const old = this.max;
+    if (n <= old) return;
+    { const b = new Uint8Array(n * 1); b.set(this.alive);  this.alive = b; }
+    { const b = new Float32Array(n * 1); b.set(this.age);  this.age = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.sex);  this.sex = b; }
+    { const b = new Int32Array(n * 1); b.set(this.hh);  this.hh = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.edu);  this.edu = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.studying);  this.studying = b; }
+    { const b = new Int32Array(n * 1); b.set(this.school); b.fill(-1, old * 1); this.school = b; }
+    { const b = new Int32Array(n * 1); b.set(this.job); b.fill(-1, old * 1); this.job = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.jobEdu);  this.jobEdu = b; }
+    { const b = new Float32Array(n * 1); b.set(this.income);  this.income = b; }
+    { const b = new Float32Array(n * 1); b.set(this.money);  this.money = b; }
+    { const b = new Float32Array(n * 1); b.set(this.health);  this.health = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.traits);  this.traits = b; }
+    { const b = new Float32Array(n * 8); b.set(this.needs);  this.needs = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.state);  this.state = b; }
+    { const b = new Int32Array(n * 1); b.set(this.loc); b.fill(-1, old * 1); this.loc = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.act);  this.act = b; }
+    { const b = new Float32Array(n * 1); b.set(this.actUntil);  this.actUntil = b; }
+    { const b = new Float32Array(n * 1); b.set(this.lastUpd);  this.lastUpd = b; }
+    { const b = new Int32Array(n * 1); b.set(this.slot); b.fill(-1, old * 1); this.slot = b; }
+    { const b = new Int32Array(n * 1); b.set(this.tripDest); b.fill(-1, old * 1); this.tripDest = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.tripAct);  this.tripAct = b; }
+    { const b = new Float32Array(n * 1); b.set(this.tripDur);  this.tripDur = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.tripMode);  this.tripMode = b; }
+    { const b = new Uint16Array(n * 1); b.set(this.first);  this.first = b; }
+    { const b = new Uint16Array(n * 1); b.set(this.last);  this.last = b; }
+    { const b = new Int16Array(n * 1); b.set(this.birthYear);  this.birthYear = b; }
+    { const b = new Int32Array(n * 1); b.set(this.partner); b.fill(-1, old * 1); this.partner = b; }
+    { const b = new Float32Array(n * 1); b.set(this.happiness);  this.happiness = b; }
+    { const b = new Float32Array(n * 1); b.set(this.shiftStart);  this.shiftStart = b; }
+    { const b = new Int32Array(n * 1); b.set(this.workedDay); b.fill(-1, old * 1); this.workedDay = b; }
+    { const b = new Int32Array(n * 3); b.set(this.friends); b.fill(-1, old * 3); this.friends = b; }
+    { const b = new Uint8Array(n * 1); b.set(this.tourist);  this.tourist = b; }
+    this.bio.length = n; this.agenda.length = n;
+    for (let i = n - 1; i >= old; i--) this.free.push(i);
+    this.max = n;
   }
 
   get rng() { return this.w.rng; }
@@ -82,7 +122,7 @@ export class Citizens {
   }
 
   add(opts: { age: number; sex?: number; edu?: number; last?: number; hh: number; tourist?: boolean; bornHere?: boolean }): number {
-    if (!this.free.length) return -1;
+    if (!this.free.length) this.grow(this.max * 2);
     const i = this.free.pop()!;
     const r = this.rng;
     this.alive[i] = 1;
@@ -159,7 +199,7 @@ export class Citizens {
   createFamily(home: Building, wealth: number, opts: { size?: number; eduBias?: number; arriving?: boolean; fromVillage?: boolean } = {}): Household | null {
     const r = this.rng;
     const size = opts.size ?? r.weighted([1, 2, 3, 4, 5], (n) => [0.25, 0.3, 0.2, 0.18, 0.07][n - 1])!;
-    if (this.free.length < size) return null;
+    if (this.free.length < size) this.grow(this.max * 2 + size);
     const h = this.newHousehold(home.id, wealth);
     h.car = r.next() < [0.25, 0.65, 0.95][wealth] * (this.w.era >= 1 ? 1 : 0.6);
     h.money = [200, 800, 3000][wealth] * r.range(0.5, 1.5);
@@ -639,7 +679,7 @@ export class Citizens {
     const st = this.state[i];
     const s = this.slot[i];
     if (st === ST_CAR && s >= 0 && w.traffic.active[s]) { w.traffic.computePose(s); return { x: w.traffic.x[s], y: w.traffic.y[s], z: w.traffic.z[s], h: w.traffic.h[s], inside: false, building: -1 }; }
-    if (st === ST_WALK && s >= 0 && w.peds.active[s]) return { x: w.peds.x[s], y: Math.max(0.2, w.terrain.heightAt(w.peds.x[s], w.peds.z[s])) + 0.1, z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 };
+    if (st === ST_WALK && s >= 0 && w.peds.active[s]) { w.peds.pose(s); return { x: w.peds.x[s], y: Math.max(0.2, w.terrain.heightAt(w.peds.x[s], w.peds.z[s])) + 0.1, z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     if (st === ST_TRANSIT) { const p = w.transit2?.position(i); if (p) return p; }
     const bid = st === ST_IN ? this.loc[i] : this.tripDest[i];
     const b = w.buildings.byId.get(bid) ?? w.buildings.byId.get(this.households.get(this.hh[i])?.home ?? -1);

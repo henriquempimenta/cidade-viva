@@ -1,10 +1,11 @@
 import { LANE_WIDTH, MAX_VEHICLES, RoadClass, VEH_FLAG_BRAKE, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_FLAG_FULL, VEH_STRIDE, VType, VTYPE_LEN, HOUR_SECONDS } from '../shared/constants';
-import type { RNode, REdge, RoadNetwork } from './roads';
+import { vehicleSound, type RNode, type REdge, type RoadNetwork } from './roads';
 
 export interface Payload { kind: number; id: number; aux: number }
 export const P_CITIZEN = 1, P_SERVICE = 2, P_BUS = 3, P_CARGO = 4, P_CONSTRUCTION = 5, P_TOURBUS = 6, P_FUNERAL = 7, P_GARBAGE = 8, P_MOVING = 9, P_PATROL = 10, P_TAXI = 11;
 
 const IDM_A = 1.6, IDM_B = 2.8, IDM_S0 = 2.2, IDM_T = 1.25;
+const IDM_INV2SQRT = 1 / (2 * Math.sqrt(IDM_A * IDM_B));
 
 export function laneOffset(e: REdge, lane: number): number {
   if (e.oneway) return (lane + 0.5) * LANE_WIDTH - (e.lanes * LANE_WIDTH) / 2;
@@ -14,49 +15,65 @@ export function laneOffset(e: REdge, lane: number): number {
 
 /** Vehicles on the road graph, car-following by the Intelligent Driver Model. */
 export class Traffic {
-  readonly max = MAX_VEHICLES;
-  active = new Uint8Array(MAX_VEHICLES);
-  gen = new Uint16Array(MAX_VEHICLES);
-  type = new Uint8Array(MAX_VEHICLES);
-  edge = new Int32Array(MAX_VEHICLES);
-  dir = new Uint8Array(MAX_VEHICLES);
-  lane = new Uint8Array(MAX_VEHICLES);
-  s = new Float32Array(MAX_VEHICLES);
-  v = new Float32Array(MAX_VEHICLES);
-  v0f = new Float32Array(MAX_VEHICLES);
-  len = new Float32Array(MAX_VEHICLES);
-  lat = new Float32Array(MAX_VEHICLES);
-  stuck = new Float32Array(MAX_VEHICLES);
-  flags = new Uint8Array(MAX_VEHICLES);
-  pidx = new Int32Array(MAX_VEHICLES);
-  destS = new Float32Array(MAX_VEHICLES);
-  jnode = new Int32Array(MAX_VEHICLES);
-  jlen = new Float32Array(MAX_VEHICLES);
-  jp = new Float32Array(MAX_VEHICLES * 6);
-  x = new Float32Array(MAX_VEHICLES); y = new Float32Array(MAX_VEHICLES); z = new Float32Array(MAX_VEHICLES); h = new Float32Array(MAX_VEHICLES);
-  pKind = new Uint8Array(MAX_VEHICLES);
-  pId = new Int32Array(MAX_VEHICLES);
-  pAux = new Int32Array(MAX_VEHICLES);
-  origin = new Int32Array(MAX_VEHICLES);
-  dest = new Int32Array(MAX_VEHICLES);
-  dwell = new Float32Array(MAX_VEHICLES);
-  path: (number[] | null)[] = new Array(MAX_VEHICLES).fill(null);
+  max = 0;
+  active = new Uint8Array(0);
+  gen = new Uint16Array(0);
+  type = new Uint8Array(0);
+  edge = new Int32Array(0);
+  dir = new Uint8Array(0);
+  lane = new Uint8Array(0);
+  s = new Float32Array(0);
+  v = new Float32Array(0);
+  v0f = new Float32Array(0);
+  len = new Float32Array(0);
+  lat = new Float32Array(0);
+  stuck = new Float32Array(0);
+  flags = new Uint8Array(0);
+  pidx = new Int32Array(0);
+  destS = new Float32Array(0);
+  jnode = new Int32Array(0);
+  jlen = new Float32Array(0);
+  jp = new Float32Array(0);
+  x = new Float32Array(0); y = new Float32Array(0); z = new Float32Array(0); h = new Float32Array(0);
+  pKind = new Uint8Array(0);
+  pId = new Int32Array(0);
+  pAux = new Int32Array(0);
+  origin = new Int32Array(0);
+  dest = new Int32Array(0);
+  dwell = new Float32Array(0);
+  path: (number[] | null)[] = [];
   private free: number[] = [];
   count = 0;
   virtualTrips = 0;
   onArrive: (slot: number) => void = () => {};
   onStuck: (slot: number) => void = () => {};
   onStop: (slot: number, node: number) => boolean = () => false; // buses: return true to dwell
-  private lanes = new Map<number, number[]>();
+  private laneArr: number[][] = [];
+  private usedKeys: number[] = [];
   rain = 0;
   /** level crossings closed: edge id -> position t along edge */
   closedCrossings = new Map<number, number[]>();
 
-  constructor(private R: RoadNetwork) {
-    for (let i = MAX_VEHICLES - 1; i >= 0; i--) this.free.push(i);
+  constructor(private R: RoadNetwork) { this.grow(MAX_VEHICLES); }
+
+  /** storage grows on demand: there is no hard cap on simultaneous vehicles */
+  private grow(n: number) {
+    const old = this.max;
+    const self = this as unknown as Record<string, unknown>;
+    for (const k of Object.keys(self)) {
+      const a = self[k];
+      if (!ArrayBuffer.isView(a) || k === 'jp') continue;
+      const C = (a as unknown as { constructor: new (n: number) => Float32Array }).constructor;
+      const b = new C(n); b.set(a as Float32Array); self[k] = b;
+    }
+    const jp = new Float32Array(n * 6); jp.set(this.jp); this.jp = jp;
+    for (let i = old; i < n; i++) this.path.push(null);
+    for (let i = n - 1; i >= old; i--) this.free.push(i);
+    this.max = n;
   }
 
-  get capacityLeft() { return this.free.length; }
+  /** soft budget: physical vehicles are limited by road space, not by a fixed pool */
+  get capacityLeft() { return 1e9; }
 
   trim(e: REdge, nodeId: number): number {
     const n = this.R.nodes[nodeId];
@@ -66,7 +83,8 @@ export class Traffic {
   sEnd(e: REdge, dir: number) { return e.len - this.trim(e, dir === 0 ? e.b : e.a); }
 
   spawn(type: VType, path: number[], startS: number, destS: number, payload: Payload, origin = -1, dest = -1, flags = 0): number {
-    if (!this.free.length || !path.length) return -1;
+    if (!path.length) return -1;
+    if (!this.free.length) this.grow(this.max * 2);
     const de = path[0];
     const e = this.R.edges[de >> 1];
     if (!e || !e.alive) return -1;
@@ -124,18 +142,21 @@ export class Traffic {
   step(dt: number, nodesSignal: (n: RNode, inEdge: REdge, dir: number, distToStop: number, waited: number) => boolean) {
     const R = this.R;
     // 1. lane lists
-    for (const arr of this.lanes.values()) arr.length = 0;
+    const LA = this.laneArr, used = this.usedKeys;
+    for (const k of used) LA[k].length = 0;
+    used.length = 0;
     for (let i = 0; i < this.max; i++) {
       if (!this.active[i]) continue;
       const le = R.edges[this.edge[i]];
       if (le && this.lane[i] >= le.lanes) this.lane[i] = Math.max(0, le.lanes - 1);
       const k = this.key(this.edge[i], this.dir[i], this.lane[i]);
-      let arr = this.lanes.get(k);
-      if (!arr) this.lanes.set(k, (arr = []));
+      let arr = LA[k];
+      if (!arr) LA[k] = arr = [];
+      if (!arr.length) used.push(k);
       arr.push(i);
     }
     const S = this.s;
-    for (const arr of this.lanes.values()) if (arr.length > 1) arr.sort((a, b) => S[a] - S[b]);
+    for (const k of used) { const arr = LA[k]; if (arr.length > 1) arr.sort((a, b) => S[a] - S[b]); }
     for (const e of R.edges) if (e.alive) { e.stopped[0] = 0; e.stopped[1] = 0; }
     // emergency presence per edge-dir for yielding
     const sirens = new Map<number, number>();
@@ -145,7 +166,8 @@ export class Traffic {
     }
     // 2. IDM
     const rainF = 1 - 0.25 * this.rain;
-    for (const [k, arr] of this.lanes) {
+    for (const k of used) {
+      const arr = LA[k];
       if (!arr.length) continue;
       const eid = (k >> 2) >> 1, dir = (k >> 2) & 1;
       const e = R.edges[eid];
@@ -191,7 +213,7 @@ export class Traffic {
             if (ok) {
               // room on next lane? (don't block the box)
               const nl = this.chooseLane(e, dir, ne, nde & 1, i);
-              const narr = this.lanes.get(this.key(ne.id, nde & 1, nl));
+              const narr = this.laneArr[this.key(ne.id, nde & 1, nl)];
               if (narr && narr.length) {
                 const o = narr[0];
                 const room = this.s[o] - this.sStart(ne, nde & 1) - this.len[o];
@@ -212,9 +234,10 @@ export class Traffic {
         }
         const v = this.v[i];
         const dv = v - vl;
-        const sStar = IDM_S0 + Math.max(0, v * IDM_T + (v * dv) / (2 * Math.sqrt(IDM_A * IDM_B)));
+        const sStar = IDM_S0 + Math.max(0, v * IDM_T + (v * dv) * IDM_INV2SQRT);
         const g = Math.max(0.1, gap);
-        let a = IDM_A * (1 - Math.pow(v / Math.max(0.1, v0), 4) - (sStar / g) * (sStar / g));
+        const rv = v / Math.max(0.1, v0), rv2 = rv * rv;
+        let a = IDM_A * (1 - rv2 * rv2 - (sStar / g) * (sStar / g));
         if (a < -9) a = -9;
         let nv = v + a * dt;
         if (nv < 0) nv = 0;
@@ -224,6 +247,12 @@ export class Traffic {
         this.s[i] += ds;
         if (a < -1.2) this.flags[i] |= VEH_FLAG_BRAKE; else this.flags[i] &= ~VEH_FLAG_BRAKE;
         if (nv < 0.5) { e.stopped[dir]++; this.stuck[i] += dt; } else this.stuck[i] = Math.max(0, this.stuck[i] - dt * 2);
+        // acoustics: what this vehicle adds to the street's noise right now
+        const snd = e.snd ?? (e.snd = new Float32Array(5));
+        const ty = this.type[i];
+        const sc = ty === VType.Moto ? 1 : ty === VType.Car || ty === VType.Taxi || ty === VType.Ambulance || ty === VType.Police || ty === VType.Van || ty === VType.Hearse ? 0 : 2;
+        snd[sc] += vehicleSound(sc, nv, a, e.cls === RoadClass.Dirt);
+        snd[3] += nv; snd[4]++;
         // lateral offset (yield to the curb)
         const latT = yieldNow ? 1.4 : 0;
         this.lat[i] += (latT - this.lat[i]) * Math.min(1, dt * 1.5);
@@ -287,7 +316,7 @@ export class Traffic {
     if (cross < -0.35) return 0; // left turn
     // straight: least occupied lane
     let best = 0, bc = Infinity;
-    for (let l = 0; l <= maxLane; l++) { const c = this.lanes.get(this.key(ne.id, ndir, l))?.length ?? 0; if (c < bc) { bc = c; best = l; } }
+    for (let l = 0; l <= maxLane; l++) { const c = this.laneArr[this.key(ne.id, ndir, l)]?.length ?? 0; if (c < bc) { bc = c; best = l; } }
     return best;
   }
 

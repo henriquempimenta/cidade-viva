@@ -61,7 +61,7 @@ export class BuildingsLayer {
     if (!e) { e = { view: v, geo: null, chunk: null, smoke: [], blades: [], lights: [] }; this.entries.set(v.id, e); }
     e.view = v;
     if (v.state === 'done') {
-      const needGeo = !e.geo || !prev || prev.abandoned !== v.abandoned || prev.state !== 'done' || prev.variant !== v.variant || prev.heritage !== v.heritage;
+      const needGeo = !e.geo || !prev || prev.abandoned !== v.abandoned || prev.decay !== v.decay || prev.squatted !== v.squatted || prev.state !== 'done' || prev.variant !== v.variant || prev.heritage !== v.heritage;
       const wasWork = this.works.get(v.id);
       if (wasWork) { wasWork.dispose(this.group); this.works.delete(v.id); }
       if (needGeo) {
@@ -432,7 +432,9 @@ class ConstructionVisual {
       this.hook.scale.y = hl;
       this.hook.position.x = 8 + (Math.sin(t * 0.3 + v.id) * 0.5 + 0.5) * 12;
       if (this.load) this.load.position.set(this.hook.position.x, -hl - 0.4, 0);
-      this.crane.visible = fFrac < 0.9;
+      // a stalled site loses its crane: just the bare skeleton and rusting scaffold remain
+      this.crane.visible = fFrac < 0.9 && !v.stalled;
+      if (v.stalled) this.jib.rotation.y = 0.4;
     }
   }
 

@@ -17,6 +17,9 @@ export interface BuildingView {
   state: BuildState;
   progress: number; // 0..1 overall construction or demolition progress
   abandoned: boolean;
+  decay?: number; // 0..1 in quarter steps (neglect)
+  stalled?: boolean; // public works frozen (corruption)
+  squatted?: boolean;
   fire: number; // 0 none, >0 intensity
   name: string;
   variant: number; // e.g. industry/souvenir conversion, loft
@@ -94,6 +97,21 @@ export interface Stats {
   speedActual: number;
   weather: string; temperature: number; rain: number; fog: number; snow: number;
   inflation: number; avgIncome: number; education: number;
+  hall?: HallReport;
+  /** threads working on the simulation (sim + routing pool) and frames that waited on routing */
+  threads?: number; stalls?: number;
+}
+
+/** City hall & city services dashboard (Prefeitura tab) */
+export interface HallReport {
+  breakdown: { taxes: number; tariffs: number; transfers: number; tourism: number; upkeep: number; roads: number; staff: number; transit: number; interest: number };
+  ledger: { day: number; text: string; value: number }[];
+  works: { id: number; name: string; kind: string; cost: number; progress: number; motive: string; road?: boolean }[];
+  networks: { key: string; label: string; served: number; demand: number; pending: number }[];
+  lines: { id: number; name: string; color: string; kind: string; fleet: number; riders: number; waiting: number; stops: number }[];
+  market: { homeless: number; vacant: number; abandoned: number; demolishing: number; pending: number; rent: number };
+  lastCycle?: { day: number; chosen: string[]; rejected: string[] };
+  integrity?: { index: number; trust: number; mayor: string; mayorTitle: string; since: number; nextElection: number; diverted: number; divertedYear: number; stalled: number; derelict: number; squatted: number; avgAbandonYears: number; investigations: number; collapses: number };
 }
 
 export interface Snapshot {

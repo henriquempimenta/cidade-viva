@@ -1,94 +1,137 @@
-import { MAX_PEDS, PED_FLAG_UMBRELLA, PED_STRIDE } from '../shared/constants';
+import { PED_FLAG_UMBRELLA, PED_STRIDE } from '../shared/constants';
+import { MinHeap } from './heap';
 import type { Terrain } from './terrain';
 
 export const PED_FLAG_BIKE = 256;
 
-/** Walkers and cyclists following waypoint polylines along sidewalks. */
+/**
+ * Walkers and cyclists following waypoint polylines along sidewalks.
+ *
+ * Pedestrians do not interact with each other, so their motion is analytic:
+ * a walker is (start time, speed, cumulative polyline lengths). The position is
+ * evaluated only when somebody looks (snapshot near the camera, follow mode,
+ * inspector), and arrivals come out of a priority queue. The per-step cost is
+ * O(arrivals) instead of O(walkers), which removes any practical cap on how
+ * many people can be on the streets at once. Storage grows on demand.
+ */
 export class Peds {
-  readonly max = MAX_PEDS;
-  active = new Uint8Array(MAX_PEDS);
-  gen = new Uint16Array(MAX_PEDS);
-  citizen = new Int32Array(MAX_PEDS);
-  flags = new Uint16Array(MAX_PEDS);
-  speed = new Float32Array(MAX_PEDS);
-  pts: (Float32Array | null)[] = new Array(MAX_PEDS).fill(null);
-  seg = new Int32Array(MAX_PEDS);
-  u = new Float32Array(MAX_PEDS);
-  pause = new Float32Array(MAX_PEDS);
-  x = new Float32Array(MAX_PEDS); z = new Float32Array(MAX_PEDS); h = new Float32Array(MAX_PEDS);
-  color = new Float32Array(MAX_PEDS);
-  kind = new Uint8Array(MAX_PEDS); // 0 citizen, 1 tourist, 2 worker, 3 funeral, 4 waiting
+  max = 0;
+  active = new Uint8Array(0);
+  gen = new Uint16Array(0);
+  citizen = new Int32Array(0);
+  flags = new Uint16Array(0);
+  speed = new Float32Array(0);
+  pts: (Float32Array | null)[] = [];
+  cum: (Float32Array | null)[] = [];
+  t0 = new Float64Array(0);
+  arrive = new Float64Array(0);
+  color = new Float32Array(0);
+  kind = new Uint8Array(0); // 0 citizen, 1 tourist, 2 worker, 3 funeral, 4 waiting
+  // pose cache (evaluated lazily)
+  x = new Float32Array(0); z = new Float32Array(0); h = new Float32Array(0);
   private free: number[] = [];
+  private q = new MinHeap();
   count = 0;
+  time = 0;
   onArrive: (slot: number) => void = () => {};
   rain = 0;
 
-  constructor(private T: Terrain) { for (let i = MAX_PEDS - 1; i >= 0; i--) this.free.push(i); }
-  get capacityLeft() { return this.free.length; }
+  constructor(private T: Terrain) { this.grow(2048); }
+
+  private grow(n: number) {
+    const old = this.max;
+    const g = <A extends { length: number; set(a: ArrayLike<number>): void }>(a: A, C: new (n: number) => A) => { const b = new C(n); b.set(a); return b; };
+    this.active = g(this.active, Uint8Array); this.gen = g(this.gen, Uint16Array); this.citizen = g(this.citizen, Int32Array);
+    this.flags = g(this.flags, Uint16Array); this.speed = g(this.speed, Float32Array); this.t0 = g(this.t0, Float64Array);
+    this.arrive = g(this.arrive, Float64Array); this.color = g(this.color, Float32Array); this.kind = g(this.kind, Uint8Array);
+    this.x = g(this.x, Float32Array); this.z = g(this.z, Float32Array); this.h = g(this.h, Float32Array);
+    for (let i = old; i < n; i++) { this.pts.push(null); this.cum.push(null); }
+    for (let i = n - 1; i >= old; i--) this.free.push(i);
+    this.max = n;
+  }
+
+  /** soft budget only: storage grows, so callers are never refused for lack of slots */
+  get capacityLeft() { return 1e9; }
 
   spawn(pts: number[], citizen: number, speed: number, flags: number, color: number, kind = 0): number {
-    if (!this.free.length || pts.length < 4) return -1;
+    if (pts.length < 4) return -1;
+    if (!this.free.length) this.grow(this.max * 2);
     const i = this.free.pop()!;
+    const n = pts.length / 2;
+    const P = new Float32Array(pts), C = new Float32Array(n);
+    for (let k = 1; k < n; k++) C[k] = C[k - 1] + Math.hypot(P[k * 2] - P[k * 2 - 2], P[k * 2 + 1] - P[k * 2 - 1]);
+    const v = Math.max(0.005, speed * (flags & PED_FLAG_BIKE ? 1 : 1 - this.rain * 0.15));
     this.active[i] = 1;
     this.gen[i] = (this.gen[i] + 1) & 0xffff;
     this.citizen[i] = citizen;
     this.flags[i] = flags;
-    this.speed[i] = speed;
-    this.pts[i] = new Float32Array(pts);
-    this.seg[i] = 0; this.u[i] = 0; this.pause[i] = 0;
-    this.x[i] = pts[0]; this.z[i] = pts[1]; this.h[i] = 0;
+    this.speed[i] = v;
+    this.pts[i] = P; this.cum[i] = C;
+    this.t0[i] = this.time;
+    this.arrive[i] = this.time + C[n - 1] / v;
+    this.q.push(i, this.arrive[i]);
+    this.x[i] = P[0]; this.z[i] = P[1]; this.h[i] = Math.atan2(P[3] - P[1], P[2] - P[0]);
     this.color[i] = color;
     this.kind[i] = kind;
     this.count++;
     return i;
   }
+  /** keep a walker standing where it is until explicitly removed (queues at stops) */
+  hold(i: number) { if (this.active[i]) this.arrive[i] = Infinity; }
   despawn(i: number) {
     if (!this.active[i]) return;
     this.active[i] = 0;
-    this.pts[i] = null;
+    this.pts[i] = null; this.cum[i] = null;
     this.free.push(i);
     this.count--;
   }
 
+  /** distance walked so far → pose cache */
+  pose(i: number) {
+    const P = this.pts[i], C = this.cum[i];
+    if (!P || !C) return;
+    const n = C.length;
+    const d = Math.min(C[n - 1], (this.time - this.t0[i]) * this.speed[i]);
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (C[m] <= d) lo = m; else hi = m; }
+    const L = C[hi] - C[lo] || 0.001, u = Math.min(1, (d - C[lo]) / L);
+    const ax = P[lo * 2], az = P[lo * 2 + 1], bx = P[hi * 2], bz = P[hi * 2 + 1];
+    this.x[i] = ax + (bx - ax) * u; this.z[i] = az + (bz - az) * u;
+    if (bx !== ax || bz !== az) this.h[i] = Math.atan2(bz - az, bx - ax);
+  }
+
   remainingTime(i: number): number {
-    const p = this.pts[i];
-    if (!p) return 0;
-    let d = 0;
-    for (let k = this.seg[i]; k < p.length / 2 - 1; k++) d += Math.hypot(p[k * 2 + 2] - p[k * 2], p[k * 2 + 3] - p[k * 2 + 1]);
-    return d / this.speed[i];
+    if (!this.active[i]) return 0;
+    return Number.isFinite(this.arrive[i]) ? Math.max(0, this.arrive[i] - this.time) : 0;
   }
 
   step(dt: number) {
-    for (let i = 0; i < this.max; i++) {
-      if (!this.active[i]) continue;
-      if (this.pause[i] > 0) { this.pause[i] -= dt; continue; }
-      const p = this.pts[i]!;
-      let k = this.seg[i];
-      let move = this.speed[i] * dt * (this.flags[i] & PED_FLAG_BIKE ? 1 : 1 - this.rain * 0.15);
-      const n = p.length / 2;
-      while (move > 0 && k < n - 1) {
-        const ax = p[k * 2], az = p[k * 2 + 1], bx = p[k * 2 + 2], bz = p[k * 2 + 3];
-        const L = Math.hypot(bx - ax, bz - az) || 0.001;
-        const remain = L * (1 - this.u[i]);
-        if (move < remain) { this.u[i] += move / L; move = 0; }
-        else { move -= remain; k++; this.u[i] = 0; }
-        this.h[i] = Math.atan2(bz - az, bx - ax);
-      }
-      this.seg[i] = k;
-      if (k >= n - 1) { this.x[i] = p[(n - 1) * 2]; this.z[i] = p[(n - 1) * 2 + 1]; this.onArrive(i); this.despawn(i); continue; }
-      const ax = p[k * 2], az = p[k * 2 + 1], bx = p[k * 2 + 2], bz = p[k * 2 + 3];
-      this.x[i] = ax + (bx - ax) * this.u[i];
-      this.z[i] = az + (bz - az) * this.u[i];
+    this.time += dt;
+    const q = this.q;
+    while (q.size && q.peekPri() <= this.time) {
+      const pri = q.peekPri();
+      const i = q.pop();
+      if (!this.active[i] || this.arrive[i] !== pri) continue; // stale entry (slot reused / held)
+      const P = this.pts[i]!;
+      this.x[i] = P[P.length - 2]; this.z[i] = P[P.length - 1];
+      this.onArrive(i);
+      this.despawn(i);
     }
   }
 
   fillSnapshot(out: Float32Array, cam: { x: number; z: number; h: number }): number {
-    // level of detail: only walkers reasonably close to the camera are streamed
+    // level of detail: only walkers reasonably close to the camera are evaluated and streamed
     const R = Math.max(500, cam.h * 3.5);
     let n = 0;
     for (let i = 0; i < this.max; i++) {
       const o = i * PED_STRIDE;
-      if (!this.active[i] || Math.abs(this.x[i] - cam.x) > R || Math.abs(this.z[i] - cam.z) > R) { out[o + 4] = -1; continue; }
+      if (!this.active[i]) { out[o + 4] = -1; continue; }
+      const P = this.pts[i]!;
+      // cheap reject: no point of the path can be farther than its length from the start before evaluating the pose
+      const C = this.cum[i]!, L = R + C[C.length - 1];
+      if (Math.abs(P[0] - cam.x) > L || Math.abs(P[1] - cam.z) > L) { out[o + 4] = -1; continue; }
+      this.pose(i);
+      if (Math.abs(this.x[i] - cam.x) > R || Math.abs(this.z[i] - cam.z) > R) { out[o + 4] = -1; continue; }
       out[o] = this.x[i]; out[o + 1] = Math.max(0.2, this.T.heightAt(this.x[i], this.z[i])) + 0.15; out[o + 2] = this.z[i];
       out[o + 3] = this.h[i]; out[o + 4] = this.gen[i];
       out[o + 5] = this.flags[i] | (this.rain > 0.3 && !(this.flags[i] & PED_FLAG_BIKE) && (i % 3 !== 0) ? PED_FLAG_UMBRELLA : 0);

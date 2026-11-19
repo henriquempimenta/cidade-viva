@@ -53,7 +53,7 @@ export class Services {
       const ineq = pb[k] > 0 && rb[k] > 0 ? Math.min(1, Math.sqrt(pb[k] * rb[k]) / (pb[k] + rb[k] + 0.01) * 2) : 0;
       const dark = F.f.power[k] < 0.5 ? 1 : 0;
       const target = p.baseCrime * (0.08 + ur * 1.6 + ineq * 0.35 * (0.5 + p.inequality) + ab2[k] * 2.5 + dark * 0.3 + (pb[k] > rb[k] * 3 ? 0.1 : 0) + Math.min(0.3, people / 40))
-        * (1 - Math.min(0.88, F.f.cov_police[k] * p.policeEfficiency * 0.75)) * (w.economy.crisis > 0 ? 1.4 : 1);
+        * (1 - Math.min(0.88, F.f.cov_police[k] * p.policeEfficiency * 0.75 * (1 - (w.integrity?.policeLeak(k) ?? 0)))) * (w.economy.crisis > 0 ? 1.4 : 1);
       F.f.crime[k] += (clamp(target, 0, 1.5) - F.f.crime[k]) * 0.3;
       sum += F.f.crime[k] * people; n += people;
     }
@@ -84,7 +84,7 @@ export class Services {
     for (const b of w.buildings.list) {
       if (b.state !== 'done' || b.fire > 0) continue;
       const age = (w.day - b.builtDay) / 30;
-      const risk = 0.00003 * freq * (1 + age) * (b.def.cat === 'ind' ? 3 : 1) * (b.abandoned ? 2.5 : 1) * (1 - F.sample('cov_fire', b.x, b.z) * 0.6) * (b.def.public ? 0.3 : 1);
+      const risk = 0.00003 * freq * (1 + age) * (b.def.cat === 'ind' ? 3 : 1) * (b.abandoned ? 2.5 : b.squatted ? 2 : 1) * (1 + b.decay) * (1 - F.sample('cov_fire', b.x, b.z) * 0.6) * (b.def.public ? 0.3 : 1);
       if (r.next() < risk) this.ignite(b);
     }
     for (const b of w.buildings.list) {

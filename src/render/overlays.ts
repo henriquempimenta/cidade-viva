@@ -3,9 +3,16 @@ import type { App } from '../app';
 import type { TransitLineView } from '../shared/protocol';
 import { FIELD_LABELS, type FieldName } from '../shared/catalog';
 import { U } from './uniforms';
-import { el, btn } from '../ui/hud';
+import { el } from '../ui/hud';
 
+const GROUPS: [string, string[]][] = [
+  ['Redes e fluxos', ['lines', 'od', 'cargo', 'congestion', 'accessibility', 'transit']],
+  ['Ambiente', ['landValue', 'airPollution', 'waterPollution', 'soilPollution', 'noise', 'beauty', 'tourism']],
+  ['Serviços e qualidade de vida', ['crime', 'corruption', 'happiness', 'cov_health', 'cov_education', 'cov_police', 'cov_fire', 'cov_parks', 'power', 'waterSupply', 'garbage']],
+  ['Densidade', ['resDensity', 'jobDensity']],
+];
 const MENU: [string, string][] = [
+  ['corruption', 'Corrupção local'], ['power', 'Rede de energia (falta)'], ['waterSupply', 'Abastecimento de água'], ['garbage', 'Lixo acumulado'],
   ['landValue', 'Valor do solo'], ['airPollution', 'Poluição do ar'], ['waterPollution', 'Poluição da água'], ['soilPollution', 'Poluição do solo'],
   ['noise', 'Ruído'], ['crime', 'Criminalidade'], ['congestion', 'Congestionamento'], ['accessibility', 'Acessibilidade'], ['beauty', 'Beleza / paisagem'],
   ['cov_health', 'Cobertura de saúde'], ['cov_education', 'Cobertura de educação'], ['cov_police', 'Cobertura policial'], ['cov_fire', 'Cobertura de bombeiros'],
@@ -41,21 +48,50 @@ export class Overlays {
     this.group.add(this.lineGroup, this.stopGroup, this.arcGroup, this.odGroup);
     this.lineGroup.visible = false;
     const root = app.uiRoot;
-    this.menu = el('div', 'panel menu', root);
-    this.menu.style.maxHeight = '70vh';
-    this.menu.style.overflow = 'auto';
-    this.menu.style.right = '170px';
-    btn('✕ Nenhum', this.menu, () => this.select(null));
-    for (const [k, l] of MENU) btn(l, this.menu, () => this.select(k));
-    this.legend = el('div', 'panel legend', root);
-    this.metro = el('div', 'panel metro', root);
-    this.metro.innerHTML = '<div style="display:flex;justify-content:space-between"><b>Mapa da rede de transporte</b><span class="x" style="cursor:pointer">✕</span></div>';
+    this.menu = document.createElement('div');
+    this.menu.className = 'pop-menu';
+    const label = (k: string) => MENU.find((m) => m[0] === k)?.[1] ?? k;
+    const item = (parent: HTMLElement, k: string | null, text: string) => {
+      const b = el('button', '', parent);
+      b.innerHTML = `<i></i>${text}`;
+      b.dataset.layer = k ?? '';
+      b.setAttribute('aria-pressed', String(k === null));
+      b.onclick = () => this.select(k);
+    };
+    el('strong', '', this.menu).textContent = 'Camadas do mapa';
+    const g0 = el('div', 'layer-group', this.menu);
+    item(g0, null, 'Vista natural');
+    for (const [title, keys] of GROUPS) {
+      const g = el('div', 'layer-group', this.menu);
+      el('small', '', g).textContent = title;
+      for (const k of keys) item(g, k, label(k));
+    }
+    document.addEventListener('click', (e) => { if (!(e.target as Element).closest('.scene-tools')) this.menu.classList.remove('open'); });
+    this.legend = el('div', 'overlay-key glass', root);
+    this.metro = el('div', 'metro', root);
+    this.metro.innerHTML = '<div style="display:flex;justify-content:space-between"><b>Mapa esquemático da rede de transporte</b><span class="x">✕ fechar</span></div>';
     this.metroCanvas = el('canvas', '', this.metro) as HTMLCanvasElement;
     this.metro.querySelector('.x')!.addEventListener('click', () => this.metro.classList.remove('open'));
   }
 
+  mountMenu(parent: HTMLElement) { parent.appendChild(this.menu); }
   toggleMenu() { this.menu.classList.toggle('open'); }
-  toggleMetro() { this.metro.classList.toggle('open'); this.drawMetro(); }
+  toggleMetro(force?: boolean) { this.metro.classList.toggle('open', force); this.drawMetro(); }
+  private legendFor(k: string | null) {
+    const L = this.legend;
+    L.classList.toggle('open', !!k);
+    if (!k) return;
+    const name = MENU.find((m) => m[0] === k)?.[1] ?? FIELD_LABELS[k as FieldName] ?? k;
+    if (k === 'lines') {
+      const rows = [...this.lines.values()].map((l) => `<div class="row"><b style="background:${l.color}"></b>${l.name}</div>`).join('');
+      L.innerHTML = `<strong>${name}</strong>${rows || '<div class="note">Aguardando as primeiras linhas</div>'}`;
+    } else if (k === 'od' || k === 'cargo') {
+      L.innerHTML = `<strong>${name}</strong><div class="note">${k === 'od' ? 'Arcos ligam bairros de origem e destino das viagens medidas; espessura = volume.' : 'Entregas de carga entre produtores, indústrias e comércio.'}</div>`;
+    } else {
+      const inv = k.startsWith('cov_') || ['happiness', 'accessibility', 'transit', 'beauty', 'tourism', 'landValue', 'waterSupply'].includes(k);
+      L.innerHTML = `<strong>${name}</strong><div class="ramp"></div><div class="scale"><span>${inv ? 'pouco' : 'baixo'}</span><span>${inv ? 'muito' : 'alto'}</span></div>`;
+    }
+  }
 
   select(k: string | null) {
     this.current = k;
@@ -66,8 +102,8 @@ export class Overlays {
     this.lineGroup.visible = k === 'lines' || k === 'od' || k === 'cargo' ? k === 'lines' : false;
     this.odGroup.visible = k === 'od' || k === 'cargo';
     if (k !== 'od' && k !== 'cargo') this.odGroup.clear();
-    this.legend.classList.toggle('open', !!field);
-    if (field) this.legend.innerHTML = `<span>${FIELD_LABELS[field as FieldName] ?? field}</span><span>baixo</span><div class="grad"></div><span>alto</span>`;
+    this.legendFor(k);
+    this.menu.querySelectorAll<HTMLElement>('[data-layer]').forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.layer || null) === k)));
     if (k) this.app.hud.toast(`Mapa: ${MENU.find((m) => m[0] === k)?.[1]}`);
   }
 

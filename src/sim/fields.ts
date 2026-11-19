@@ -68,20 +68,27 @@ export class Fields {
     return s;
   }
 
+  private splatW = new Float32Array(0);
   splat(arr: Float32Array, x: number, z: number, v: number, r = 0) {
     const G = this.G, c = this.cell;
     if (r <= c * 0.6) { arr[this.idx(x, z)] += v; return; }
     const i0 = clamp(Math.floor((x - r) / c), 0, G - 1), i1 = clamp(Math.floor((x + r) / c), 0, G - 1);
     const j0 = clamp(Math.floor((z - r) / c), 0, G - 1), j1 = clamp(Math.floor((z + r) / c), 0, G - 1);
+    const W = i1 - i0 + 1, n = W * (j1 - j0 + 1);
+    if (this.splatW.length < n) this.splatW = new Float32Array(n * 2);
+    const wb = this.splatW, ir = 1 / r;
     let wsum = 0;
-    for (let pass = 0; pass < 2; pass++) {
-      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-        const dx = (i + 0.5) * c - x, dz = (j + 0.5) * c - z;
-        const w = Math.max(0, 1 - Math.hypot(dx, dz) / r);
-        if (pass === 0) wsum += w; else if (w > 0) arr[j * G + i] += (v * w) / wsum;
+    for (let j = j0, m = 0; j <= j1; j++) {
+      const dz = (j + 0.5) * c - z;
+      for (let i = i0; i <= i1; i++, m++) {
+        const dx = (i + 0.5) * c - x;
+        const w = 1 - Math.sqrt(dx * dx + dz * dz) * ir;
+        wb[m] = w > 0 ? w : 0; wsum += wb[m];
       }
-      if (wsum === 0) { arr[this.idx(x, z)] += v; return; }
     }
+    if (wsum === 0) { arr[this.idx(x, z)] += v; return; }
+    const s = v / wsum;
+    for (let j = j0, m = 0; j <= j1; j++) for (let i = i0; i <= i1; i++, m++) if (wb[m] > 0) arr[j * G + i] += wb[m] * s;
   }
 
   /** separable box blur, applied twice ≈ gaussian */

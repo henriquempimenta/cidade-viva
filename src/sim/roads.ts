@@ -1,6 +1,7 @@
 import { HOUR_SECONDS, LOT_SETBACK, ROAD_HALF_WIDTH, ROAD_LANES, ROAD_SPEED, RoadClass } from '../shared/constants';
 import type { EdgeView, NodeView } from '../shared/protocol';
 import { MinHeap } from './heap';
+import { dijkstraTree, InlineBackend, type RouteBackend, type RouteGraph } from './routeKernel';
 import type { Terrain } from './terrain';
 import { OCC_ROAD, type Occupancy } from './occupancy';
 import type { RNG } from '../shared/rng';
@@ -45,6 +46,16 @@ export interface REdge {
   // OD log for "Por que congestionado?"
   odLog: number[]; // pairs originBuilding, destBuilding (ring)
   odPtr: number;
+  /** acoustic accounting: running sums [light, moto, heavy, speed, samples] and their hourly mean */
+  snd?: Float32Array; sndMean?: Float32Array;
+}
+
+/** simplified traffic acoustics: rolling noise grows with speed, engines with load and acceleration */
+export function vehicleSound(cls: number, speed: number, accel: number, dirt: boolean): number {
+  const w = cls === 2 ? 2.7 : cls === 1 ? 1.75 : 1;
+  const rolling = Math.pow(speed / 13, 1.35) * (dirt ? 1.28 : 1);
+  const engine = 0.22 + Math.max(0, accel) * 0.23 + Math.max(0, -accel - 0.45) * 0.055;
+  return w * (engine + rolling);
 }
 
 export interface SegmentPlan {
@@ -418,6 +429,11 @@ export class RoadNetwork {
   hourTick() {
     for (const e of this.edges) {
       if (!e.alive) continue;
+      if (e.snd) {
+        const m = e.sndMean ?? (e.sndMean = new Float32Array(5));
+        const steps = HOUR_SECONDS / 0.5;
+        for (let k = 0; k < 5; k++) { m[k] = m[k] * 0.36 + (e.snd[k] / steps) * 0.64; e.snd[k] = 0; }
+      }
       for (let d = 0; d < 2; d++) {
         e.volume[d] = e.volume[d] * 0.4 + e.count[d] * 0.6;
         e.count[d] = 0;
@@ -444,27 +460,81 @@ export class RoadNetwork {
   // ---------- routing (reverse Dijkstra trees, cached, rolling refresh) ----------
   /** max trees rebuilt per sim step (on-demand); the rest is served stale */
   buildBudget = 6;
+  /** where background tree refreshes run (inline or a pool of worker threads) */
+  backend: RouteBackend = new InlineBackend();
   private rollIdx = 0;
+  private stepNo = 0;
+  private graph: RouteGraph | null = null;
+  private pending: { ticket: number; dests: number[]; due: number; ver: number; t: number } | null = null;
+  static readonly EPOCH = 8; // steps between batched refreshes
+  static readonly BATCH = 64;
+
+  /** compact snapshot of topology + current travel costs (rebuilt on topology change or every 20 s) */
+  routeGraph(): RouteGraph {
+    const g = this.graph;
+    if (g && g.ver === this.topoVer && g.N === this.nodes.length && this.time - g.t < 20) return g;
+    const N = this.nodes.length;
+    const off = new Int32Array(N + 1);
+    let M = 0;
+    for (let u = 0; u < N; u++) { off[u] = M; M += this.nodes[u].edges.length; }
+    off[N] = M;
+    const nbr = new Int32Array(M), de = new Int32Array(M), cost = new Float32Array(M);
+    let m = 0;
+    for (let u = 0; u < N; u++) {
+      const start = m;
+      for (const eid of this.nodes[u].edges) {
+        const e = this.edges[eid];
+        if (!e.alive || e.progress < 1) continue;
+        const w = e.a === u ? e.b : e.a;
+        const dir = e.a === w ? 0 : 1; // travelling w -> u
+        if (dir === 1 && e.oneway) continue;
+        nbr[m] = w; de[m] = eid * 2 + dir; cost[m] = this.travelTime(e, dir) + 1.5; m++;
+      }
+      off[u] = start;
+    }
+    off[N] = m;
+    this.graph = { N, off, nbr: nbr.subarray(0, m), de: de.subarray(0, m), cost: cost.subarray(0, m), ver: this.topoVer, t: this.time };
+    return this.graph;
+  }
+
+  /** true when the next step can run (its scheduled routing results have arrived) */
+  routingReady(): boolean {
+    const p = this.pending;
+    return !p || this.stepNo + 1 < p.due || this.backend.ready(p.ticket);
+  }
+
   stepRouting() {
     this.buildBudget = 6;
-    // rolling refresh: rebuild the oldest trees so congestion feeds back into routes
-    let n = 1;
-    if (this.trees.size) {
-      const keys = [...this.trees.keys()];
-      for (let i = 0; i < n && keys.length; i++) {
-        this.rollIdx = (this.rollIdx + 1) % keys.length;
-        const k = keys[this.rollIdx];
-        const t = this.trees.get(k)!;
-        if (this.time - t.built > HOUR_SECONDS * 6 || t.ver !== this.topoVer && this.time - t.built > HOUR_SECONDS) this.trees.set(k, this.buildTree(k, t));
-      }
-      n = 0;
+    this.stepNo++;
+    const p = this.pending;
+    if (p && this.stepNo >= p.due) {
+      // install at a fixed step → identical results whatever thread computed them
+      const nexts = this.backend.take(p.ticket);
+      p.dests.forEach((d, k) => {
+        const old = this.trees.get(d);
+        this.trees.set(d, { dist: new Float32Array(0), next: nexts[k], ver: p.ver, built: p.t, lastUse: old ? old.lastUse : p.t });
+      });
+      this.pending = null;
     }
+    if (this.pending || this.stepNo % RoadNetwork.EPOCH !== 0 || !this.trees.size) return;
+    // rolling refresh: rebuild the oldest trees so congestion feeds back into routes
+    const keys = [...this.trees.keys()];
+    const dests: number[] = [];
+    for (let i = 0; i < keys.length && dests.length < RoadNetwork.BATCH; i++) {
+      this.rollIdx = (this.rollIdx + 1) % keys.length;
+      const k = keys[this.rollIdx];
+      const t = this.trees.get(k)!;
+      if (this.time - t.built > HOUR_SECONDS * 3 || (t.ver !== this.topoVer && this.time - t.built > HOUR_SECONDS * 0.5)) dests.push(k);
+    }
+    if (!dests.length) return;
+    const g = this.routeGraph();
+    this.pending = { ticket: this.backend.submit(g, dests), dests, due: this.stepNo + RoadNetwork.EPOCH, ver: g.ver, t: this.time };
   }
   tree(dest: number, force = false): Tree | null {
     let t = this.trees.get(dest);
-    const N = this.nodes.length;
-    const stale = !t || t.next.length < N || force;
-    if (stale) {
+    // an old tree stays usable after the graph grows: route() validates every hop and
+    // forces a rebuild only when the cached path is actually broken
+    if (!t || force) {
       if (this.buildBudget <= 0 && t) return t;
       if (this.buildBudget <= 0 && !t) return null;
       this.buildBudget--;
@@ -482,30 +552,12 @@ export class RoadNetwork {
   private heap = new MinHeap();
   private distBuf = new Float64Array(0);
   private buildTree(dest: number, reuse?: Tree): Tree {
-    const N = this.nodes.length;
+    const g = this.routeGraph();
+    const N = g.N;
     if (this.distBuf.length < N) this.distBuf = new Float64Array(N + 512);
-    const dist = this.distBuf;
     const next = reuse && reuse.next.length === N ? reuse.next : new Int32Array(N);
-    dist.fill(Infinity, 0, N); next.fill(-1);
-    dist[dest] = 0;
-    const h = this.heap; h.clear();
-    h.push(dest, 0);
-    while (h.size) {
-      const pri = h.peekPri();
-      const u = h.pop();
-      if (pri > dist[u]) continue;
-      const nu = this.nodes[u];
-      for (const eid of nu.edges) {
-        const e = this.edges[eid];
-        if (!e.alive || e.progress < 1) continue;
-        const w = e.a === u ? e.b : e.a;
-        const dir = e.a === w ? 0 : 1;
-        if (dir === 1 && e.oneway) continue;
-        const c = dist[u] + this.travelTime(e, dir) + 1.5;
-        if (c < dist[w]) { dist[w] = c; next[w] = eid * 2 + dir; h.push(w, c); }
-      }
-    }
-    return { dist: new Float32Array(0), next, ver: this.topoVer, built: this.time, lastUse: this.time };
+    dijkstraTree(g, dest, next, this.distBuf, this.heap);
+    return { dist: new Float32Array(0), next, ver: g.ver, built: this.time, lastUse: this.time };
   }
   /** directed edges from node `from` to `dest`; null if unreachable or routing budget exhausted */
   route(from: number, dest: number, maxLen = 500): number[] | null {
@@ -518,7 +570,7 @@ export class RoadNetwork {
       let u = from, ok = true;
       while (u !== dest) {
         const de = t.next[u];
-        if (de < 0 || out.length >= maxLen) { ok = false; break; }
+        if (!(de >= 0) || out.length >= maxLen) { ok = false; break; }
         const e = this.edges[de >> 1];
         if (!e.alive || e.progress < 1) { ok = false; break; }
         const tail = (de & 1) === 0 ? e.a : e.b;

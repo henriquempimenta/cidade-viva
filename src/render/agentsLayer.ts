@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { App } from '../app';
 import { MAX_PEDS, MAX_VEHICLES, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, PED_FLAG_UMBRELLA, PED_FLAG_WORKER, PED_STRIDE, TRAIN_STRIDE, VEH_FLAG_BRAKE, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_STRIDE, VType, VTYPE_COUNT, MAX_TRAIN_CARS, PED_FLAG_FUNERAL } from '../shared/constants';
+/** render budgets (instances drawn per frame); the simulation itself has no such cap */
+const RENDER_VEH = 8000, RENDER_PED = 6000;
 import { GB } from './geomBuilder';
 import { U } from './uniforms';
 
@@ -87,7 +89,7 @@ export class AgentsLayer {
   private sc = new THREE.Vector3(1, 1, 1);
   private up = new THREE.Vector3(0, 1, 0);
   private col = new THREE.Color();
-  private vPos = new Float32Array(MAX_VEHICLES * 4); // interpolated x,y,z,h
+  private vPos = new Float32Array(MAX_VEHICLES * 4); // interpolated x,y,z,h (grows with the sim pools)
   private pPos = new Float32Array(MAX_PEDS * 4);
   private tPos = new Float32Array(MAX_TRAIN_CARS * 4);
   private t = 0;
@@ -96,7 +98,7 @@ export class AgentsLayer {
   constructor(private app: App) {
     const vehMat = new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.3 });
     for (let t = 0; t < VTYPE_COUNT; t++) {
-      const im = new THREE.InstancedMesh(vehicleGeo(t as VType), vehMat, t === VType.Car ? 2600 : t === VType.Bike ? 1 : 500);
+      const im = new THREE.InstancedMesh(vehicleGeo(t as VType), vehMat, t === VType.Car ? 6000 : t === VType.Bike ? 1 : 900);
       im.count = 0; im.castShadow = true; im.frustumCulled = false;
       this.veh.push(im);
       this.group.add(im);
@@ -107,7 +109,7 @@ export class AgentsLayer {
     lg.box(2.18, 0.7, 0.6, 0.06, 0.18, 0.35, front); lg.box(2.18, 0.7, -0.6, 0.06, 0.18, 0.35, front);
     lg.box(-2.18, 0.75, 0.62, 0.06, 0.16, 0.3, rear); lg.box(-2.18, 0.75, -0.62, 0.06, 0.16, 0.3, rear);
     const lmat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
-    this.lights = new THREE.InstancedMesh(lg.toGeometry(false), lmat, MAX_VEHICLES);
+    this.lights = new THREE.InstancedMesh(lg.toGeometry(false), lmat, RENDER_VEH);
     this.lights.count = 0; this.lights.frustumCulled = false;
     this.sirens = new THREE.InstancedMesh(new THREE.BoxGeometry(0.4, 0.25, 1.2), new THREE.MeshBasicMaterial({ toneMapped: false }), 300);
     this.sirens.count = 0; this.sirens.frustumCulled = false;
@@ -115,9 +117,9 @@ export class AgentsLayer {
     const pb = new GB();
     pb.box(0, 0.85, 0, 0.32, 0.65, 0.42, W); // torso
     pb.box(0, 0, 0.11, 0.18, 0.85, 0.16, new THREE.Color(0x3a4050)); pb.box(0, 0, -0.11, 0.18, 0.85, 0.16, new THREE.Color(0x3a4050)); // legs
-    this.bodies = new THREE.InstancedMesh(pb.toGeometry(false), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 }), MAX_PEDS);
+    this.bodies = new THREE.InstancedMesh(pb.toGeometry(false), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 }), RENDER_PED);
     this.bodies.count = 0; this.bodies.frustumCulled = false; this.bodies.castShadow = true;
-    this.heads = new THREE.InstancedMesh(new THREE.SphereGeometry(0.17, 6, 5).translate(0, 1.68, 0), new THREE.MeshStandardMaterial({ roughness: 0.7 }), MAX_PEDS);
+    this.heads = new THREE.InstancedMesh(new THREE.SphereGeometry(0.17, 6, 5).translate(0, 1.68, 0), new THREE.MeshStandardMaterial({ roughness: 0.7 }), RENDER_PED);
     this.heads.count = 0; this.heads.frustumCulled = false;
     const ug = new THREE.ConeGeometry(0.7, 0.35, 8).translate(0, 2.15, 0);
     this.umbrellas = new THREE.InstancedMesh(ug, new THREE.MeshStandardMaterial({ roughness: 0.6 }), 2000);
@@ -158,7 +160,9 @@ export class AgentsLayer {
     let nl = 0, ns = 0;
     const cv = cur.veh, pv = prev?.veh;
     const old = (this.app.stats?.era ?? 0) === 0;
-    for (let i = 0; i < MAX_VEHICLES; i++) {
+    const NV = cv.length / VEH_STRIDE;
+    if (this.vPos.length < NV * 4) this.vPos = new Float32Array(NV * 8);
+    for (let i = 0; i < NV; i++) {
       const o = i * VEH_STRIDE;
       const type = cv[o + 4];
       if (!type) continue;
@@ -188,7 +192,7 @@ export class AgentsLayer {
       else { const pal = old ? OLD_COLORS : CAR_COLORS; this.col.setHex(pal[(i * 7 + gen * 3) % pal.length]); }
       im.setColorAt(counts[type], this.col);
       counts[type]++;
-      if (night > 0.05 && nl < MAX_VEHICLES && type !== VType.Moto) {
+      if (night > 0.05 && nl < RENDER_VEH && type !== VType.Moto) {
         const s = type === VType.Bus || type === VType.TourBus || type === VType.Truck || type === VType.Garbage || type === VType.Construction || type === VType.Fire ? 1.35 : 1;
         this.sc.set(s * (type === VType.Bus || type === VType.TourBus ? 2.7 : type >= VType.Truck && type <= VType.Garbage ? 2 : 1), s, s);
         this.m.compose(this.v, this.q, this.sc);
@@ -224,7 +228,9 @@ export class AgentsLayer {
     let nb = 0, nu = 0, nbk = 0, nbag = 0;
     const camP = this.app.rig.camera.position;
     const farCull = Math.max(450, camP.y * 4);
-    for (let i = 0; i < MAX_PEDS; i++) {
+    const NP = cp.length / PED_STRIDE;
+    if (this.pPos.length < NP * 4) this.pPos = new Float32Array(NP * 8);
+    for (let i = 0; i < NP; i++) {
       const o = i * PED_STRIDE;
       if (cp[o + 4] < 0) continue;
       let x = cp[o], y = cp[o + 1], z = cp[o + 2], h = cp[o + 3];
@@ -239,7 +245,7 @@ export class AgentsLayer {
         }
       }
       this.pPos[i * 4] = x; this.pPos[i * 4 + 1] = y; this.pPos[i * 4 + 2] = z; this.pPos[i * 4 + 3] = h;
-      if (Math.abs(x - camP.x) > farCull || Math.abs(z - camP.z) > farCull) continue;
+      if (nb >= RENDER_PED || Math.abs(x - camP.x) > farCull || Math.abs(z - camP.z) > farCull) continue;
       const flags = cp[o + 5];
       const cid = cp[o + 6];
       const bike = (flags & PED_FLAG_BIKE) !== 0;
@@ -258,7 +264,7 @@ export class AgentsLayer {
       else this.col.setHSL(0.07, 0.4 + ((seed * 3) % 10) / 40, 0.25 + ((seed * 11) % 10) / 22);
       this.heads.setColorAt(nb, this.col);
       nb++;
-      if (bike) { this.v.y = y; this.m.compose(this.v, this.q, this.sc); this.bikes.setMatrixAt(nbk++, this.m); }
+      if (bike && nbk < 1500) { this.v.y = y; this.m.compose(this.v, this.q, this.sc); this.bikes.setMatrixAt(nbk++, this.m); }
       if (flags & PED_FLAG_UMBRELLA && nu < 2000) {
         this.v.y = y + bob;
         this.m.compose(this.v, this.q, this.sc);
@@ -307,14 +313,14 @@ export class AgentsLayer {
     const c = this.app.curSnap;
     if (!c) return null;
     const o = slot * VEH_STRIDE;
-    if (!c.veh[o + 4] || (gen >= 0 && c.veh[o + 5] !== gen)) return null;
+    if (o >= c.veh.length || !c.veh[o + 4] || (gen >= 0 && c.veh[o + 5] !== gen)) return null;
     return { p: new THREE.Vector3(this.vPos[slot * 4], this.vPos[slot * 4 + 1], this.vPos[slot * 4 + 2]), h: this.vPos[slot * 4 + 3] };
   }
   pedPos(slot: number, gen: number): { p: THREE.Vector3; h: number } | null {
     const c = this.app.curSnap;
     if (!c) return null;
     const o = slot * PED_STRIDE;
-    if (c.ped[o + 4] < 0 || (gen >= 0 && c.ped[o + 4] !== gen)) return null;
+    if (o >= c.ped.length || !(c.ped[o + 4] >= 0) || (gen >= 0 && c.ped[o + 4] !== gen)) return null;
     return { p: new THREE.Vector3(this.pPos[slot * 4], this.pPos[slot * 4 + 1], this.pPos[slot * 4 + 2]), h: this.pPos[slot * 4 + 3] };
   }
   trainPos(id: number): { p: THREE.Vector3; h: number } | null {
@@ -333,8 +339,8 @@ export class AgentsLayer {
     const f = c.follow;
     // prefer the interpolated physical agent if visible
     if (!f[4]) {
-      for (let i = 0; i < MAX_PEDS; i++) { const o = i * PED_STRIDE; if (c.ped[o + 4] >= 0 && c.ped[o + 6] === id) return { p: new THREE.Vector3(this.pPos[i * 4], this.pPos[i * 4 + 1], this.pPos[i * 4 + 2]), h: this.pPos[i * 4 + 3], inside: false }; }
-      for (let i = 0; i < MAX_VEHICLES; i++) { const o = i * VEH_STRIDE; if (c.veh[o + 4] && c.veh[o + 8] === id) return { p: new THREE.Vector3(this.vPos[i * 4], this.vPos[i * 4 + 1], this.vPos[i * 4 + 2]), h: this.vPos[i * 4 + 3], inside: false }; }
+      for (let i = 0; i < c.ped.length / PED_STRIDE; i++) { const o = i * PED_STRIDE; if (c.ped[o + 4] >= 0 && c.ped[o + 6] === id) return { p: new THREE.Vector3(this.pPos[i * 4], this.pPos[i * 4 + 1], this.pPos[i * 4 + 2]), h: this.pPos[i * 4 + 3], inside: false }; }
+      for (let i = 0; i < c.veh.length / VEH_STRIDE; i++) { const o = i * VEH_STRIDE; if (c.veh[o + 4] && c.veh[o + 8] === id) return { p: new THREE.Vector3(this.vPos[i * 4], this.vPos[i * 4 + 1], this.vPos[i * 4 + 2]), h: this.vPos[i * 4 + 3], inside: false }; }
     }
     const target = new THREE.Vector3(f[0], f[1], f[2]);
     if (this.fpSmooth.lengthSq() === 0 || this.fpSmooth.distanceTo(target) > 80) this.fpSmooth.copy(target);
@@ -350,7 +356,7 @@ export class AgentsLayer {
     let best: { kind: 'ped' | 'vehicle'; slot: number; gen: number; citizen: number } | null = null, bd = Infinity;
     const r = ray.ray;
     const p = new THREE.Vector3();
-    for (let i = 0; i < MAX_PEDS; i++) {
+    for (let i = 0; i < c.ped.length / PED_STRIDE; i++) {
       const o = i * PED_STRIDE;
       if (c.ped[o + 4] < 0) continue;
       p.set(this.pPos[i * 4], this.pPos[i * 4 + 1] + 1, this.pPos[i * 4 + 2]);
@@ -358,7 +364,7 @@ export class AgentsLayer {
       const along = p.clone().sub(r.origin).length();
       if (d < Math.max(2.2, along * 0.008) ** 2 && along < bd) { bd = along; best = { kind: 'ped', slot: i, gen: c.ped[o + 4], citizen: c.ped[o + 6] }; }
     }
-    for (let i = 0; i < MAX_VEHICLES; i++) {
+    for (let i = 0; i < c.veh.length / VEH_STRIDE; i++) {
       const o = i * VEH_STRIDE;
       if (!c.veh[o + 4]) continue;
       p.set(this.vPos[i * 4], this.vPos[i * 4 + 1] + 1, this.vPos[i * 4 + 2]);

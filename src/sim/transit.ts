@@ -108,7 +108,7 @@ export class Transit {
     if (w.peds.capacityLeft > 60) {
       const a = (q.length * 1.7) % 6.28;
       const slot = w.peds.spawn([st.x + Math.cos(a) * 1.5, st.z + Math.sin(a) * 1.5, st.x + Math.cos(a) * 1.5 + 0.05, st.z + Math.sin(a) * 1.5], i, 0.01, PED_FLAG_WAITING, 0);
-      if (slot >= 0) { w.peds.pause[slot] = 1e9; w.citizens.slot[i] = slot; }
+      if (slot >= 0) { w.peds.hold(slot); w.citizens.slot[i] = slot; }
     } else w.citizens.slot[i] = -1;
   }
 
@@ -347,7 +347,7 @@ export class Transit {
     const r = this.rides.get(i);
     if (!r) return null;
     const s = w.citizens.slot[i];
-    if (s >= 0 && w.peds.active[s] && w.peds.citizen[s] === i) return { x: w.peds.x[s], y: Math.max(0.2, w.terrain.heightAt(w.peds.x[s], w.peds.z[s])) + 0.1, z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 };
+    if (s >= 0 && w.peds.active[s] && w.peds.citizen[s] === i) { w.peds.pose(s); return { x: w.peds.x[s], y: Math.max(0.2, w.terrain.heightAt(w.peds.x[s], w.peds.z[s])) + 0.1, z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     const l = this.lines.find((x) => x.id === r.line);
     if (!l) return null;
     if (r.phase === 2) {

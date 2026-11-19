@@ -19,7 +19,7 @@ export class AudioEngine {
   private nextBird = 0;
   private nextHammer = 0;
   private nextHorn = 0;
-  private enabled = false;
+  enabled = false;
 
   toggle(): boolean {
     if (!this.ctx) this.init();

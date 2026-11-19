@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import type { App } from '../app';
 import { el } from './hud';
+import { icon } from './icons';
 
 interface Term { key: string; label: string; value: number }
 interface BuildingInfo {
   id: number; name: string; label: string; cat: string; level: number; wealth: number; floors: number; state: string; progress: number;
+  decay: number; squatted: boolean; stalled: boolean; stalledUntil: number; abandonedYears: number; corruption: number;
   district: string; builtDay: number; abandoned: boolean; households: number; hhCap: number; workers: number; jobs: number; students: number;
   profit: number; powered: boolean; watered: boolean; heritage: boolean; garbage: number; visitors: number; x: number; z: number; y: number; height: number;
   fields: Record<string, number>;
@@ -19,6 +21,8 @@ interface CitizenInfo {
 interface EdgeInfo {
   id: number; name: string; cls: string; lanes: number; oneway: number; len: number; volume: number[]; capacity: number; vc: number; history: number[];
   congestedDays: number; busLane: boolean; upgrading: boolean; od: [string, number][]; pairs: { ox: number; oz: number; dx: number; dz: number }[];
+  noise: null | { light: number; moto: number; heavy: number; power: number; index: number; speed: number; samples: number };
+  mid: { x: number; y: number; z: number; hx: number; hz: number };
   upgrade: null | { day: number; chosen: string; options: { label: string; benefit: number; cost: number; ratio: number; feasible: boolean; note: string }[] };
 }
 
@@ -33,8 +37,8 @@ export class Inspector {
   private lastRefresh = 0;
   private downAt = { x: 0, y: 0, t: 0 };
 
-  constructor(private app: App, root: HTMLElement) {
-    this.panel = el('div', 'panel side', root);
+  constructor(private app: App, container: HTMLElement, private onShow: () => void = () => {}, private onClose: () => void = () => {}) {
+    this.panel = el('div', 'insp', container);
     app.rig.scene.add(this.markers);
     const c = app.rig.renderer.domElement;
     c.addEventListener('pointerdown', (e) => { this.downAt = { x: e.clientX, y: e.clientY, t: performance.now() }; });
@@ -44,11 +48,17 @@ export class Inspector {
     });
   }
 
-  close() { this.panel.classList.remove('open'); this.kind = null; this.clearMarkers(); this.app.overlays.clearOD?.(); }
+  close() { if (this.kind === null) return; this.kind = null; this.clearMarkers(); this.app.overlays.clearOD?.(); this.onClose(); }
+  private pendingOpen = false;
+  private open() { if (this.pendingOpen) { this.pendingOpen = false; this.onShow(); } }
+  private head(label: string, title: string, sub: string) {
+    return `<div class="inspector-top"><span class="eyeline"><span></span>${label}</span><button class="text-button close">${icon('close', 14)} Fechar</button></div><h2>${title}</h2><p class="sub">${sub}</p>`;
+  }
 
   private pick(x: number, y: number) {
     const ray = new THREE.Raycaster();
-    const ndc = new THREE.Vector2((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
+    const rc = this.app.rig.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((x - rc.left) / rc.width) * 2 - 1, -((y - rc.top) / rc.height) * 2 + 1);
     ray.setFromCamera(ndc, this.app.rig.camera);
     // agents first (small targets get a generous pick radius)
     const ag = this.app.agents.pickAgent?.(ray);
@@ -69,14 +79,17 @@ export class Inspector {
   }
 
   async showBuilding(id: number) {
-    this.kind = 'building'; this.id = id;
+    this.kind = 'building'; this.id = id; this.pendingOpen = true;
     const d = await this.app.inspect<BuildingInfo>('building', id);
     if (!d || this.kind !== 'building' || this.id !== id) return;
-    this.panel.classList.add('open');
+    this.open();
     const occ = d.cat === 'res' || d.cat === 'informal' ? `${d.households}/${d.hhCap} famílias` : d.jobs ? `${d.workers}/${d.jobs} empregos` : '';
-    let html = `<span class="close">✕</span><h3>${d.name}</h3><div style="color:var(--mut)">${d.label}${d.cat === 'res' ? ` · nível ${d.level} · padrão ${WEALTH[d.wealth]}` : ''} · ${d.district}</div>
-      <div class="kv" style="margin-top:8px">
-        <span>Situação</span><span>${d.abandoned ? '⚠️ abandonado' : d.state === 'done' ? 'em operação' : `em obra (${Math.round(d.progress * 100)}%)`}</span>
+    let html = this.head('Por que aqui?', d.name, `${d.label}${d.cat === 'res' ? ` · nível ${d.level} · padrão ${WEALTH[d.wealth]}` : ''} · ${d.district}`) + `
+      ${d.decision ? `<div class="score-card"><span>Utilidade do lote escolhido</span><strong>${d.decision.total.toFixed(2)}</strong></div>` : ''}
+      <div class="kv">
+        <span>Situação</span><span>${d.abandoned ? `abandonado há ${d.abandonedYears < 1 ? 'menos de 1 ano' : `${Math.round(d.abandonedYears)} ano(s)`}` : d.squatted ? 'ocupação' : d.stalled ? 'obra parada' : d.state === 'done' ? 'em operação' : `em obra (${Math.round(d.progress * 100)}%)`}</span>
+        ${d.decay > 0.01 ? `<span>Deterioração</span><span>${Math.round(d.decay * 100)}%${d.decay > 0.75 ? ' · risco de desabamento' : ''}</span>` : ''}
+        ${d.corruption > 0.05 ? `<span>Corrupção local</span><span>${Math.round(d.corruption * 100)}%</span>` : ''}
         <span>Andares</span><span>${d.floors}</span>
         ${occ ? `<span>Ocupação</span><span>${occ}</span>` : ''}
         ${d.students ? `<span>Alunos</span><span>${d.students}</span>` : ''}
@@ -89,7 +102,7 @@ export class Inspector {
       </div>`;
     if (d.decision) {
       const dec = d.decision;
-      html += `<h4>Por que aqui?</h4><div style="color:var(--mut);margin-bottom:6px">${dec.actor} · dia ${dec.day + 1} · ${dec.motive}<br>${dec.sampled} lotes avaliados por <i>utilidade = Σ(peso × campo) − custos − rejeição</i></div>`;
+      html += `<h4>Decomposição da decisão</h4><div class="hint" style="margin-bottom:6px">${dec.actor} · dia ${dec.day + 1} · ${dec.motive}<br>${dec.sampled} lotes avaliados por <i>utilidade = Σ(peso × campo) − custos − rejeição</i></div>`;
       html += termsHtml(dec.terms, dec.total);
       if (dec.alternatives.length) {
         html += `<h4>Alternativas que perderam</h4>`;
@@ -104,7 +117,7 @@ export class Inspector {
       this.drawMarkers(d);
     } else this.clearMarkers();
     if (d.occupants?.length) {
-      html += `<h4>Quem está aqui</h4>` + d.occupants.slice(0, 14).map((o) => `<div class="tag" data-cid="${o.id}" style="cursor:pointer">${o.name} · ${o.role}</div>`).join('');
+      html += `<h4>Quem está aqui</h4><p class="hint">Clique numa pessoa para segui-la.</p>` + d.occupants.slice(0, 14).map((o) => `<div class="tag" data-cid="${o.id}" style="cursor:pointer">${o.name} · ${o.role}</div>`).join('');
     }
     this.panel.innerHTML = html;
     this.panel.querySelector('.close')!.addEventListener('click', () => this.close());
@@ -131,7 +144,7 @@ export class Inspector {
   private clearMarkers() { this.markers.clear(); }
 
   async showCitizen(id: number) {
-    this.kind = 'citizen'; this.id = id;
+    this.kind = 'citizen'; this.id = id; this.pendingOpen = true;
     this.clearMarkers();
     await this.refreshCitizen();
   }
@@ -139,15 +152,15 @@ export class Inspector {
     const id = this.id;
     const d = await this.app.inspect<CitizenInfo>('citizen', id);
     if (!d || this.kind !== 'citizen' || this.id !== id) return;
-    this.panel.classList.add('open');
-    let html = `<span class="close">✕</span><h3>${d.tourist ? '🧳 ' : ''}${d.name}</h3><div style="color:var(--mut)">${d.age} anos · ${d.sex} · ${d.edu}</div>
-      <div style="margin:6px 0">${d.traits.map((t) => `<span class="tag">${t}</span>`).join('')}</div>
-      <div style="font-size:13.5px;margin:8px 0;padding:6px 8px;background:rgba(255,255,255,.05);border-radius:8px">${d.state}</div>
+    this.open();
+    let html = this.head(d.tourist ? 'Visitante · observação individual' : 'Observação individual', `${d.tourist ? '🧳 ' : ''}${d.name}`, `${d.age} anos · ${d.sex} · ${d.edu}`) + `
+      <div style="margin:2px 0 4px">${d.traits.map((t) => `<span class="tag">${t}</span>`).join('')}</div>
+      <div class="state-pill">${d.state}</div>
       <div class="kv"><span>Casa</span><span>${d.home}</span><span>${d.tourist ? 'Hotel' : 'Trabalho/escola'}</span><span>${d.job}</span>
       <span>Renda/dia</span><span>$${d.income.toFixed(0)}</span><span>Economias</span><span>$${d.money.toFixed(0)}</span><span>Transporte</span><span>${d.mode}</span><span>Felicidade</span><span>${Math.round(d.happiness * 100)}%</span></div>`;
     html += `<h4>Necessidades</h4>`;
-    for (const [k, v] of Object.entries(d.needs)) html += `<div class="term"><span>${NEED_LABEL[k] ?? k}</span><div class="tb"><i style="left:0;width:${Math.round(v * 100)}%;background:${v > 0.6 ? 'var(--good)' : v > 0.3 ? '#f2b705' : 'var(--bad)'}"></i></div><span class="v">${Math.round(v * 100)}</span></div>`;
-    if (d.agenda.length) html += `<h4>Agenda de hoje</h4>` + d.agenda.map((a) => `<div style="${a.done ? 'color:var(--mut)' : ''}">${a.h} · ${a.act}</div>`).join('');
+    for (const [k, v] of Object.entries(d.needs)) html += `<div class="term"><span>${NEED_LABEL[k] ?? k}</span><div class="tb"><i style="left:0;width:${Math.round(v * 100)}%;background:${v > 0.6 ? 'var(--good)' : v > 0.3 ? 'var(--warn)' : 'var(--bad)'}"></i></div><span class="v">${Math.round(v * 100)}</span></div>`;
+    if (d.agenda.length) html += `<h4>Agenda de hoje</h4>` + d.agenda.map((a) => `<div class="alt" style="${a.done ? 'color:#93a598;text-decoration:line-through' : ''}">${a.h} · ${a.act}</div>`).join('');
     if (d.family.length) html += `<h4>Família</h4>` + d.family.map((f) => `<span class="tag">${f}</span>`).join('');
     html += `<h4>Biografia</h4>` + d.bio.map((b) => `<div class="bio"><b>Ano ${b.year}</b> · ${b.text}</div>`).join('');
     this.panel.innerHTML = html;
@@ -155,25 +168,37 @@ export class Inspector {
   }
 
   async showEdge(id: number) {
-    this.kind = 'edge'; this.id = id;
+    this.kind = 'edge'; this.id = id; this.pendingOpen = true;
     this.clearMarkers();
     const d = await this.app.inspect<EdgeInfo>('edge', id);
     if (!d) return;
-    this.panel.classList.add('open');
-    let html = `<span class="close">✕</span><h3>${d.name}</h3><div style="color:var(--mut)">${d.cls} · ${d.lanes} faixa(s)/sentido${d.oneway ? ' · mão única' : ''}${d.busLane ? ' · faixa de ônibus' : ''}${d.upgrading ? ' · 🚧 em obras' : ''}</div>
-      <div class="kv" style="margin-top:8px"><span>Comprimento</span><span>${d.len.toFixed(0)} m</span><span>Volume (veíc./h)</span><span>${d.volume.map((v) => v.toFixed(0)).join(' / ')}</span>
+    this.open();
+    let html = this.head('Por que congestionado?', d.name, `${d.cls} · ${d.lanes} faixa(s)/sentido${d.oneway ? ' · mão única' : ''}${d.busLane ? ' · faixa de ônibus' : ''}${d.upgrading ? ' · 🚧 em obras' : ''}`) + `
+      <div class="score-card"><span>Volume / capacidade</span><strong style="color:${d.vc > 0.85 ? 'var(--bad)' : 'inherit'}">${Math.round(d.vc * 100)}%</strong></div>
+      <div class="kv"><span>Comprimento</span><span>${d.len.toFixed(0)} m</span><span>Volume (veíc./h)</span><span>${d.volume.map((v) => v.toFixed(0)).join(' / ')}</span>
       <span>Capacidade</span><span>${d.capacity.toFixed(0)}</span><span>Volume/capacidade</span><span style="color:${d.vc > 0.85 ? 'var(--bad)' : 'inherit'}">${d.vc.toFixed(2)}</span>
       <span>Dias congestionado</span><span>${d.congestedDays}</span><span>Picos (7 dias)</span><span>${d.history.map((h) => h.toFixed(2)).join(' ')}</span></div>`;
     html += `<h4>Por que congestionado? (origem → destino)</h4>`;
     if (!d.od.length) html += '<div style="color:var(--mut)">Sem viagens registradas ainda.</div>';
     const max = Math.max(1, ...d.od.map((o) => o[1]));
     for (const [k, n] of d.od) html += `<div class="term"><span style="font-size:11px">${k}</span><div class="tb"><i style="left:0;width:${(n / max) * 100}%;background:#6aa8ff"></i></div><span class="v">${n}</span></div>`;
+    if (d.noise && d.noise.power > 0.02) {
+      const n = d.noise;
+      html += `<h4>Ruído do tráfego</h4><div class="score-card"><span>Índice simulado da via</span><strong>${Math.round(n.index * 100)}<small style="font-size:12px"> / 100</small></strong></div>`;
+      for (const [l, v] of [['Veículos leves', n.light], ['Motos', n.moto], ['Ônibus e caminhões', n.heavy]] as [string, number][]) {
+        const f = v / n.power;
+        html += `<div class="term"><span>${l}</span><div class="tb"><i style="left:0;width:${f * 100}%;background:#7c9db8"></i></div><span class="v">${Math.round(f * 100)}%</span></div>`;
+      }
+      html += `<div class="kv"><span>Velocidade média observada</span><span>${(n.speed * 3.6).toFixed(0)} km/h</span></div>`;
+      html += `<button class="button listen">${icon('speaker', 15)} Ouvir este trecho</button>`;
+    } else html += `<h4>Ruído do tráfego</h4><p class="empty">Sem amostras de ruído veicular na última hora.</p>`;
     if (d.upgrade) {
       html += `<h4>Decisão de upgrade (dia ${d.upgrade.day + 1})</h4><div>Escolhida: <b>${d.upgrade.chosen}</b></div>`;
       for (const o of d.upgrade.options) html += `<div class="alt">${o.feasible ? '' : '🚫 '}${o.label}: benefício ${o.benefit.toFixed(0)} veíc·min/dia, custo $${o.cost.toFixed(0)}, razão ${o.ratio.toFixed(2)}${o.note ? ` — ${o.note}` : ''}</div>`;
     }
     this.panel.innerHTML = html;
     this.panel.querySelector('.close')!.addEventListener('click', () => this.close());
+    this.panel.querySelector('.listen')?.addEventListener('click', () => this.app.listenAt(d.mid));
     this.app.overlays.showOD?.(d.pairs);
   }
 

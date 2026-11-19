@@ -3,13 +3,27 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Cidade Viva</title>
+  <meta name="theme-color" content="#10231d" />
+  <meta name="description" content="Cidade Viva — uma cidade procedural que cresce sozinha, em observação." />
+  <title>Cidade Viva — Observatório urbano</title>
   <link rel="stylesheet" href="/src/ui/style.css" />
 </head>
 <body>
-  <canvas id="c"></canvas>
-  <div id="ui"></div>
-  <div id="loading"><div class="logo">Cidade <b>Viva</b></div><div class="sub">gerando terreno, rio e a primeira vila…</div></div>
+  <div id="shell">
+    <header class="site-header" id="site-header"></header>
+    <main class="workspace" id="workspace">
+      <section class="viewer" id="viewer" aria-label="Observação em 3D">
+        <div class="scene" id="scene">
+          <canvas id="c"></canvas>
+          <div id="ui"></div>
+          <div id="loading"><span class="spin"></span><div><div class="logo">Cidade <b>Viva</b></div><div class="sub">gerando terreno, rio e a primeira vila…</div></div></div>
+        </div>
+        <div class="viewer-bar" id="viewer-bar"></div>
+      </section>
+      <aside class="panel" id="panel" aria-label="Dados da cidade"></aside>
+    </main>
+    <footer class="page-footer" id="page-footer"></footer>
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

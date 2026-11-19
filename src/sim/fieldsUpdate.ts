@@ -167,10 +167,15 @@ function splatCoverage(F: World['fields'], arr: Float32Array, x: number, z: numb
   const G = F.G, c = F.cell;
   const i0 = Math.max(0, Math.floor((x - r) / c)), i1 = Math.min(G - 1, Math.floor((x + r) / c));
   const j0 = Math.max(0, Math.floor((z - r) / c)), j1 = Math.min(G - 1, Math.floor((z + r) / c));
-  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-    const d = Math.hypot((i + 0.5) * c - x, (j + 0.5) * c - z);
-    if (d > r) continue;
-    const v = strength * (1 - (d / r) * (d / r) * 0.7);
-    arr[j * G + i] = Math.max(arr[j * G + i], 0) + v * 0.75;
+  const ir2 = 1 / (r * r);
+  for (let j = j0; j <= j1; j++) {
+    const dz = (j + 0.5) * c - z, dz2 = dz * dz, row = j * G;
+    for (let i = i0; i <= i1; i++) {
+      const dx = (i + 0.5) * c - x;
+      const q = (dx * dx + dz2) * ir2;
+      if (q > 1) continue;
+      const k = row + i;
+      arr[k] = (arr[k] > 0 ? arr[k] : 0) + strength * (1 - q * 0.7) * 0.75;
+    }
   }
 }

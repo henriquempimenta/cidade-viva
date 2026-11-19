@@ -163,7 +163,7 @@ export class Economy {
     const keep: Immigrant[] = [];
     for (const im of this.pending) {
       const home = this.pickHome(im.wealth);
-      if (home && C.count + im.size < C.max - 50) {
+      if (home) {
         const h = C.createFamily(home, im.wealth, { size: im.size, arriving: true });
         if (h) { C.arriveFromHighway(h); continue; }
       }
@@ -233,7 +233,7 @@ export class Economy {
       for (const m of h.members) {
         const jobOk = C.job[m] >= 0 || C.age[m] < 18 || C.age[m] >= 65 || C.studying[m] ? 0.15 : -0.25;
         const needs = (C.needs[m * 8] + C.needs[m * 8 + 3] + C.needs[m * 8 + 4]) / 3;
-        C.happiness[m] = clamp(0.45 + env + jobOk + (needs - 0.5) * 0.4 + (h.money > 0 ? 0.05 : -0.2) - p.taxRate * 0.6 + C.health[m] * 0.15 - 0.08, 0, 1);
+        C.happiness[m] = clamp(0.45 + env + jobOk + (needs - 0.5) * 0.4 + (h.money > 0 ? 0.05 : -0.2) - p.taxRate * 0.6 + C.health[m] * 0.15 - 0.08 - (1 - (w.integrity?.trust ?? 0.7)) * 0.12, 0, 1);
         hap += C.happiness[m];
       }
       hap /= Math.max(1, h.members.length);
@@ -302,6 +302,7 @@ export class Economy {
     for (const x of [...b.workers]) { w.citizens.addBio(x, `Perdeu o emprego com o fechamento de ${b.name}`); this.leaveJob(x); }
     b.abandoned = true;
     b.abandonedDays = 0;
+    b.abandonedDay = w.day;
     b.badDays = 0;
     w.buildings.dirty.add(b.id);
     w.events.emit('bankruptcy', b.x, b.z, 0.45, `${b.name} fecha as portas`, { ref: b.id, entity: { kind: 'building', id: b.id }, headline: b.def.cat === 'ind' && w.rng.chance(0.6) ? `${b.name} encerra atividades e demite ${b.jobCap.reduce((a, c) => a + c, 0)} funcionários` : undefined });
@@ -333,7 +334,8 @@ export class Economy {
     d.res = clamp((pend * 0.9 + this.movers.length * 0.3 - vacHomes * 0.8) * taxF, -40, 60);
     d.com = clamp(((pop * 0.12 * (1 + (w.tourism?.pressure ?? 0)) - comCap) / 6 + Math.min(10, this.unservedShopping * 0.02) - comVac * 0.15) * taxF, -40, 60);
     d.ind = clamp(((pop * 0.34 * vocInd + 30 + w.day * 5 - indCap) / 10 + lowEduUnemp * 0.08 - indVac * 0.05) * taxF * (this.crisis > 0 ? 0.2 : 1), -40, 60);
-    d.off = clamp(((pop * 0.07 * vocOff * eduF - offCap) / 8 + hiEduUnemp * 0.1 - offVac * 0.06) * taxF * (this.crisis > 0 ? 0.3 : 1), -40, 60);
+    // investors shy away from cities where contracts and permits cannot be trusted
+    d.off = clamp(((pop * 0.07 * vocOff * eduF * (0.55 + 0.45 * (w.integrity?.trust ?? 0.7)) - offCap) / 8 + hiEduUnemp * 0.1 - offVac * 0.06) * taxF * (this.crisis > 0 ? 0.3 : 1), -40, 60);
     this.unservedShopping *= 0.3;
   }
 

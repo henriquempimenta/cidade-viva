@@ -33,7 +33,11 @@ export class Particles {
       blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
       uniforms: { uScale: { value: 600 }, uNight: U.uNight },
       vertexShader: `attribute vec4 aCol; attribute float aSize; varying vec4 vC; uniform float uScale;
-        void main(){ vC = aCol; vec4 mv = modelViewMatrix * vec4(position,1.0); gl_PointSize = aSize * uScale / max(1.0, -mv.z); gl_Position = projectionMatrix * mv; }`,
+        void main(){ vC = aCol; vec4 mv = modelViewMatrix * vec4(position,1.0);
+          float z = -mv.z;
+          // a puff right in front of the lens would become a giant opaque disc: fade it out and cap the size
+          vC.a *= smoothstep(6.0, 45.0, z);
+          gl_PointSize = min(aSize * uScale / max(1.0, z), 160.0); gl_Position = projectionMatrix * mv; }`,
       fragmentShader: `varying vec4 vC; uniform float uNight;
         void main(){ vec2 d = gl_PointCoord - 0.5; float r = length(d); if (r > 0.5) discard; float a = smoothstep(0.5, 0.1, r);
           gl_FragColor = vec4(vC.rgb * ${additive ? '1.0' : '(1.0 - uNight * 0.75)'}, vC.a * a); }`,

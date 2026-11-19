@@ -8,6 +8,7 @@ import { Building, Buildings, Candidate } from './buildings';
 import { EventBus } from './events';
 import { Fields } from './fields';
 import { updateFields } from './fieldsUpdate';
+import { Integrity } from './corruption';
 import { Occupancy, OCC_RAIL } from './occupancy';
 import { Market, RoadGrowth } from './planner';
 import { borderPoint, chaikin, resample, simplify, terrainPath, type P2 } from './regional';
@@ -69,6 +70,7 @@ export class World {
   utils!: Utilities;
   services!: Services;
   cityHall!: CityHall;
+  integrity!: Integrity;
   upgrades!: RoadUpgrades;
   rail2!: Rail;
   trainsSys!: Rail;
@@ -140,7 +142,7 @@ export class World {
   dateLabel() { return `Ano ${this.year} · ${SEASONS[this.season]}`; }
 
   siteCtx(): SiteContext {
-    return { terrain: this.terrain, roads: this.roads, occ: this.occ, fields: this.fields, rng: this.rng, params: this.params, center: this.center, cityRadius: this.cityRadius };
+    return { terrain: this.terrain, roads: this.roads, occ: this.occ, fields: this.fields, rng: this.rng, params: this.params, center: this.center, cityRadius: this.cityRadius, bribe: this.integrity ? (x, z) => this.integrity.bribe(x, z) : undefined };
   }
 
   // ---------------- founding ----------------
@@ -252,6 +254,7 @@ export class World {
     this.outageGrid = this.utils.outageGrid;
     this.services = new Services(this);
     this.cityHall = new CityHall(this);
+    this.integrity = new Integrity(this);
     this.upgrades = new RoadUpgrades(this);
     this.lastUpgrade = this.upgrades.decisions;
     this.buildBypass = () => this.bypass();
@@ -323,6 +326,13 @@ export class World {
   }
   exitNode(): number { return this.entryNode(); }
   hasUniversity() { return this.buildings.list.some((b) => b.kind === 'university' && b.state === 'done'); }
+  statsEdu = 1;
+  computeEdu(): number {
+    const C = this.citizens;
+    let edu = 0, n = 0;
+    for (let i = 0; i < C.max; i += 3) if (C.alive[i] && C.age[i] >= 18 && !C.tourist[i]) { edu += C.edu[i]; n++; }
+    return n ? edu / n : 1;
+  }
   avgHappiness(): number {
     const C = this.citizens;
     let s = 0, n = 0;
@@ -524,8 +534,64 @@ export class World {
     s.buses = this.transitSys.lines.reduce((a, l) => a + l.vehicles.size, 0);
     s.virtualTrips = 0;
     for (let i = 0; i < C.max; i++) if (C.alive[i] && C.state[i] === 4) s.virtualTrips++;
+    s.hall = this.hallReport();
+    s.hall.integrity = this.integrity.report();
     this.statsHook?.(s);
   };
+
+  /** dashboard for the Prefeitura tab: where the money goes, what is being built, how the networks cope */
+  hallReport(): import('../shared/protocol').HallReport {
+    const H = this.cityHall, U = this.utils, F = this.fields.f;
+    const works: import('../shared/protocol').HallReport['works'] = [];
+    for (const id of this.buildings.underConstruction) {
+      const b = this.buildings.byId.get(id);
+      if (!b || !b.def.public) continue;
+      works.push({ id: b.id, name: b.name, kind: b.kind, cost: b.def.cost ?? 0, progress: b.progress, motive: b.decision?.motive ?? '' });
+    }
+    for (const [id, rw] of this.roadWorks) {
+      const e = this.roads.edges[id];
+      if (!e?.alive || rw.kind !== 'upgrade') continue;
+      works.push({ id, name: e.name, kind: 'road', cost: Math.round(e.len * 6), progress: e.workP, motive: rw.motive, road: true });
+    }
+    // coverage = share of residents inside the service's reach
+    const cover = (name: 'cov_health' | 'cov_education' | 'cov_police' | 'cov_fire') => {
+      const c = F[name], r = F.resDensity;
+      let tot = 0, ok = 0;
+      for (let k = 0; k < r.length; k++) { if (r[k] <= 0.01) continue; tot += r[k]; ok += r[k] * Math.min(1, c[k]); }
+      return tot > 0 ? ok / tot : 0;
+    };
+    const pendingOf = (kinds: string[]) => works.filter((wk) => kinds.includes(wk.kind)).length;
+    const pop = Math.max(1, this.population);
+    const networks = [
+      { key: 'power', label: 'Energia', served: Math.min(U.power.supply, U.power.demand), demand: U.power.demand, pending: pendingOf(['dieselGen', 'thermalPlant', 'hydroPlant', 'windFarm', 'solarFarm', 'nuclearPlant']) },
+      { key: 'water', label: 'Água', served: Math.min(U.water.supply, U.water.demand), demand: U.water.demand, pending: pendingOf(['well', 'waterPump', 'waterTreatment', 'waterTower']) },
+      { key: 'sewage', label: 'Esgoto tratado', served: Math.min(U.sewage.cap, U.sewage.prod), demand: U.sewage.prod, pending: pendingOf(['sewagePlant']) },
+      { key: 'garbage', label: 'Coleta de lixo', served: Math.min(U.garbage.cap, U.garbage.prod), demand: U.garbage.prod, pending: pendingOf(['dump', 'landfill', 'recycling', 'incinerator']) },
+      { key: 'health', label: 'Saúde', served: cover('cov_health') * pop, demand: pop, pending: pendingOf(['clinic', 'hospital']) },
+      { key: 'education', label: 'Educação', served: cover('cov_education') * pop, demand: pop, pending: pendingOf(['daycare', 'school', 'highSchool', 'university', 'library']) },
+      { key: 'police', label: 'Policiamento', served: cover('cov_police') * pop, demand: pop, pending: pendingOf(['police']) },
+      { key: 'fire', label: 'Bombeiros', served: cover('cov_fire') * pop, demand: pop, pending: pendingOf(['fire']) },
+    ];
+    const lines = this.transitSys.lines.map((l) => {
+      let waiting = 0;
+      for (const q of l.waiting.values()) waiting += q.length;
+      return { id: l.id, name: l.name, color: l.color, kind: l.kind, fleet: l.kind === 'bus' || l.kind === 'brt' ? l.vehicles.size : l.fleet, riders: l.ridersYday, waiting, stops: l.stops.length };
+    });
+    let vacant = 0, abandoned = 0, rentSum = 0, rentN = 0;
+    for (const b of this.buildings.list) {
+      if (b.state !== 'done') continue;
+      if (b.abandoned) abandoned++;
+      else if ((b.def.cat === 'res' || b.def.cat === 'informal') && b.households.length < b.hhCap) vacant += b.hhCap - b.households.length;
+      if (b.def.cat === 'res' && b.households.length && rentN < 400) { rentSum += 8 + this.fields.sample('landValue', b.x, b.z) * 40 * (1 + b.level * 0.3); rentN++; }
+    }
+    const E = this.economy;
+    const last = H.log[H.log.length - 1];
+    return {
+      breakdown: { ...H.breakdown }, ledger: H.ledger.slice(0, 12), works: works.slice(0, 12), networks, lines,
+      market: { homeless: E.homelessDemand.reduce((a, b) => a + b, 0), vacant, abandoned, demolishing: this.buildings.demolishing.length, pending: E.pending.length, rent: rentN ? (rentSum / rentN) * E.priceIndex : 0 },
+      lastCycle: last ? { day: last.day, chosen: last.chosen.slice(0, 6), rejected: last.rejected.slice(0, 6) } : undefined,
+    };
+  }
   statsHook: ((s: import('../shared/protocol').Stats) => void) | null = null;
   inspectCitizen = (id: number) => this.citizens.inspect(id);
   inspectPed = (slot: number) => { const c = this.peds.citizen[slot]; return c >= 0 ? this.citizens.inspect(c) : null; };
@@ -681,14 +747,17 @@ export class World {
       const b = this.buildings.byId.get(id);
       if (!b) { this.buildings.underConstruction.delete(id); continue; }
       const before = b.state;
+      if (b.def.public && this.integrity.frozen(b)) continue; // stalled public works
       this.buildings.advance(b, dt * (this.weather.rain > 0.6 ? 0.6 : 1));
       if (b.state !== before && b.state === 'done') this.onBuildingCompleted(b);
     }
-    for (const b of this.buildings.list) {
-      if (b.state === 'demolishing') {
-        this.buildings.advance(b, dt);
+    const dem = this.buildings.demolishing;
+    if (dem.length) {
+      for (const b of dem.slice()) {
+        if (b.alive && b.state === 'demolishing') this.buildings.advance(b, dt);
         if (!b.alive && b.pendingRebuild) this.startRebuild(b);
       }
+      this.buildings.demolishing = this.buildings.demolishing.filter((b) => b.alive && b.state === 'demolishing');
     }
     // road works
     for (const [id, w] of this.roadWorks) {
@@ -738,6 +807,7 @@ export class World {
     this.services.hourly();
     this.transitSys.hourly();
     this.happen.hourly();
+    this.integrity.hourly();
     this.rail2.cargoHourly();
     if (this.hourIdx % 12 === 6) this.cityHall.cycle();
     this.updateDemand();
@@ -757,6 +827,8 @@ export class World {
     this.tourismSys.daily();
     this.happen.daily();
     this.cityHall.daily();
+    this.statsEdu = this.computeEdu();
+    this.integrity.daily();
     if (this.era >= 1) this.upgrades.daily();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
   }

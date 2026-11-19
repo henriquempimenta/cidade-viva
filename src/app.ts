@@ -72,7 +72,8 @@ export class App {
     this.params = params;
     this.worker = new Worker(new URL('./sim/worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<FromWorker>) => this.onMessage(e.data);
-    this.send({ type: 'init', params });
+    const warm = Number(new URLSearchParams(location.search).get('warmup') ?? 0);
+    this.send({ type: 'init', params, warmup: warm });
     this.send({ type: 'speed', speed: this.speed });
   }
 

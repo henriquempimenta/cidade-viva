@@ -15,6 +15,8 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
   if (m.type === 'init') {
     host?.stop();
     const world = new World(m.params);
+    const warm = (m as { warmup?: number }).warmup ?? 0;
+    for (let d = 0; d < warm; d++) for (let k = 0; k < 4800; k++) world.step(MOTION_DT);
     host = new SimHost(world, post);
     post({ type: 'init', world: world.initMessage() }, []);
     host.start();

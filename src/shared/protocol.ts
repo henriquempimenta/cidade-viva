@@ -135,7 +135,7 @@ export interface WorldDiff {
 }
 
 export type ToWorker =
-  | { type: 'init'; params: SimParams }
+  | { type: 'init'; params: SimParams; warmup?: number }
   | { type: 'speed'; speed: number }
   | { type: 'params'; params: Partial<SimParams> }
   | { type: 'inject'; event: string }

@@ -22,6 +22,9 @@ import { Peds } from './peds';
 import { Places } from './places';
 import { carPlan, carPlanFromNode, carPlanToNode, doorOf, walkPoints, type CarPlan } from './trips';
 import type { RNode } from './roads';
+import { Utilities } from './utilities';
+import { Services } from './services';
+import { CityHall } from './cityhall';
 import { PED_FLAG_WORKER, PED_FLAG_FUNERAL, VType, VEH_FLAG_SIREN } from '../shared/constants';
 
 export interface District { id: number; name: string; x: number; z: number; founded: number }
@@ -58,6 +61,13 @@ export class World {
   transit2: TransitAPI | null = null;
   tourism2: TourismAPI | null = null;
   citizens!: Citizens;
+  utils!: Utilities;
+  services!: Services;
+  cityHall!: CityHall;
+  transitCost?: () => number;
+  tourismTax?: () => number;
+  extraProjects?: () => unknown[];
+  outageGrid?: () => Uint8Array;
   economy!: Economy;
   traffic!: Traffic;
   peds!: Peds;
@@ -217,6 +227,12 @@ export class World {
     this.traffic = new Traffic(this.roads);
     this.peds = new Peds(this.terrain);
     this.hasCitizens = true;
+    this.utils = new Utilities(this);
+    this.utilities = this.utils;
+    this.outageGrid = this.utils.outageGrid;
+    this.services = new Services(this);
+    this.cityHall = new CityHall(this);
+    this.serviceArrived = (slot) => this.services.arrived(slot);
     this.places.rebuild(this.buildings.list);
     this.traffic.onArrive = (slot) => this.vehicleArrived(slot);
     this.traffic.onStuck = (slot) => this.vehicleStuck(slot);
@@ -369,6 +385,37 @@ export class World {
   }
   deathsUnserved = 0;
 
+  /** a bridge when the near bank runs out of land */
+  bridgeProject = (): unknown => {
+    if (this.era < 1 || this.siteScarcity < 0.4 || this.roadWorks.size > 4) return null;
+    if (this.roads.edges.some((e) => e.bridge && e.progress < 1)) return null;
+    const T = this.terrain;
+    const cands = this.roads.nodes.filter((n) => n.alive && n.edges.length > 0 && n.edges.length < 4 && T.distToRiver(n.x, n.z) < 220 && Math.hypot(n.x - this.center.x, n.z - this.center.z) < this.cityRadius + 300);
+    for (let k = 0; k < 25 && cands.length; k++) {
+      const n = cands[Math.floor(this.rng.next() * cands.length)];
+      const ri = T.riverIndex(n.x, n.z);
+      const rp = T.river[ri];
+      const dx = rp.x - n.x, dz = rp.z - n.z, l = Math.hypot(dx, dz) || 1;
+      const reach = l + this.rng.range(90, 170);
+      const bx = n.x + (dx / l) * reach, bz = n.z + (dz / l) * reach;
+      if (T.heightAt(bx, bz) < 1) continue;
+      const plan = this.roads.planSegment(n.id, bx, bz, RoadClass.Collector, { allowBridge: true, maxBridge: this.era >= 2 ? 300 : 200, maxGrade: 0.14 });
+      if (!plan.ok || plan.waterLen < 10) continue;
+      const signature = this.era >= 2 && plan.len > 160 && this.budget.money > 9000;
+      const cost = plan.len * (signature ? 30 : 12) + plan.waterLen * 20;
+      return {
+        kind: 'bridge', label: signature ? 'Ponte estaiada' : 'Ponte', motive: `Falta de lotes nesta margem; ${Math.round(plan.waterLen)} m sobre o rio`, benefit: 20 + this.siteScarcity * 15, cost,
+        run: () => {
+          const e = this.roads.applyPlan(plan, { progress: 0, day: this.day, name: signature ? 'Ponte Estaiada ' + this.rng.pick(['do Rio', 'da Integração', 'Nova Era', 'dos Ipês']) : undefined });
+          this.onRoadStarted(e, 'Expansão para a outra margem');
+          if (signature) this.events.emit('landmark', (plan.ax + plan.bx) / 2, (plan.az + plan.bz) / 2, 1, `Começa a construção da ${e.name}, nova obra-símbolo`, { headline: `Cidade ganhará a ${e.name}`, entity: { kind: 'edge', id: e.id }, visual: 1 });
+          return true;
+        },
+      };
+    }
+    return null;
+  };
+
   statsExtra = (s: import('../shared/protocol').Stats) => {
     const E = this.economy, C = this.citizens;
     s.employed = E.employed; s.unemployed = E.unemployed; s.students = E.students; s.jobs = E.jobsTotal; s.vacancies = E.vacancies;
@@ -380,6 +427,11 @@ export class World {
     const tot = C.modeCount.reduce((a, b) => a + b, 0) || 1;
     s.modal = { walk: C.modeCount[0] / tot, bike: C.modeCount[1] / tot, car: C.modeCount[2] / tot, bus: C.modeCount[3] / tot, rail: C.modeCount[4] / tot };
     s.money = this.budget.money; s.debt = this.budget.debt; s.income = this.budget.income; s.expenses = this.budget.expenses;
+    const U = this.utils;
+    s.power = { ...U.power }; s.water = { ...U.water }; s.sewage = { ...U.sewage }; s.garbage = { ...U.garbage };
+    s.crime = this.services.avgCrime;
+    let em = 0; for (let k = 0; k < this.fields.f.airPollution.length; k++) em += this.fields.f.airPollution[k];
+    s.emissions = em;
     s.virtualTrips = 0;
     for (let i = 0; i < C.max; i++) if (C.alive[i] && C.state[i] === 4) s.virtualTrips++;
     this.statsHook?.(s);
@@ -591,6 +643,9 @@ export class World {
     this.roads.hourTick();
     updateFields(this);
     this.economy.hourly();
+    this.utils.hourly();
+    this.services.hourly();
+    if (this.hourIdx % 12 === 6) this.cityHall.cycle();
     this.updateDemand();
     this.runMarket();
     this.constructionLogistics();
@@ -602,6 +657,9 @@ export class World {
     this.roads.dayTick();
     this.citizens.daily();
     this.economy.daily();
+    this.utils.daily();
+    this.services.daily();
+    this.cityHall.daily();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
   }
 

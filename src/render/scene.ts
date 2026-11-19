@@ -104,7 +104,7 @@ export class SceneRig {
         s.scale.y = 0.55;
         c.add(s);
       }
-      c.position.set(Math.random() * mapSize * 1.6 - mapSize * 0.3, 380 + Math.random() * 160, Math.random() * mapSize * 1.6 - mapSize * 0.3);
+      c.position.set(Math.random() * mapSize * 1.6 - mapSize * 0.3, 900 + Math.random() * 200, Math.random() * mapSize * 1.6 - mapSize * 0.3);
       this.clouds.add(c);
     }
     this.scene.add(this.clouds);
@@ -193,7 +193,7 @@ export class SceneRig {
     this.bloom.threshold = 0.85 - 0.25 * this.night;
     // clouds drift with the wind
     const cm = (this.clouds.children[0]?.children[0] as THREE.Mesh)?.material as THREE.MeshStandardMaterial;
-    if (cm) { cm.opacity = 0.6 + rain * 0.35; cm.color.setScalar(0.95 - rain * 0.5).multiplyScalar(0.2 + 0.8 * day); }
+    if (cm) { cm.opacity = 0.6 + rain * 0.35; cm.color.setScalar(0.95 - rain * 0.5).multiplyScalar(0.4 + 0.6 * day); }
     for (const c of this.clouds.children) {
       c.position.x += dt * (6 + U.uWind.value * 10);
       if (c.position.x > this.mapSize * 1.4) c.position.x = -this.mapSize * 0.4;

@@ -253,6 +253,7 @@ export class Economy {
       F.blur(acc, a2, 2); F.blur(cnt, c2, 2);
       for (let k = 0; k < a2.length; k++) F.f.happiness[k] = c2[k] > 0.01 ? a2[k] / c2[k] : 0;
     }
+    for (const b of w.buildings.list) b.visitors = Math.round(b.visitors * 0.3);
     // businesses
     let profits = 0, taxB = 0;
     for (const b of w.buildings.list) {

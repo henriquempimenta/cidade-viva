@@ -251,7 +251,7 @@ export class Director {
         const c = this.w.center();
         const R = this.w.cityRadius() * 1.7 + 300;
         const a = (s.opts.angle ?? 0) + dir * t * 0.025;
-        pos.set(c.x + Math.cos(a) * R, R * 0.55 + 120, c.z + Math.sin(a) * R);
+        pos.set(c.x + Math.cos(a) * R, Math.min(700, R * 0.55 + 120), c.z + Math.sin(a) * R);
         look.set(f.x * 0.3 + c.x * 0.7, 10, f.z * 0.3 + c.z * 0.7);
         break;
       }
@@ -298,7 +298,9 @@ export class Director {
         const u = Math.min(total - 0.001, (t / s.dur) * total);
         const i = Math.floor(u), fr = u - i;
         const p = path[i].clone().lerp(path[i + 1], fr);
-        const ahead = path[Math.min(total, i + 5)].clone();
+        let j = i + 1, acc = 0;
+        while (j < total && acc < 220) { acc += path[j].distanceTo(path[j - 1]); j++; }
+        const ahead = path[Math.min(total, j)].clone();
         const side = (s.opts.dir ?? 1) * 25;
         const dx = path[i + 1].x - path[i].x, dz = path[i + 1].z - path[i].z, dl = Math.hypot(dx, dz) || 1;
         pos.set(p.x - (dz / dl) * side, p.y + 45 + Math.sin(t * 0.3) * 12, p.z + (dx / dl) * side);
@@ -335,6 +337,7 @@ export class Director {
         break;
       }
     }
+    pos.y = Math.min(pos.y, 780); // stay below the cloud deck
     // keep inside a sane map region
     pos.x = Math.max(-1500, Math.min(this.w.mapSize + 1500, pos.x));
     pos.z = Math.max(-1500, Math.min(this.w.mapSize + 1500, pos.z));

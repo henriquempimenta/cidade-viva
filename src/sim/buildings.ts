@@ -136,6 +136,8 @@ export class Buildings {
     const L = b.level;
     if (def.cat === 'res') b.hhCap = L <= 1 ? 1 : L === 2 ? 2 : Math.round(b.floors * (L === 3 ? 2 : L === 4 ? 3 : 4) * Math.max(0.6, (b.w * b.d) / 400));
     else if (def.cat === 'informal') b.hhCap = 1;
+    else if (b.kind === 'hotel') b.hhCap = b.floors * 4;
+    else if (b.kind === 'hostel') b.hhCap = b.floors * 3;
     else if (b.kind === 'com') b.hhCap = L >= 2 ? Math.max(0, b.floors - 1) : 0; // apartments above shops
     else b.hhCap = 0;
     if (def.jobs) {

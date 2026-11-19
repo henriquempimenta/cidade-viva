@@ -28,6 +28,8 @@ import { CityHall } from './cityhall';
 import { RoadUpgrades } from './roadUpgrades';
 import { Rail } from './rail';
 import { Transit } from './transit';
+import { Tourism } from './tourism';
+import { Happenings } from './happenings';
 import { PED_FLAG_WORKER, PED_FLAG_FUNERAL, VType, VEH_FLAG_SIREN } from '../shared/constants';
 
 export interface District { id: number; name: string; x: number; z: number; founded: number }
@@ -74,6 +76,11 @@ export class World {
   transitSys!: Transit;
   crossingsSnapshot?: () => Uint8Array;
   cargoFlows: number[] = [];
+  tourismSys!: Tourism;
+  happen!: Happenings;
+  festivalDays = 0;
+  floodVictims = 0;
+  inject = (ev: string) => this.happen.inject(ev);
   lastUpgrade!: Map<number, unknown>;
   transitAPI: { ridersOn(edge: number): number } | null = null;
   buildBypass?: () => void;
@@ -263,7 +270,12 @@ export class World {
     };
     this.traffic.onStop = T.onBusNode;
     this.crossingsSnapshot = this.rail2.crossingsSnapshot;
-    this.extraProjects = () => this.rail2.projects();
+    this.tourismSys = new Tourism(this);
+    this.tourism = this.tourismSys;
+    this.tourism2 = this.tourismSys;
+    this.tourismTax = () => this.tourismSys.taxToday;
+    this.happen = new Happenings(this);
+    this.extraProjects = () => [...this.rail2.projects(), ...this.happen.projects()];
     this.transitCost = () => T.cost() - T.fares();
     this.serviceArrived = (slot) => this.services.arrived(slot);
     this.places.rebuild(this.buildings.list);
@@ -431,6 +443,7 @@ export class World {
   }
   deathsUnserved = 0;
   lastBridgeDay = -10;
+  private sentFlood = 0;
 
   /** ring road / bypass: a new road around the built-up area, linking the highway before and after the city */
   bypass() {
@@ -507,6 +520,8 @@ export class World {
     s.crime = this.services.avgCrime;
     let em = 0; for (let k = 0; k < this.fields.f.airPollution.length; k++) em += this.fields.f.airPollution[k];
     s.emissions = em;
+    s.tourists = this.tourismSys.count; s.attractiveness = this.tourismSys.attractiveness;
+    s.buses = this.transitSys.lines.reduce((a, l) => a + l.vehicles.size, 0);
     s.virtualTrips = 0;
     for (let i = 0; i < C.max; i++) if (C.alive[i] && C.state[i] === 4) s.virtualTrips++;
     this.statsHook?.(s);
@@ -722,6 +737,7 @@ export class World {
     this.utils.hourly();
     this.services.hourly();
     this.transitSys.hourly();
+    this.happen.hourly();
     this.rail2.cargoHourly();
     if (this.hourIdx % 12 === 6) this.cityHall.cycle();
     this.updateDemand();
@@ -738,6 +754,8 @@ export class World {
     this.utils.daily();
     this.services.daily();
     this.transitSys.daily();
+    this.tourismSys.daily();
+    this.happen.daily();
     this.cityHall.daily();
     if (this.era >= 1) this.upgrades.daily();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
@@ -786,6 +804,8 @@ export class World {
       if (this.era >= 1) pool.push('factory', 'steelMill');
       tries.push([this.rng.pick(pool), 1, d.ind]);
     }
+    if (this.tourismSys?.hotelDemand > 0 && this.rng.chance(0.5)) tries.push([this.rng.chance(0.65) ? 'hotel' : 'hostel', 1, 10]);
+    if (this.tourismSys?.started && this.rng.chance(0.15)) tries.push(['restaurant', 1, 8]);
     if (d.off > 0 && this.era >= 1) tries.push([this.era >= 2 && this.rng.chance(0.25) ? 'techPark' : 'off', 1, d.off]);
     for (const [kind, wealth, dem] of tries) {
       if (budget <= 0) break;
@@ -849,6 +869,10 @@ export class World {
     if (this.rail2?.crossingsDirty) { this.rail2.crossingsDirty = false; diff.crossings = this.rail2.crossingViews(); }
     const st = this.rail2?.stationViews(); if (st?.length) diff.stations = st;
     const lv = this.transitSys?.views(); if (lv?.length) diff.lines = lv;
+    if (this.happen) {
+      if (Math.abs(this.happen.floodLevel - this.sentFlood) > 0.1) { this.sentFlood = this.happen.floodLevel; diff.floodLevel = this.happen.floodLevel; }
+      if (this.happen.dikesDirty) { this.happen.dikesDirty = false; diff.dikes = this.happen.dikes; diff.heights = this.terrain.heights.slice(); }
+    }
     if (this.utils?.dirtyLines.size) { diff.powerLines = [...this.utils.dirtyLines].map((id) => ({ ...this.utils.powerLines[id] })); this.utils.dirtyLines.clear(); }
     this.diffHook?.(diff);
     const ev = this.events.drain();

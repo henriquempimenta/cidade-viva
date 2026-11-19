@@ -388,7 +388,7 @@ export class Citizens {
     const speed = mode === 1 ? r.range(4, 5.5) : r.range(1.2, 1.5) * (this.age[i] > 70 ? 0.75 : 1);
     if (w.peds.capacityLeft > 30) {
       const pts = walkPoints(w.roads, plan, doorOf(w.roads, from), doorOf(w.roads, to));
-      const slot = w.peds.spawn(pts, i, speed, mode === 1 ? PED_FLAG_BIKE : 0, this.colorOf(i));
+      const slot = w.peds.spawn(pts, i, speed, (mode === 1 ? PED_FLAG_BIKE : 0) | (this.tourist[i] ? PED_FLAG_TOURIST | (a === Act.Hotel ? PED_FLAG_LUGGAGE : 0) : 0), this.colorOf(i));
       if (slot >= 0) { this.state[i] = ST_WALK; this.slot[i] = slot; return; }
     }
     this.virtualArrive(i, len / speed);

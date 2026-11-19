@@ -29,3 +29,5 @@ const vcs = w.roads.edges.filter((e) => e.alive && e.progress >= 1).map((e) => (
 vcs.sort((a, b) => b.vc - a.vc);
 console.log('top vc', JSON.stringify(vcs.slice(0, 6)));
 console.log('rail2', w.rail2.lines.map((l) => `${l.kind} st ${l.stations.length} tr ${l.tracks}`).join(' | '), 'waitSingle', w.rail2.waitingSingle);
+console.log('tourism', JSON.stringify({ attr: w.tourismSys.attractiveness.toFixed(2), started: w.tourismSys.started, tourists: w.tourismSys.count, hotels: w.buildings.list.filter((b) => b.kind === 'hotel' || b.kind === 'hostel').length, floods: w.happen.floods, dikes: w.happen.dikes.length, heritage: w.buildings.list.filter((b) => b.heritage).length }));
+console.log('chronicle', w.events.chronicle.slice(-25).map((e) => `d${e.day} ${e.headline}`).join('\n'));

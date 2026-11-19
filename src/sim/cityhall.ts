@@ -38,11 +38,12 @@ export class CityHall {
     for (const b of w.buildings.list) if (b.def.public && b.state === 'done') maint += b.def.maint * 6;
     let roadKm = 0;
     for (const e of w.roads.edges) if (e.alive && e.progress >= 1) roadKm += e.len / 1000;
-    maint += roadKm * (10 + w.era * 6) + w.population * (1.6 + w.era * 1.1);
+    maint += roadKm * (10 + w.era * 6) + w.population * (0.9 + w.era * 0.45);
     maint += (w.transitCost?.() ?? 0);
     const tariffs = w.population * 0.35 * w.economy.priceIndex; // water/power/garbage fees
     const transfers = (250 + w.population * 0.25) * p.budgetMult; // state & federal transfers
-    const income = w.economy.taxToday * 0.025 * p.budgetMult + tariffs + transfers + (w.tourismTax?.() ?? 0);
+    const municipalTax = w.population * p.taxRate * 18 * w.economy.priceIndex; // IPTU/ISS-like, bounded per capita
+    const income = municipalTax * p.budgetMult + tariffs + transfers + (w.tourismTax?.() ?? 0);
     const interest = B.debt * 0.004;
     B.income = income; B.expenses = maint + interest;
     B.money += income - maint - interest;

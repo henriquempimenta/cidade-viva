@@ -127,7 +127,7 @@ export class Happenings {
     const victims = w.buildings.list.filter((b) => T.isFlood(b.x, b.z) && b.state === 'done' && !b.def.public);
     const relocationCost = victims.length * 160;
     const segs: number[][] = [];
-    for (let i = 0; i < T.river.length - 1; i++) {
+    for (let i = 0; i < T.river.length - 1; i += 2) {
       const p = T.river[i], q = T.river[i + 1];
       if (Math.hypot(p.x - w.center.x, p.z - w.center.z) > w.cityRadius + 250) continue;
       const ang = Math.atan2(q.z - p.z, q.x - p.x);

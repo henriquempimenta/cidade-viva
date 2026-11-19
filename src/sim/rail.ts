@@ -326,10 +326,10 @@ export class Rail {
     const w = this.w;
     const def = KINDS[kind];
     const bw = def.w[1], bd = def.d[1];
-    for (const ds of [0, 60, -60, 120, -120]) for (const side of [1, -1]) {
+    for (const ds of [0, 60, -60, 120, -120, 200, -200, 300, -300]) for (const extra of [0, 12]) for (const side of [1, -1]) {
       const p = this.at(l, s + ds);
       const nx = -Math.sin(p[3]) * side, nz = Math.cos(p[3]) * side;
-      const cx = p[0] + nx * (offset + bd / 2), cz = p[2] + nz * (offset + bd / 2);
+      const cx = p[0] + nx * (offset + extra + bd / 2), cz = p[2] + nz * (offset + extra + bd / 2);
       if (!w.occ.rectFree(cx, cz, p[3], bw, bd, true)) continue;
       if (w.terrain.heightAt(cx, cz) < 1) continue;
       const pe = w.roads.nearestEdgePoint(cx, cz, 250, (e) => e.alive && e.progress >= 1 && e.cls !== RoadClass.Highway);

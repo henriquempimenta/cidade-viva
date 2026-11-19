@@ -30,7 +30,7 @@ export interface REdge {
   busLane: boolean;
   len: number;
   progress: number; // 1 = usable
-  upgrading: boolean; upgradeTo?: Partial<REdge>;
+  upgrading: boolean; upgradeTo?: Partial<REdge>; workP: number;
   name: string;
   pts: number[];
   // traffic stats (per direction)
@@ -164,7 +164,7 @@ export class RoadNetwork {
     const e: REdge = {
       id: this.edges.length, a, b, cls, lanes: opts.lanes ?? ROAD_LANES[cls], oneway: opts.oneway ?? 0,
       bridge: !!opts.bridge, tunnel: false, elevated: !!opts.elevated, busLane: false, len,
-      progress: opts.progress ?? 0, upgrading: false, name: opts.name ?? this.streetName(cls), pts: [],
+      progress: opts.progress ?? 0, upgrading: false, workP: 1, name: opts.name ?? this.streetName(cls), pts: [],
       count: [0, 0], volume: [0, 0], peakVC: 0, vcHistory: [], congestedDays: 0, stopped: [0, 0], alive: true,
       builtDay: opts.day ?? 0, odLog: [], odPtr: 0,
     };
@@ -543,7 +543,7 @@ export class RoadNetwork {
   edgeView(e: REdge): EdgeView {
     return {
       id: e.id, a: e.a, b: e.b, cls: e.cls, lanes: e.lanes, oneway: e.oneway, bridge: e.bridge, tunnel: e.tunnel,
-      elevated: e.elevated, busLane: e.busLane, progress: e.progress, upgrading: e.upgrading, pts: e.pts, name: e.name,
+      elevated: e.elevated, busLane: e.busLane, progress: e.upgrading ? e.workP : e.progress, upgrading: e.upgrading, pts: e.pts, name: e.name,
     };
   }
 }

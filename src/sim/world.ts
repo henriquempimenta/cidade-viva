@@ -25,6 +25,7 @@ import type { RNode } from './roads';
 import { Utilities } from './utilities';
 import { Services } from './services';
 import { CityHall } from './cityhall';
+import { RoadUpgrades } from './roadUpgrades';
 import { PED_FLAG_WORKER, PED_FLAG_FUNERAL, VType, VEH_FLAG_SIREN } from '../shared/constants';
 
 export interface District { id: number; name: string; x: number; z: number; founded: number }
@@ -64,6 +65,10 @@ export class World {
   utils!: Utilities;
   services!: Services;
   cityHall!: CityHall;
+  upgrades!: RoadUpgrades;
+  lastUpgrade!: Map<number, unknown>;
+  transitAPI: { ridersOn(edge: number): number } | null = null;
+  buildBypass?: () => void;
   transitCost?: () => number;
   tourismTax?: () => number;
   extraProjects?: () => unknown[];
@@ -232,6 +237,9 @@ export class World {
     this.outageGrid = this.utils.outageGrid;
     this.services = new Services(this);
     this.cityHall = new CityHall(this);
+    this.upgrades = new RoadUpgrades(this);
+    this.lastUpgrade = this.upgrades.decisions;
+    this.buildBypass = () => this.bypass();
     this.serviceArrived = (slot) => this.services.arrived(slot);
     this.places.rebuild(this.buildings.list);
     this.traffic.onArrive = (slot) => this.vehicleArrived(slot);
@@ -302,6 +310,12 @@ export class World {
   nodeAllow = (n: RNode, e: REdge, dir: number, distToStop: number, waited = 0): boolean => {
     const deg = n.edges.length;
     if (deg < 3) return true;
+    if (n.interchange) {
+      let major = 0;
+      for (const id of n.edges) major = Math.max(major, this.roads.edges[id].cls);
+      if (e.cls === major) return true; // passes over the viaduct
+      return n.inJunction < 2 || waited > 5;
+    }
     if (n.control === 2 || n.control === 4) {
       if (!n.phases.length) this.computePhases(n);
       const ph = n.phases[Math.floor(n.phase / 2) % n.phases.length];
@@ -385,6 +399,32 @@ export class World {
   }
   deathsUnserved = 0;
   lastBridgeDay = -10;
+
+  /** ring road / bypass: a new road around the built-up area, linking the highway before and after the city */
+  bypass() {
+    const R = this.roads, T = this.terrain, F = this.fields;
+    const hp = this.highwayPath;
+    const near = (p: P2) => Math.hypot(p.x - this.center.x, p.z - this.center.z);
+    const R0 = this.cityRadius * 1.35 + 150;
+    let i0 = -1, i1 = -1;
+    for (let i = 0; i < hp.length; i++) { if (near(hp[i]) < R0) { if (i0 < 0) i0 = Math.max(0, i - 1); i1 = Math.min(hp.length - 1, i + 1); } }
+    if (i0 < 0 || i1 - i0 < 3) return;
+    const a = R.nearestNode(hp[i0].x, hp[i0].z, 60), b = R.nearestNode(hp[i1].x, hp[i1].z, 60);
+    if (!a || !b) return;
+    const path = terrainPath(T, { x: a.x, z: a.z }, { x: b.x, z: b.z }, { slopeW: 50, waterW: 12, cell: 25, avoid: (x, z) => { const k = F.idx(x, z); return (F.f.resDensity[k] + F.f.jobDensity[k]) > 0.2 ? 40 : 0; } });
+    const pts = resample(simplify(path, 20), 95);
+    let prev = a.id, ok = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const plan = R.planSegment(prev, pts[i].x, pts[i].z, RoadClass.Avenue, { allowBridge: true, maxBridge: 260, maxGrade: 0.12 });
+      if (!plan.ok) continue;
+      const e = R.applyPlan(plan, { progress: 0, day: this.day, name: 'Anel Viário' });
+      e.lanes = 2;
+      this.onRoadStarted(e, 'Contorno rodoviário');
+      prev = plan.toNode >= 0 ? plan.toNode : e.b;
+      ok++;
+    }
+    if (ok) this.events.emit('road_upgrade', this.center.x, this.center.z, 1, 'Começam as obras do Anel Viário para desviar o tráfego de passagem', { headline: 'Anel Viário vai tirar caminhões do centro', visual: 1 });
+  }
   diffHook: ((d: WorldDiff) => void) | null = null;
 
   /** a bridge when the near bank runs out of land */
@@ -607,9 +647,9 @@ export class World {
       const e = this.roads.edges[id];
       if (!e.alive) { this.roadWorks.delete(id); continue; }
       const rate = (w.speed * dt) / Math.max(30, e.len) * (e.bridge ? 0.35 : 1) * (w.kind === 'upgrade' ? 0.8 : 1);
-      e.progress = Math.min(1, e.progress + rate);
+      if (w.kind === 'upgrade') e.workP = Math.min(1, e.workP + rate); else e.progress = Math.min(1, e.progress + rate);
       this.roads.dirtyEdges.add(id);
-      if (e.progress >= 1) {
+      if ((w.kind === 'upgrade' ? e.workP : e.progress) >= 1) {
         this.roadWorks.delete(id);
         if (w.kind === 'upgrade') this.finishUpgrade(e);
         else {
@@ -663,6 +703,7 @@ export class World {
     this.utils.daily();
     this.services.daily();
     this.cityHall.daily();
+    if (this.era >= 1) this.upgrades.daily();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
   }
 

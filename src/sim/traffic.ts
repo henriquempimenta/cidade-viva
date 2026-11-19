@@ -127,6 +127,8 @@ export class Traffic {
     for (const arr of this.lanes.values()) arr.length = 0;
     for (let i = 0; i < this.max; i++) {
       if (!this.active[i]) continue;
+      const le = R.edges[this.edge[i]];
+      if (le && this.lane[i] >= le.lanes) this.lane[i] = Math.max(0, le.lanes - 1);
       const k = this.key(this.edge[i], this.dir[i], this.lane[i]);
       let arr = this.lanes.get(k);
       if (!arr) this.lanes.set(k, (arr = []));

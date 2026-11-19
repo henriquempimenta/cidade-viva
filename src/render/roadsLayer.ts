@@ -214,7 +214,7 @@ export class RoadsLayer {
       const s0 = Math.min(ra, len / 2), s1 = Math.max(len - rb, len / 2);
       const hw = edgeHalfWidth(e);
       const startV = g.count;
-      const done = e.progress >= 1;
+      const done = e.progress >= 1 || e.upgrading;
       const dirt = e.cls === RoadClass.Dirt;
       const surface = dirt ? COL.dirt : COL.asphalt;
       if (!done) {
@@ -227,6 +227,7 @@ export class RoadsLayer {
         }
       } else {
         ribbon(g, pl, s0, s1, -hw, hw, 0, surface);
+        if (e.upgrading) for (let s = s0; s < s1; s += 7) { const p = at(pl, s); m.makeTranslation(p[0] - p[4] * (hw - 0.6), p[1], p[2] + p[3] * (hw - 0.6)); cones.push(m.clone()); }
         if (!dirt) {
           // sidewalks + curbs
           if (e.cls !== RoadClass.Highway && !e.bridge && !e.elevated) {

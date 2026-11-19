@@ -288,7 +288,7 @@ export class CityHall {
     for (const e of dirt.slice(0, 4)) {
       e.upgrading = true;
       e.upgradeTo = { cls: RoadClass.Local, lanes: 1 };
-      e.progress = 0.01;
+      e.workP = 0;
       w.roadWorks.set(e.id, { motive: 'Pavimentação', speed: 0.5, kind: 'upgrade' });
       n++;
     }

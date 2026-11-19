@@ -35,14 +35,14 @@ export class CityHall {
   daily() {
     const w = this.w, B = w.budget, p = w.params;
     let maint = 0;
-    for (const b of w.buildings.list) if (b.def.public && b.state === 'done') maint += b.def.maint;
+    for (const b of w.buildings.list) if (b.def.public && b.state === 'done') maint += b.def.maint * 6;
     let roadKm = 0;
     for (const e of w.roads.edges) if (e.alive && e.progress >= 1) roadKm += e.len / 1000;
-    maint += roadKm * (2 + w.era);
+    maint += roadKm * (10 + w.era * 6);
     maint += (w.transitCost?.() ?? 0);
-    const tariffs = w.population * 0.6 * w.economy.priceIndex; // water/power/garbage fees
-    const transfers = (60 + w.population * 0.9) * p.budgetMult; // state & federal transfers
-    const income = w.economy.taxToday * 0.85 * p.budgetMult + tariffs + transfers + (w.tourismTax?.() ?? 0);
+    const tariffs = w.population * 0.35 * w.economy.priceIndex; // water/power/garbage fees
+    const transfers = (150 + w.population * 0.5) * p.budgetMult; // state & federal transfers
+    const income = w.economy.taxToday * 0.08 * p.budgetMult + tariffs + transfers + (w.tourismTax?.() ?? 0);
     const interest = B.debt * 0.004;
     B.income = income; B.expenses = maint + interest;
     B.money += income - maint - interest;
@@ -123,7 +123,8 @@ export class CityHall {
       const opts: [string, number][] = [];
       const clean = 1 - p.pollutionTolerance * 0.7;
       if (era === 0) opts.push(['dieselGen', 1]);
-      if (era >= 1) opts.push(['thermalPlant', 1.1 - clean * 0.5 * (p.envPreservation + 0.5)], ['dieselGen', deficit < 80 ? 0.9 : 0.1]);
+      if (era >= 1) opts.push(['thermalPlant', 1.1 - clean * 0.5 * (p.envPreservation + 0.5)]);
+      if (era === 1) opts.push(['dieselGen', deficit < 80 ? 0.9 : 0.1]);
       if (era >= 2) opts.push(['hydroPlant', 1.0 + clean * 0.3], ['windFarm', 0.8 + clean * 0.6 * p.envPreservation], ['solarFarm', 0.75 + clean * 0.6 * p.envPreservation]);
       if (era >= 3) opts.push(['nuclearPlant', deficit > 1500 ? 1.2 : 0.3]);
       for (const [k, pref] of opts) {
@@ -196,7 +197,7 @@ export class CityHall {
     // ---- parks & brownfields ----
     const pGap = this.totalUncovered('cov_parks');
     if (pGap > 40) {
-      add('plaza', pGap / 25, `${Math.round(pGap)} moradores sem área verde próxima`, { gapField: 'cov_parks', radius: 350 });
+      if (this.count(['plaza']) < pop / 250 + 2) add('plaza', pGap / 25, `${Math.round(pGap)} moradores sem área verde próxima`, { gapField: 'cov_parks', radius: 350 });
       add('park', pGap / 18, `${Math.round(pGap)} moradores sem área verde próxima`, { gapField: 'cov_parks', radius: 500 });
     }
     const brown = w.buildings.list.find((b) => b.abandoned && b.def.cat === 'ind' && w.fields.sample('soilPollution', b.x, b.z) > 0.5);
@@ -247,7 +248,7 @@ export class CityHall {
     const w = this.w;
     const def = KINDS[pr.kind];
     const bw = w.rng.range(def.w[0], def.w[1]), bd = w.rng.range(def.d[0], def.d[1]);
-    let cands = sampleSites(w.siteCtx(), bw, bd, 45, { offRoad: def.offRoad, nearX: pr.near?.x, nearZ: pr.near?.z, nearR: pr.near?.r });
+    let cands = sampleSites(w.siteCtx(), bw, bd, bw * bd > 1600 ? 90 : 45, { offRoad: def.offRoad, nearX: pr.near?.x, nearZ: pr.near?.z, nearR: pr.near?.r, maxSlope: bw * bd > 1600 ? 0.24 : undefined });
     if (pr.filter) cands = cands.filter(pr.filter);
     if (!cands.length) return null;
     const prof = { ...profileFor(pr.kind, 1, w.params) };

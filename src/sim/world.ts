@@ -384,10 +384,11 @@ export class World {
     if (slot >= 0) this.events.emit('funeral', home.x, home.z, 0.4, `Cortejo fúnebre de ${name}${cem ? ' segue para o ' + cem.name : ' deixa a cidade rumo ao cemitério regional'}`, { entity: { kind: 'vehicle', id: slot, gen: this.traffic.gen[slot] }, visual: 0.7 });
   }
   deathsUnserved = 0;
+  lastBridgeDay = -10;
 
   /** a bridge when the near bank runs out of land */
   bridgeProject = (): unknown => {
-    if (this.era < 1 || this.siteScarcity < 0.4 || this.roadWorks.size > 4) return null;
+    if (this.era < 1 || this.siteScarcity < 0.4 || this.roadWorks.size > 4 || this.day - this.lastBridgeDay < 5) return null;
     if (this.roads.edges.some((e) => e.bridge && e.progress < 1)) return null;
     const T = this.terrain;
     const cands = this.roads.nodes.filter((n) => n.alive && n.edges.length > 0 && n.edges.length < 4 && T.distToRiver(n.x, n.z) < 220 && Math.hypot(n.x - this.center.x, n.z - this.center.z) < this.cityRadius + 300);
@@ -406,6 +407,7 @@ export class World {
       return {
         kind: 'bridge', label: signature ? 'Ponte estaiada' : 'Ponte', motive: `Falta de lotes nesta margem; ${Math.round(plan.waterLen)} m sobre o rio`, benefit: 20 + this.siteScarcity * 15, cost,
         run: () => {
+          this.lastBridgeDay = this.day;
           const e = this.roads.applyPlan(plan, { progress: 0, day: this.day, name: signature ? 'Ponte Estaiada ' + this.rng.pick(['do Rio', 'da Integração', 'Nova Era', 'dos Ipês']) : undefined });
           this.onRoadStarted(e, 'Expansão para a outra margem');
           if (signature) this.events.emit('landmark', (plan.ax + plan.bx) / 2, (plan.az + plan.bz) / 2, 1, `Começa a construção da ${e.name}, nova obra-símbolo`, { headline: `Cidade ganhará a ${e.name}`, entity: { kind: 'edge', id: e.id }, visual: 1 });

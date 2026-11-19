@@ -132,6 +132,8 @@ export interface WorldDiff {
   outage?: Uint8Array; // per field cell: 1 = no power
   skyline?: Float32Array; // per field cell: max building height
   heights?: Float32Array; // terrain updated (dikes)
+  od?: number[]; // x1,z1,x2,z2,weight
+  cargo?: number[];
 }
 
 export type ToWorker =

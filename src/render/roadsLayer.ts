@@ -350,6 +350,23 @@ export class RoadsLayer {
         }
         continue;
       }
+      if (n.interchange) {
+        // viaduct: the main road passes over the junction
+        const inc = this.edgesAt(n.id);
+        const major = inc.reduce((a, e) => (e.cls > a.cls ? e : a), inc[0]);
+        if (major) {
+          const o = this.nodes.get(major.a === n.id ? major.b : major.a)!;
+          const ang = Math.atan2(o.z - n.z, o.x - n.x);
+          const hwv = edgeHalfWidth(major) + 1;
+          const L = this.nodeR(n.id) * 2 + 40;
+          bg.setTransform(n.x, n.y, n.z, ang);
+          bg.box(0, 6.2, 0, L, 1.0, hwv * 2, COL.concrete, 0, { top: COL.asphalt });
+          bg.box(0, 7.2, hwv - 0.2, L, 1.0, 0.4, COL.concrete); bg.box(0, 7.2, -hwv + 0.2, L, 1.0, 0.4, COL.concrete);
+          for (const px of [-L / 3, 0, L / 3]) bg.box(px, 0, 0, 1.6, 6.2, hwv * 1.2, COL.concrete);
+          for (let k = -2; k <= 2; k++) bg.box(k * 4, 7.22, 0, 2.5, 0.02, 0.18, COL.white);
+          bg.setTransform(0, 0, 0, 0);
+        }
+      }
       g.setTransform(n.x, n.y, n.z, 0);
       const anyDirt = this.edgesAt(n.id).every((e) => e.cls === RoadClass.Dirt);
       const nr = this.nodeR(n.id);

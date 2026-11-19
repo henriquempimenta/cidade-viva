@@ -245,6 +245,14 @@ export class Economy {
       if (h.unhappyDays > 6 && w.rng.chance(0.2 + p.taxRate)) C.leaveCity(h, 'infelicidade e falta de oportunidades');
       if (!h.car && h.money > [1500, 2500, 4000][h.wealth] && w.rng.chance(0.1)) { h.car = true; h.money -= 800; }
     }
+    // happiness heatmap
+    {
+      const F = w.fields, acc = new Float32Array(F.G * F.G), cnt = new Float32Array(F.G * F.G);
+      for (const h of C.households.values()) { const b = w.buildings.byId.get(h.home); if (!b) continue; const k = F.idx(b.x, b.z); for (const m of h.members) { acc[k] += C.happiness[m]; cnt[k]++; } }
+      const a2 = new Float32Array(F.G * F.G), c2 = new Float32Array(F.G * F.G);
+      F.blur(acc, a2, 2); F.blur(cnt, c2, 2);
+      for (let k = 0; k < a2.length; k++) F.f.happiness[k] = c2[k] > 0.01 ? a2[k] / c2[k] : 0;
+    }
     // businesses
     let profits = 0, taxB = 0;
     for (const b of w.buildings.list) {

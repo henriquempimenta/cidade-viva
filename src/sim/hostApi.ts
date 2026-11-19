@@ -65,6 +65,8 @@ export function fieldPayload(w: World, overlay: string | null): Partial<WorldDif
     for (let i = 0; i < data.length; i++) max = Math.max(max, data[i]);
     out.fields = { name: overlay, data, max };
   }
+  if (overlay === 'od') out.od = (w as unknown as { transitSys?: { odPairs(): number[] } }).transitSys?.odPairs() ?? [];
+  if (overlay === 'cargo') out.cargo = (w as unknown as { cargoFlows?: number[] }).cargoFlows ?? [];
   const sky = new Float32Array(F.G * F.G);
   for (const b of w.buildings.list) {
     const k = F.idx(b.x, b.z);

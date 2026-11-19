@@ -440,7 +440,11 @@ export class Rail {
         let b = dst[0], bd = Infinity;
         for (const d of dst) { const dd = Math.hypot(d.x - a.x, d.z - a.z) + w.rng.next() * 400; if (dd < bd) { bd = dd; b = d; } }
         const plan = carPlan(w.roads, a, b);
-        if (plan) w.traffic.spawn(vt, plan.path, plan.startS, plan.destS, { kind: P_CARGO, id: b.id, aux: a.id }, a.id, b.id);
+        if (plan) {
+          w.traffic.spawn(vt, plan.path, plan.startS, plan.destS, { kind: P_CARGO, id: b.id, aux: a.id }, a.id, b.id);
+          w.cargoFlows.push(a.x, a.z, b.x, b.z, vt === VType.Van ? 1 : 2);
+          if (w.cargoFlows.length > 600) w.cargoFlows.splice(0, w.cargoFlows.length - 600);
+        }
       }
     }
   }

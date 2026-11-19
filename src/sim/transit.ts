@@ -371,6 +371,12 @@ export class Transit {
     return out;
   }
 
+  odPairs(): number[] {
+    const out: number[] = [];
+    const pairs = [...this.od.entries()].sort((a, b) => b[1] - a[1]).slice(0, 60);
+    for (const [k, v] of pairs) { const a = this.zoneCenter(Math.floor(k / 1e6)), b = this.zoneCenter(k % 1e6); out.push(a.x, a.z, b.x, b.z, v); }
+    return out;
+  }
   cost(): number {
     let c = 0;
     for (const l of this.lines) c += l.kind === 'bus' ? l.fleet * 12 : l.kind === 'brt' ? l.fleet * 16 : l.kind === 'metro' ? 300 : 120;

@@ -73,6 +73,7 @@ export class World {
   trains!: Rail;
   transitSys!: Transit;
   crossingsSnapshot?: () => Uint8Array;
+  cargoFlows: number[] = [];
   lastUpgrade!: Map<number, unknown>;
   transitAPI: { ridersOn(edge: number): number } | null = null;
   buildBypass?: () => void;

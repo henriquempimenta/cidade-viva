@@ -42,6 +42,13 @@ export function updateFields(w: World) {
       foot[kk] += vol * 0.02 * (e.cls >= RoadClass.Collector ? 1.5 : 1) + (e.cls >= RoadClass.Avenue ? 0.4 : 0);
     }
   }
+  const cong = f.congestion;
+  cong.fill(0);
+  for (const e of w.roads.edges) {
+    if (!e.alive || e.progress < 1) continue;
+    const vc = Math.max(e.volume[0], e.volume[1]) / w.roads.capacity(e);
+    for (let i = 0; i < e.pts.length; i += 6) { const k = F.idx(e.pts[i], e.pts[i + 2]); cong[k] = Math.max(cong[k], vc); }
+  }
   for (const n of w.roads.nodes) {
     if (!n.alive) continue;
     if (n.edges.some((id) => w.roads.edges[id].cls === RoadClass.Highway && w.roads.edges[id].progress >= 1)) F.splat(hw, n.x, n.z, 1, 25);

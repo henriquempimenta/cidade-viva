@@ -66,7 +66,7 @@ export class App {
   tiltShift = 0;
   private lastSimT = 0;
 
-  constructor(private canvas: HTMLCanvasElement, private uiRoot: HTMLElement) {}
+  constructor(private canvas: HTMLCanvasElement, public uiRoot: HTMLElement) {}
 
   start(params: SimParams) {
     this.params = params;
@@ -212,6 +212,8 @@ export class App {
       this.outageTex.needsUpdate = true;
     }
     if (d.fields) this.overlays.setField(d.fields.name, d.fields.data, d.fields.max);
+    if (d.od) this.overlays.setFlows(d.od, false);
+    if (d.cargo) this.overlays.setFlows(d.cargo, true);
     if (d.heights) this.terrain.updateHeights(d.heights);
     if (d.floodLevel !== undefined) this.effects.setFlood(d.floodLevel);
     if (d.dikes) this.effects.setDikes(d.dikes);

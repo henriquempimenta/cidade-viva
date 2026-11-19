@@ -128,9 +128,12 @@ export class Integrity {
     let cult = 0, rd = 0;
     for (let k = 0; k < F.resDensity.length; k++) { if (F.resDensity[k] < 0.01) continue; cult += Math.min(1, F.cov_culture[k] + F.cov_education[k] * 0.4) * F.resDensity[k]; rd += F.resDensity[k]; }
     const press = rd ? cult / rd : 0;
-    const pressure = p.corruption * 0.55 + ineq * 0.3 + (1 - edu) * 0.25 + stress * 0.25 + boom * 0.2;
+    // bigger budgets attract capture: pressure grows with the size of the city
+    const scale = clamp((Math.log10(Math.max(100, w.population)) - 2) / 2.5, 0, 1) * 0.22;
+    const pressure = p.corruption * 0.55 + ineq * 0.3 + (1 - edu) * 0.25 + stress * 0.25 + boom * 0.2 + scale;
     const control = p.transparency * 0.42 + press * 0.2 + edu * 0.15 + this.trust * 0.1 + (w.day - this.lastInvestigationDay < 24 ? 0.3 : 0);
-    this.index = clamp(this.index + 0.012 * (pressure * this.mayor.greed - control * 0.85), 0.01, 0.98);
+    // never fully zero: some petty corruption survives even in clean administrations
+    this.index = clamp(this.index + 0.012 * (pressure * this.mayor.greed - control * 0.85), 0.03 + p.corruption * 0.12, 0.98);
     // ---------- trust ----------
     const trustTarget = clamp(0.95 - this.index * 0.7 - w.services.avgCrime * 0.5 - this.scandals * 0.04, 0.05, 1);
     this.trust += (trustTarget - this.trust) * 0.08;
@@ -224,6 +227,12 @@ export class Integrity {
         B.dirty.add(b.id);
         w.events.emit('occupation', b.x, b.z, 0.55, `Famílias sem teto ocupam ${b.name}`, { ref: b.id, entity: { kind: 'building', id: b.id }, headline: years > 2 ? `Prédio abandonado há ${Math.round(years)} anos vira ocupação em ${w.districtName(b.x, b.z)}` : undefined, visual: 0.55 });
         continue;
+      }
+      // abandoned sheds, hotels and shops get occupied too (they stay derelict, but people live there)
+      if (!b.squatted && b.def.cat !== 'res' && b.def.cat !== 'informal' && years > 0.5 && occupiedToday < 2 && (deficit > 2 || w.fields.sample('crime', b.x, b.z) > 0.15) && r.chance(0.02 + local * 0.06)) {
+        b.squatted = true; occupiedToday++;
+        B.dirty.add(b.id);
+        w.events.emit('occupation', b.x, b.z, 0.55, `Famílias sem teto ocupam ${b.name}`, { ref: b.id, entity: { kind: 'building', id: b.id }, headline: `${b.def.label} abandonado há ${Math.max(1, Math.round(years))} ano(s) vira ocupação em ${w.districtName(b.x, b.z)}`, visual: 0.55 });
       }
       // collapse after decades of neglect
       if (b.decay > 0.75 && r.chance((b.decay - 0.75) * 0.06)) this.collapse(b, years);

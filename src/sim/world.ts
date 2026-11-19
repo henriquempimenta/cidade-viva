@@ -385,6 +385,7 @@ export class World {
   }
   deathsUnserved = 0;
   lastBridgeDay = -10;
+  diffHook: ((d: WorldDiff) => void) | null = null;
 
   /** a bridge when the near bank runs out of land */
   bridgeProject = (): unknown => {
@@ -768,6 +769,8 @@ export class World {
     if (B.removed.length) { diff.removedBuildings = B.removed; B.removed = []; }
     if (B.treesRemoved.length) { diff.treesRemoved = B.treesRemoved; B.treesRemoved = []; }
     if (!this.railSent && !this.rail) { this.railSent = true; diff.rail = railViewsFromPath(this.railPath, this.terrain); }
+    if (this.utils?.dirtyLines.size) { diff.powerLines = [...this.utils.dirtyLines].map((id) => ({ ...this.utils.powerLines[id] })); this.utils.dirtyLines.clear(); }
+    this.diffHook?.(diff);
     const ev = this.events.drain();
     if (ev.length) diff.events = ev;
     return diff;

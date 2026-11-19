@@ -23,6 +23,10 @@ import type { World } from './world';
  */
 export interface Mayor { name: string; greed: number; since: number; female: boolean }
 
+/** crude gender agreement for Portuguese labels (fábrica abandonada, hotel abandonado) */
+const fem = (label: string) => /[aã]$|ção$|dade$|agem$/.test(label.split(' ')[0].toLowerCase());
+const abandonado = (label: string) => (fem(label) ? 'abandonada' : 'abandonado');
+
 const OPS = ['Concreto Armado', 'Alicerce', 'Viga Mestra', 'Asfalto Fino', 'Caixa-Forte', 'Maré Baixa', 'Planta Baixa', 'Tijolo Quente', 'Água Turva', 'Meio-Fio', 'Pedra Fundamental', 'Linha Reta'];
 
 export class Integrity {
@@ -212,7 +216,7 @@ export class Integrity {
       // where institutions work, derelicts are inspected and dealt with in weeks
       const enforce = clamp((1 - local * 1.6) * (1 - this.index * 1.5) * 0.05 * (w.budget.money > 0 ? 1 : 0.3), 0, 0.05);
       if (years > 0.5 && r.chance(enforce)) {
-        w.events.emit('expropriation', b.x, b.z, 0.5, `Prefeitura desapropria imóvel abandonado: ${b.name}`, { ref: b.id, entity: { kind: 'building', id: b.id }, headline: years > 3 ? `Após ${Math.round(years)} anos, prefeitura desapropria e demole ${b.def.label.toLowerCase()} abandonado` : undefined, visual: 0.6 });
+        w.events.emit('expropriation', b.x, b.z, 0.5, `Prefeitura desapropria imóvel abandonado: ${b.name}`, { ref: b.id, entity: { kind: 'building', id: b.id }, headline: years > 3 ? `Após ${Math.round(years)} anos, prefeitura desapropria e demole ${b.def.label.toLowerCase()} ${abandonado(b.def.label)}` : undefined, visual: 0.6 });
         B.demolish(b);
         continue;
       }
@@ -232,7 +236,7 @@ export class Integrity {
       if (!b.squatted && b.def.cat !== 'res' && b.def.cat !== 'informal' && years > 0.5 && occupiedToday < 2 && (deficit > 2 || w.fields.sample('crime', b.x, b.z) > 0.15) && r.chance(0.02 + local * 0.06)) {
         b.squatted = true; occupiedToday++;
         B.dirty.add(b.id);
-        w.events.emit('occupation', b.x, b.z, 0.55, `Famílias sem teto ocupam ${b.name}`, { ref: b.id, entity: { kind: 'building', id: b.id }, headline: `${b.def.label} abandonado há ${Math.max(1, Math.round(years))} ano(s) vira ocupação em ${w.districtName(b.x, b.z)}`, visual: 0.55 });
+        w.events.emit('occupation', b.x, b.z, 0.55, `Famílias sem teto ocupam ${b.name}`, { ref: b.id, entity: { kind: 'building', id: b.id }, headline: `${b.def.label} ${abandonado(b.def.label)} há ${Math.max(1, Math.round(years))} ano(s) vira ocupação em ${w.districtName(b.x, b.z)}`, visual: 0.55 });
       }
       // collapse after decades of neglect
       if (b.decay > 0.75 && r.chance((b.decay - 0.75) * 0.06)) this.collapse(b, years);

@@ -38,7 +38,7 @@ export class CityHall {
     for (const b of w.buildings.list) if (b.def.public && b.state === 'done') maint += b.def.maint * 6;
     let roadKm = 0;
     for (const e of w.roads.edges) if (e.alive && e.progress >= 1) roadKm += e.len / 1000;
-    maint += roadKm * (10 + w.era * 6);
+    maint += roadKm * (10 + w.era * 6) + w.population * (1.6 + w.era * 1.1);
     maint += (w.transitCost?.() ?? 0);
     const tariffs = w.population * 0.35 * w.economy.priceIndex; // water/power/garbage fees
     const transfers = (150 + w.population * 0.5) * p.budgetMult; // state & federal transfers
@@ -124,7 +124,7 @@ export class CityHall {
       const clean = 1 - p.pollutionTolerance * 0.7;
       if (era === 0) opts.push(['dieselGen', 1]);
       if (era >= 1) opts.push(['thermalPlant', 1.1 - clean * 0.5 * (p.envPreservation + 0.5)]);
-      if (era === 1) opts.push(['dieselGen', deficit < 80 ? 0.9 : 0.1]);
+      if (era === 1 && this.count(['dieselGen']) < 6) opts.push(['dieselGen', deficit < 60 ? 0.5 : 0.1]);
       if (era >= 2) opts.push(['hydroPlant', 1.0 + clean * 0.3], ['windFarm', 0.8 + clean * 0.6 * p.envPreservation], ['solarFarm', 0.75 + clean * 0.6 * p.envPreservation]);
       if (era >= 3) opts.push(['nuclearPlant', deficit > 1500 ? 1.2 : 0.3]);
       for (const [k, pref] of opts) {

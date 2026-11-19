@@ -358,6 +358,7 @@ export class Citizens {
     const vot = 0.3 + this.income[i] / 80; // value of time
     const rain = w.weather.rain;
     const len = pathLength(w.roads, plan);
+    w.transitSys?.recordTrip(from, to, len);
     const costs: number[] = [Infinity, Infinity, Infinity, Infinity, Infinity];
     costs[0] = len < 1800 ? (len / 1.35) * vot * (1 + rain * 1.5) : Infinity;
     if ((this.traits[i] & T_SPORT || this.age[i] < 30 && h.wealth === 0) && len < 4500 && this.age[i] > 10 && this.age[i] < 65) costs[1] = (len / 4.5) * vot * (1 + rain * 2) + 20;

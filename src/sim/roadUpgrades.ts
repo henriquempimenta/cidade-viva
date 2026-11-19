@@ -36,7 +36,7 @@ export class RoadUpgrades {
     const w = this.w, R = w.roads;
     if (w.day === this.lastDay) return;
     this.lastDay = w.day;
-    const cands = R.edges.filter((e) => e.alive && e.progress >= 1 && !e.upgrading && e.congestedDays >= 3 && !e.bridge);
+    const cands = R.edges.filter((e) => e.alive && e.progress >= 1 && !e.upgrading && !e.bridge && e.vcHistory.slice(-4).filter((v) => v > 0.85).length >= 3);
     cands.sort((a, b) => Math.max(...b.volume) / R.capacity(b) - Math.max(...a.volume) / R.capacity(a));
     let done = 0;
     for (const e of cands) {
@@ -114,18 +114,19 @@ export class RoadUpgrades {
     feasible.sort((x, y) => y.ratio - x.ratio);
     const best = feasible[0];
     const money = w.budget.money;
-    if (!best || best.cost > money * 0.8) {
+    if (!best || (best.cost > money * 0.8 && best.cost > 250) || best.cost > money + 2000) {
       return { day: w.day, chosen: best ? `${best.label} (adiado: sem orçamento)` : 'nenhuma alternativa viável', options: opts.map(strip), edge: e.id };
     }
     best.apply!();
     w.budget.money -= best.cost;
     const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
     const vc = Math.max(...e.volume) / cap;
-    w.events.emit('road_upgrade', mid.x, mid.z, 0.75, `${best.label}: ${e.name} operava a ${(vc * 100).toFixed(0)}% da capacidade há ${e.congestedDays} dias`, {
+    w.events.emit('road_upgrade', mid.x, mid.z, 0.75, `${best.label}: ${e.name} operava a ${(vc * 100).toFixed(0)}% da capacidade em ${e.vcHistory.slice(-4).filter((v) => v > 0.85).length} dos últimos 4 dias`, {
       entity: { kind: 'edge', id: e.id }, ref: e.id, visual: 0.8,
       headline: `Congestionamento crônico na ${e.name} leva prefeitura a ${best.label.toLowerCase()}`,
     });
     e.congestedDays = 0;
+    e.vcHistory = [];
     return { day: w.day, chosen: best.label, options: opts.map(strip), edge: e.id };
   }
 

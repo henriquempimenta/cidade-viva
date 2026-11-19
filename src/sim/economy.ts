@@ -28,6 +28,7 @@ export class Economy {
   exportDemand = 0;
   crisis = 0; // >0 during injected economic crisis
   boomQueue = 0;
+  railBonus = 0;
 
   constructor(private w: World) {}
 
@@ -253,7 +254,7 @@ export class Economy {
       for (const x of b.workers) wagesB += C.income[x];
       const cat = b.def.cat;
       let rev = b.revenue;
-      if (cat === 'ind') rev += b.workers.length * 75 * this.priceIndex * (1 + this.exportDemand * 0.1) * (this.crisis > 0 ? 0.6 : 1) * (b.powered ? 1 : 0.4);
+      if (cat === 'ind') rev += b.workers.length * 75 * this.priceIndex * (1 + this.railBonus * 0.15 * w.fields.sample('railAccess', b.x, b.z)) * (this.crisis > 0 ? 0.6 : 1) * (b.powered ? 1 : 0.4);
       if (cat === 'off') rev += b.workers.reduce((a, x) => a + 70 + C.edu[x] * 45, 0) * this.priceIndex * (this.crisis > 0 ? 0.7 : 1);
       if (cat === 'com') rev += b.workers.length * 25 * this.priceIndex;
       const profit = rev - wagesB - b.def.cost * 0.05;
@@ -271,6 +272,7 @@ export class Economy {
     const pressure = clamp((this.vacancies < this.employed * 0.03 ? 0.01 : 0) + (this.homelessDemand[0] + this.homelessDemand[1] > 30 ? 0.006 : 0) - (this.crisis > 0 ? 0.01 : 0), -0.01, 0.02);
     this.priceIndex *= 1 + 0.001 + pressure;
     if (this.crisis > 0) this.crisis--;
+    this.railBonus *= 0.7;
     // immigration flow
     const attract = clamp(0.4 + w.avgHappiness() * 0.8 + Math.min(1, this.vacancies / 60) * 0.8 - p.taxRate * 1.5 - (this.crisis > 0 ? 0.6 : 0), 0, 2.2);
     const base = (7 + Math.min(110, this.vacancies * 0.6) + w.era * 5 + Math.min(40, w.day * 0.4)) * p.immigration * attract + this.boomQueue;

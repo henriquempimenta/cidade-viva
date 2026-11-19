@@ -6,7 +6,7 @@ import { OCC_ROAD, type Occupancy } from './occupancy';
 import type { RNG } from '../shared/rng';
 import { STREET_NAMES, STREET_PREFIX } from '../shared/names';
 
-export const CAP_PER_LANE_HOUR = 55;
+export const CAP_PER_LANE_HOUR = 26;
 
 export interface RNode {
   id: number; x: number; z: number; y: number;

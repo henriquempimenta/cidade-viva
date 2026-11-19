@@ -317,9 +317,12 @@ export class AgentsLayer {
     if (c.ped[o + 4] < 0 || (gen >= 0 && c.ped[o + 4] !== gen)) return null;
     return { p: new THREE.Vector3(this.pPos[slot * 4], this.pPos[slot * 4 + 1], this.pPos[slot * 4 + 2]), h: this.pPos[slot * 4 + 3] };
   }
-  trainPos(i: number): { p: THREE.Vector3; h: number } | null {
+  trainPos(id: number): { p: THREE.Vector3; h: number } | null {
     const c = this.app.curSnap;
-    if (!c || i >= c.trainCount) return null;
+    if (!c) return null;
+    let i = -1;
+    for (let k = 0; k < c.trainCount; k++) if (c.train[k * TRAIN_STRIDE + 5] === id) { i = k; break; }
+    if (i < 0) return null;
     return { p: new THREE.Vector3(this.tPos[i * 4], this.tPos[i * 4 + 1], this.tPos[i * 4 + 2]), h: this.tPos[i * 4 + 3] };
   }
   private fpPrev: number[] | null = null;

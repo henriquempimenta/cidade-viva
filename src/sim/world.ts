@@ -26,6 +26,8 @@ import { Utilities } from './utilities';
 import { Services } from './services';
 import { CityHall } from './cityhall';
 import { RoadUpgrades } from './roadUpgrades';
+import { Rail } from './rail';
+import { Transit } from './transit';
 import { PED_FLAG_WORKER, PED_FLAG_FUNERAL, VType, VEH_FLAG_SIREN } from '../shared/constants';
 
 export interface District { id: number; name: string; x: number; z: number; founded: number }
@@ -66,6 +68,11 @@ export class World {
   services!: Services;
   cityHall!: CityHall;
   upgrades!: RoadUpgrades;
+  rail2!: Rail;
+  trainsSys!: Rail;
+  trains!: Rail;
+  transitSys!: Transit;
+  crossingsSnapshot?: () => Uint8Array;
   lastUpgrade!: Map<number, unknown>;
   transitAPI: { ridersOn(edge: number): number } | null = null;
   buildBypass?: () => void;
@@ -240,11 +247,33 @@ export class World {
     this.upgrades = new RoadUpgrades(this);
     this.lastUpgrade = this.upgrades.decisions;
     this.buildBypass = () => this.bypass();
+    this.transitSys = new Transit(this);
+    this.rail2 = new Rail(this);
+    this.trainsSys = this.trains = this.rail2;
+    this.rail = this.rail2;
+    this.transit = this.transitSys;
+    this.transitAPI = this.transitSys;
+    const T = this.transitSys;
+    this.transit2 = {
+      transitOption: (a, b, len) => T.transitOption(a, b, len),
+      board: (i, a, b, opt) => T.board(i, a, b, opt as never),
+      describe: (i) => T.describe(i),
+      position: (i) => T.position(i),
+    };
+    this.traffic.onStop = T.onBusNode;
+    this.crossingsSnapshot = this.rail2.crossingsSnapshot;
+    this.extraProjects = () => this.rail2.projects();
+    this.transitCost = () => T.cost() - T.fares();
     this.serviceArrived = (slot) => this.services.arrived(slot);
     this.places.rebuild(this.buildings.list);
     this.traffic.onArrive = (slot) => this.vehicleArrived(slot);
     this.traffic.onStuck = (slot) => this.vehicleStuck(slot);
-    this.peds.onArrive = (slot) => { const c = this.peds.citizen[slot]; if (c >= 0 && this.citizens.slot[c] === slot) this.citizens.arrive(c); };
+    this.peds.onArrive = (slot) => {
+      const c = this.peds.citizen[slot];
+      if (c < 0 || this.citizens.slot[c] !== slot) return;
+      if (this.transitSys?.pedArrived(c)) return;
+      this.citizens.arrive(c);
+    };
     // the founding families
     for (const b of this.buildings.list) {
       b.households.length = 0;
@@ -259,6 +288,7 @@ export class World {
     const T = this.traffic;
     const kind = T.pKind[slot], id = T.pId[slot];
     if (kind === P_CITIZEN) { if (this.citizens.slot[id] === slot) this.citizens.arrive(id); return; }
+    if (kind === 3 /* P_BUS */) { this.transitSys.busArrived(slot); return; }
     this.serviceArrived?.(slot);
   }
   vehicleStuck(slot: number) {
@@ -266,7 +296,8 @@ export class World {
     if (T.pKind[slot] === P_CITIZEN) {
       const id = T.pId[slot];
       if (this.citizens.slot[id] === slot) this.citizens.virtualArrive(id, T.remainingTime(slot));
-    } else this.serviceArrived?.(slot);
+    } else if (T.pKind[slot] === 3) this.transitSys.busArrived(slot);
+    else this.serviceArrived?.(slot);
   }
   serviceArrived: ((slot: number) => void) | null = null;
 
@@ -625,6 +656,7 @@ export class World {
     this.stepSignals(dt);
     this.traffic.rain = this.weather.rain;
     this.peds.rain = this.weather.rain;
+    this.rail2.step(dt);
     this.traffic.step(dt, this.nodeAllow);
     this.peds.step(dt);
     this.citizens.step(dt);
@@ -688,6 +720,8 @@ export class World {
     this.economy.hourly();
     this.utils.hourly();
     this.services.hourly();
+    this.transitSys.hourly();
+    this.rail2.cargoHourly();
     if (this.hourIdx % 12 === 6) this.cityHall.cycle();
     this.updateDemand();
     this.runMarket();
@@ -702,6 +736,7 @@ export class World {
     this.economy.daily();
     this.utils.daily();
     this.services.daily();
+    this.transitSys.daily();
     this.cityHall.daily();
     if (this.era >= 1) this.upgrades.daily();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
@@ -809,7 +844,10 @@ export class World {
     }
     if (B.removed.length) { diff.removedBuildings = B.removed; B.removed = []; }
     if (B.treesRemoved.length) { diff.treesRemoved = B.treesRemoved; B.treesRemoved = []; }
-    if (!this.railSent && !this.rail) { this.railSent = true; diff.rail = railViewsFromPath(this.railPath, this.terrain); }
+    if (this.rail2?.dirtyViews) { this.rail2.dirtyViews = false; diff.rail = this.rail2.railViews(); }
+    if (this.rail2?.crossingsDirty) { this.rail2.crossingsDirty = false; diff.crossings = this.rail2.crossingViews(); }
+    const st = this.rail2?.stationViews(); if (st?.length) diff.stations = st;
+    const lv = this.transitSys?.views(); if (lv?.length) diff.lines = lv;
     if (this.utils?.dirtyLines.size) { diff.powerLines = [...this.utils.dirtyLines].map((id) => ({ ...this.utils.powerLines[id] })); this.utils.dirtyLines.clear(); }
     this.diffHook?.(diff);
     const ev = this.events.drain();

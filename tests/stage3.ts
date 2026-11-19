@@ -20,3 +20,12 @@ for (let d = 0; d < days; d++) {
   }
 }
 for (const l of w.cityHall.log.slice(-3)) console.log(JSON.stringify(l));
+console.log('lines', w.transitSys.lines.map((l) => `${l.name} fleet ${l.fleet} riders ${l.ridersYday}`));
+console.log('upgrades', w.upgrades.history.map((d) => `d${d.day} ${d.chosen}`));
+console.log('rail', { stations: w.rail2.lines[0].stations.length, terminal: !!w.rail2.terminal, crossings: w.rail2.crossings.length, sep: w.rail2.crossings.filter((c) => c.separated).length, trains: w.rail2.trains.length, tracks: w.rail2.lines[0].tracks });
+console.log('modal', w.citizens.modeCount);
+const sig = w.roads.nodes.filter((n) => n.control >= 2).length; console.log('controlled nodes', sig, 'interchanges', w.roads.nodes.filter((n) => n.interchange).length);
+const vcs = w.roads.edges.filter((e) => e.alive && e.progress >= 1).map((e) => ({ n: e.name, vc: Math.max(...e.vcHistory, 0), cd: e.congestedDays, cls: e.cls }));
+vcs.sort((a, b) => b.vc - a.vc);
+console.log('top vc', JSON.stringify(vcs.slice(0, 6)));
+console.log('rail2', w.rail2.lines.map((l) => `${l.kind} st ${l.stations.length} tr ${l.tracks}`).join(' | '), 'waitSingle', w.rail2.waitingSingle);

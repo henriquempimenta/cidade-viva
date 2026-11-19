@@ -42,7 +42,7 @@ export class CityHall {
     maint += (w.transitCost?.() ?? 0);
     const tariffs = w.population * 0.35 * w.economy.priceIndex; // water/power/garbage fees
     const transfers = (250 + w.population * 0.25) * p.budgetMult; // state & federal transfers
-    const income = w.economy.taxToday * 0.05 * p.budgetMult + tariffs + transfers + (w.tourismTax?.() ?? 0);
+    const income = w.economy.taxToday * 0.025 * p.budgetMult + tariffs + transfers + (w.tourismTax?.() ?? 0);
     const interest = B.debt * 0.004;
     B.income = income; B.expenses = maint + interest;
     B.money += income - maint - interest;

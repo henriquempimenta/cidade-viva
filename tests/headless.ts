@@ -7,7 +7,7 @@ const t0 = performance.now();
 const w = new World(p);
 console.log('init ms', (performance.now()-t0).toFixed(0), 'nodes', w.roads.nodes.length, 'bld', w.buildings.list.length);
 let last = performance.now();
-for (let d = 0; d < days; d++) {
+for (let d = 0; d < days; d++) { if (d % 5 !== 4 && d !== days - 1) { for (let s = 0; s < DAY_SECONDS / MOTION_DT; s++) w.step(MOTION_DT); continue; }
   for (let s = 0; s < DAY_SECONDS / MOTION_DT; s++) w.step(MOTION_DT);
   const now = performance.now();
   const kinds: Record<string, number> = {};

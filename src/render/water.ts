@@ -56,7 +56,7 @@ export function makeWater(size: number, sea: number): THREE.Mesh {
         float spec = pow(max(dot(R, normalize(uSunDir)), 0.0), 180.0) * (1.0 - uNight);
         col += uSunColor * spec * 2.5;
         float foam = smoothstep(1.2, 0.0, depth) * (0.5 + 0.5 * sin(uTime * 1.5 + n1 * 6.0 + vW.x * 0.05)) * inside;
-        col = mix(col, vec3(0.92), foam * 0.55);
+        col = mix(col, vec3(0.92) * (1.0 - uNight * 0.8), foam * 0.55 * (1.0 - uNight * 0.6));
         float alpha = mix(0.55, 0.93, smoothstep(0.0, 3.0, depth));
         gl_FragColor = vec4(col, alpha);
         #include <fog_fragment>

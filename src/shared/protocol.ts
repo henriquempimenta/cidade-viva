@@ -106,6 +106,7 @@ export interface Snapshot {
   signals: Int32Array; // pairs nodeId, phase(0..3)
   crossings: Uint8Array;
   turbine: number;
+  follow?: number[]; // x,y,z,heading,inside,building of the followed citizen
 }
 
 export interface WorldDiff {

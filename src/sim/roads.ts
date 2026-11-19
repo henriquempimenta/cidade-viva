@@ -441,14 +441,36 @@ export class RoadNetwork {
     else { e.odLog[e.odPtr] = o; e.odLog[e.odPtr + 1] = d; e.odPtr = (e.odPtr + 2) % 160; }
   }
 
-  // ---------- routing (reverse Dijkstra trees, cached) ----------
-  tree(dest: number): Tree {
+  // ---------- routing (reverse Dijkstra trees, cached, rolling refresh) ----------
+  /** max trees rebuilt per sim step (on-demand); the rest is served stale */
+  buildBudget = 6;
+  private rollIdx = 0;
+  stepRouting() {
+    this.buildBudget = 6;
+    // rolling refresh: rebuild the oldest trees so congestion feeds back into routes
+    let n = 1;
+    if (this.trees.size) {
+      const keys = [...this.trees.keys()];
+      for (let i = 0; i < n && keys.length; i++) {
+        this.rollIdx = (this.rollIdx + 1) % keys.length;
+        const k = keys[this.rollIdx];
+        const t = this.trees.get(k)!;
+        if (this.time - t.built > HOUR_SECONDS * 6 || t.ver !== this.topoVer && this.time - t.built > HOUR_SECONDS) this.trees.set(k, this.buildTree(k, t));
+      }
+      n = 0;
+    }
+  }
+  tree(dest: number, force = false): Tree | null {
     let t = this.trees.get(dest);
-    const stale = !t || t.ver !== this.topoVer || this.time - t.built > HOUR_SECONDS * 1.5;
+    const N = this.nodes.length;
+    const stale = !t || t.next.length < N || force;
     if (stale) {
+      if (this.buildBudget <= 0 && t) return t;
+      if (this.buildBudget <= 0 && !t) return null;
+      this.buildBudget--;
       t = this.buildTree(dest, t);
       this.trees.set(dest, t);
-      if (this.trees.size > 700) {
+      if (this.trees.size > 4000) {
         let oldK = -1, oldT = Infinity;
         for (const [k, v] of this.trees) if (v.lastUse < oldT) { oldT = v.lastUse; oldK = k; }
         this.trees.delete(oldK);
@@ -458,11 +480,13 @@ export class RoadNetwork {
     return t!;
   }
   private heap = new MinHeap();
+  private distBuf = new Float64Array(0);
   private buildTree(dest: number, reuse?: Tree): Tree {
     const N = this.nodes.length;
-    const dist = reuse && reuse.dist.length === N ? reuse.dist : new Float32Array(N);
+    if (this.distBuf.length < N) this.distBuf = new Float64Array(N + 512);
+    const dist = this.distBuf;
     const next = reuse && reuse.next.length === N ? reuse.next : new Int32Array(N);
-    dist.fill(Infinity); next.fill(-1);
+    dist.fill(Infinity, 0, N); next.fill(-1);
     dist[dest] = 0;
     const h = this.heap; h.clear();
     h.push(dest, 0);
@@ -474,7 +498,6 @@ export class RoadNetwork {
       for (const eid of nu.edges) {
         const e = this.edges[eid];
         if (!e.alive || e.progress < 1) continue;
-        // move w -> u along e
         const w = e.a === u ? e.b : e.a;
         const dir = e.a === w ? 0 : 1;
         if (dir === 1 && e.oneway) continue;
@@ -482,26 +505,35 @@ export class RoadNetwork {
         if (c < dist[w]) { dist[w] = c; next[w] = eid * 2 + dir; h.push(w, c); }
       }
     }
-    return { dist, next, ver: this.topoVer, built: this.time, lastUse: this.time };
+    return { dist: new Float32Array(0), next, ver: this.topoVer, built: this.time, lastUse: this.time };
   }
-  /** directed edges from node `from` to `dest` */
-  route(from: number, dest: number, maxLen = 400): number[] | null {
+  /** directed edges from node `from` to `dest`; null if unreachable or routing budget exhausted */
+  route(from: number, dest: number, maxLen = 500): number[] | null {
     if (from === dest) return [];
-    const t = this.tree(dest);
-    if (!isFinite(t.dist[from])) return null;
-    const out: number[] = [];
-    let u = from;
-    while (u !== dest && out.length < maxLen) {
-      const de = t.next[u];
-      if (de < 0) return null;
-      out.push(de);
-      const e = this.edges[de >> 1];
-      u = (de & 1) === 0 ? e.b : e.a;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const t = this.tree(dest, attempt === 1);
+      if (!t) return null;
+      if (from >= t.next.length) continue;
+      const out: number[] = [];
+      let u = from, ok = true;
+      while (u !== dest) {
+        const de = t.next[u];
+        if (de < 0 || out.length >= maxLen) { ok = false; break; }
+        const e = this.edges[de >> 1];
+        if (!e.alive || e.progress < 1) { ok = false; break; }
+        const tail = (de & 1) === 0 ? e.a : e.b;
+        if (tail !== u) { ok = false; break; }
+        out.push(de);
+        u = (de & 1) === 0 ? e.b : e.a;
+      }
+      if (ok) return out;
     }
-    return u === dest ? out : null;
+    return null;
   }
-  distTo(from: number, dest: number): number {
-    return this.tree(dest).dist[from];
+  pathTime(path: number[]): number {
+    let t = 0;
+    for (const de of path) t += this.travelTime(this.edges[de >> 1], de & 1);
+    return t;
   }
 
   // ---------- views ----------

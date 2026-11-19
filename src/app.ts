@@ -58,6 +58,7 @@ export class App {
   private snapInterval = 50;
   outageTex!: THREE.DataTexture;
   follow: { kind: 'citizen' | 'vehicle' | 'ped'; id: number; gen?: number } | null = null;
+  followedCitizen = -1;
   simT = 0;
   dayFrac = 0.3;
   started = false;
@@ -169,6 +170,10 @@ export class App {
     };
     this.director = new Director(dw);
     this.director.onCaption = (t) => this.hud.caption(t);
+    this.director.onShotStart = (sh) => {
+      const e = sh.ev?.entity;
+      if (e?.kind === 'citizen' && this.mode !== 'follow') { this.followedCitizen = e.id; this.send({ type: 'follow', citizen: e.id }); }
+    };
     this.hud = new Hud(this, this.uiRoot);
     const c = this.cityCenter;
     this.rig.camera.position.set(c.x + 300, 220, c.z + 300);
@@ -332,7 +337,7 @@ export class App {
   followEntity(f: { kind: 'citizen' | 'vehicle' | 'ped'; id: number; gen?: number }) {
     this.follow = f;
     this.setMode('follow');
-    if (f.kind === 'citizen') this.send({ type: 'follow', citizen: f.id });
+    if (f.kind === 'citizen') { this.followedCitizen = f.id; this.send({ type: 'follow', citizen: f.id }); }
   }
 
   private loop = () => {

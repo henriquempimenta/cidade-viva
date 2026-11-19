@@ -115,7 +115,19 @@ export class RoadsLayer {
   }
   removeEdge(id: number) { this.edges.delete(id); this.dirty = true; const w = this.works.get(id); if (w) { this.group.remove(w); this.works.delete(id); } }
 
-  private nodeR(id: number) { const n = this.nodes.get(id); if (!n || n.deg <= 2) return 0; return n.radius; }
+  private nodeRCache = new Map<number, number>();
+  private nodeR(id: number) {
+    const n = this.nodes.get(id);
+    if (!n || n.deg <= 2) return 0;
+    let r = this.nodeRCache.get(id);
+    if (r === undefined) {
+      r = 3;
+      for (const e of this.edgesAt(id)) r = Math.max(r, edgeHalfWidth(e) + 1.2);
+      if (n.control === 3) r += 9;
+      this.nodeRCache.set(id, r);
+    }
+    return r;
+  }
 
   update(now: number, night: number, simT: number) {
     if (this.dirty && now - this.lastBuild > 700) { this.rebuild(); this.lastBuild = now; this.dirty = false; }
@@ -178,6 +190,12 @@ export class RoadsLayer {
   }
 
   private rebuild() {
+    this.nodeRCache.clear();
+    this.edgesByNode.clear();
+    for (const e of this.edges.values()) {
+      if (e.progress < 1) continue;
+      for (const nid of [e.a, e.b]) { let a = this.edgesByNode.get(nid); if (!a) this.edgesByNode.set(nid, (a = [])); a.push(e); }
+    }
     const g = new GB();
     const bg = new GB();
     const poles: THREE.Matrix4[] = [];
@@ -332,12 +350,12 @@ export class RoadsLayer {
         continue;
       }
       g.setTransform(n.x, n.y, n.z, 0);
-      const anyDirt = [...this.edges.values()].some((e) => (e.a === n.id || e.b === n.id) && e.cls === RoadClass.Dirt && e.progress >= 1) && !this.edgesAt(n.id).some((e) => e.cls > 0);
-      disc(g, 0, 0.01, 0, n.radius, 16, anyDirt ? COL.dirt : COL.asphalt);
+      const anyDirt = this.edgesAt(n.id).every((e) => e.cls === RoadClass.Dirt);
+      const nr = this.nodeR(n.id);
+      disc(g, 0, 0.01, 0, nr, 16, anyDirt ? COL.dirt : COL.asphalt);
       if (n.control === 3) {
-        disc(g, 0, 0.2, 0, n.radius * 0.45, 16, COL.median);
-        disc(g, 0, 0.21, 0, n.radius * 0.5, 16, COL.curb);
-        disc(g, 0, 0.22, 0, n.radius * 0.45, 16, COL.median);
+        disc(g, 0, 0.21, 0, nr * 0.5, 16, COL.curb);
+        disc(g, 0, 0.22, 0, nr * 0.45, 16, COL.median);
       }
       g.setTransform(0, 0, 0, 0);
       if (n.control === 2 || n.control === 4) {
@@ -347,7 +365,7 @@ export class RoadsLayer {
           if (!other) return;
           const dx = other.x - n.x, dz = other.z - n.z, l = Math.hypot(dx, dz) || 1;
           const ux = dx / l, uz = dz / l;
-          const r = n.radius + 1;
+          const r = this.nodeR(n.id) + 1;
           const px = n.x + ux * r - uz * (edgeHalfWidth(e) + 1.2), pz = n.z + uz * r + ux * (edgeHalfWidth(e) + 1.2);
           m.makeTranslation(px, n.y + 4.2, pz);
           sigM.push(m.clone());
@@ -394,9 +412,9 @@ export class RoadsLayer {
     this.setSignals(new Int32Array([...this.signalPhase.entries()].flat()));
   }
 
+  private edgesByNode = new Map<number, EdgeView[]>();
   edgesAt(nid: number): EdgeView[] {
-    const out: EdgeView[] = [];
-    for (const e of this.edges.values()) if ((e.a === nid || e.b === nid) && e.progress >= 1) out.push(e);
+    const out = [...(this.edgesByNode.get(nid) ?? [])];
     out.sort((a, b) => a.id - b.id);
     return out;
   }

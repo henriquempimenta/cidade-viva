@@ -73,9 +73,9 @@ export class SimHost {
       case 'params': applyParams(this.world, m.params); break;
       case 'inject': injectEvent(this.world, m.event); break;
       case 'overlay': this.overlay = m.field; this.lastField = 0; break;
-      case 'camera': this.camera = { x: m.x, z: m.z, h: m.h }; break;
+      case 'camera': this.camera = { x: m.x, z: m.z, h: m.h }; this.world.cam = this.camera; break;
       case 'inspect': this.post({ type: 'inspect', reqId: m.reqId, data: inspect(this.world, m.kind, m.id) }); break;
-      case 'follow': (this.world as unknown as { followed: number }).followed = m.citizen; break;
+      case 'follow': this.world.citizens.followed = m.citizen; break;
     }
   }
 }

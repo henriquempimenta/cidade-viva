@@ -62,6 +62,7 @@ export class Director {
   private time = 0;
   caption: { text: string; t: number } | null = null;
   onCaption?: (text: string) => void;
+  onShotStart?: (s: Shot) => void;
   preferredSpeed = 10;
   private idleToggle = 0;
 
@@ -147,6 +148,7 @@ export class Director {
     this.trans = firstEver ? this.transDur : 0;
     if (firstEver) { const p = this.evaluate(s, 0); this.pose.pos.copy(p.pos); this.pose.look.copy(p.look); }
     this.shot = s;
+    this.onShotStart?.(s);
     if (s.ev) {
       this.history.push({ type: s.ev.type, x: s.ev.x, z: s.ev.z, shot: s.type, time: this.time });
       if (s.ev.type === 'construction_start' && s.ev.ref !== undefined) this.shownConstruction.add(s.ev.ref);

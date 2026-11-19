@@ -15,8 +15,8 @@ export const MAX_TRAIN_CARS = 400;
 export const FIELD_CELL = 25; // meters per heatmap cell
 export const OCC_CELL = 4; // meters per occupancy cell
 
-export const VEH_STRIDE = 8; // x,y,z,heading,type,gen,flags,lateral
-export const PED_STRIDE = 7; // x,y,z,heading,gen,flags,color
+export const VEH_STRIDE = 9; // x,y,z,heading,type,gen,flags,line,citizen
+export const PED_STRIDE = 7; // x,y,z,heading,gen,flags,citizen
 export const TRAIN_STRIDE = 6; // x,y,z,heading,type,line
 
 export enum VType {

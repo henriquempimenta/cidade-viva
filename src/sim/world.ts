@@ -11,10 +11,18 @@ import { updateFields } from './fieldsUpdate';
 import { Occupancy, OCC_RAIL } from './occupancy';
 import { Market, RoadGrowth } from './planner';
 import { borderPoint, chaikin, resample, simplify, terrainPath, type P2 } from './regional';
-import { RoadNetwork, type REdge } from './roads';
+import { RoadNetwork, type REdge, angDiff as angDiffW } from './roads';
 import { type SiteContext } from './siting';
 import { Terrain } from './terrain';
 import { Weather } from './weather';
+import { Citizens, type Household } from './citizens';
+import { Economy } from './economy';
+import { Traffic, P_CITIZEN, P_CONSTRUCTION, P_FUNERAL, P_SERVICE } from './traffic';
+import { Peds } from './peds';
+import { Places } from './places';
+import { carPlan, carPlanFromNode, carPlanToNode, doorOf, walkPoints, type CarPlan } from './trips';
+import type { RNode } from './roads';
+import { PED_FLAG_WORKER, PED_FLAG_FUNERAL, VType, VEH_FLAG_SIREN } from '../shared/constants';
 
 export interface District { id: number; name: string; x: number; z: number; founded: number }
 
@@ -23,6 +31,13 @@ export interface RailLike { splatAccess(F: Fields, rail: Float32Array, transit: 
 export interface TransitLike { splatCoverage(F: Fields, transit: Float32Array): void }
 export interface UtilitiesLike { riverInput(arr: Float32Array): void }
 export interface TourismLike { pressure: number }
+export interface TransitAPI {
+  transitOption(from: Building, to: Building, len: number): { mode: number; time: number; fare: number } | null;
+  board(i: number, from: Building, to: Building, opt: { mode: number; time: number; fare: number }): boolean;
+  describe(i: number): string;
+  position(i: number): { x: number; y: number; z: number; h: number; inside: boolean; building: number } | null;
+}
+export interface TourismAPI { decideTourist(i: number, here: Building, hour: number): void }
 
 export class World {
   params: SimParams;
@@ -40,6 +55,17 @@ export class World {
   transit: TransitLike | null = null;
   utilities: UtilitiesLike | null = null;
   tourism: TourismLike | null = null;
+  transit2: TransitAPI | null = null;
+  tourism2: TourismAPI | null = null;
+  citizens!: Citizens;
+  economy!: Economy;
+  traffic!: Traffic;
+  peds!: Peds;
+  places = new Places();
+  cam = { x: 0, z: 0, h: 300 };
+  gameDay = -1;
+  epidemic = 0;
+  budget = { money: 6000, debt: 0, income: 0, expenses: 0 };
 
   t = 0; // motion seconds since start
   day = 0;
@@ -73,6 +99,7 @@ export class World {
     this.weather = new Weather(this.rng.fork(13), params.seed);
     this.t = DAY_SECONDS * 0.29; // the story starts at dawn
     this.found();
+    this.attachAgents();
   }
 
   // ---------------- clock ----------------
@@ -184,6 +211,213 @@ export class World {
     updateFields(this);
   }
 
+  private attachAgents() {
+    this.citizens = new Citizens(this);
+    this.economy = new Economy(this);
+    this.traffic = new Traffic(this.roads);
+    this.peds = new Peds(this.terrain);
+    this.hasCitizens = true;
+    this.places.rebuild(this.buildings.list);
+    this.traffic.onArrive = (slot) => this.vehicleArrived(slot);
+    this.traffic.onStuck = (slot) => this.vehicleStuck(slot);
+    this.peds.onArrive = (slot) => { const c = this.peds.citizen[slot]; if (c >= 0 && this.citizens.slot[c] === slot) this.citizens.arrive(c); };
+    // the founding families
+    for (const b of this.buildings.list) {
+      b.households.length = 0;
+      if (b.hhCap > 0) for (let k = 0; k < b.hhCap; k++) this.citizens.createFamily(b, b.wealth, { fromVillage: true });
+    }
+    for (let i = 0; i < this.citizens.max; i++) if (this.citizens.alive[i]) this.economy.seekJobSoon(i);
+    this.economy.hourly();
+    this.updateDemand();
+  }
+
+  vehicleArrived(slot: number) {
+    const T = this.traffic;
+    const kind = T.pKind[slot], id = T.pId[slot];
+    if (kind === P_CITIZEN) { if (this.citizens.slot[id] === slot) this.citizens.arrive(id); return; }
+    this.serviceArrived?.(slot);
+  }
+  vehicleStuck(slot: number) {
+    const T = this.traffic;
+    if (T.pKind[slot] === P_CITIZEN) {
+      const id = T.pId[slot];
+      if (this.citizens.slot[id] === slot) this.citizens.virtualArrive(id, T.remainingTime(slot));
+    } else this.serviceArrived?.(slot);
+  }
+  serviceArrived: ((slot: number) => void) | null = null;
+
+  carPlan(a: Building, b: Building): CarPlan | null { return carPlan(this.roads, a, b); }
+  entryNode(): number {
+    const hp = this.highwayPath;
+    if (!hp.length) return -1;
+    const p = this.rng.chance(0.5) ? hp[0] : hp[hp.length - 1];
+    return this.roads.nearestNode(p.x, p.z, 50)?.id ?? -1;
+  }
+  exitNode(): number { return this.entryNode(); }
+  hasUniversity() { return this.buildings.list.some((b) => b.kind === 'university' && b.state === 'done'); }
+  avgHappiness(): number {
+    const C = this.citizens;
+    let s = 0, n = 0;
+    for (let i = 0; i < C.max; i += 3) if (C.alive[i] && !C.tourist[i]) { s += C.happiness[i]; n++; }
+    return n ? s / n : 0.6;
+  }
+  beachOk(): boolean {
+    return this.terrain.type === 'litoral' || this.fields.riverPol.length > 0 && this.places.has('park');
+  }
+  beachPlace(here: Building): Building | null {
+    const F = this.fields;
+    let best: Building | null = null, bs = -Infinity;
+    for (const cat of ['park', 'eat'] as const) for (const b of this.places.lists.get(cat) ?? []) {
+      const wd = F.waterDist[F.idx(b.x, b.z)];
+      if (wd > 220) continue;
+      const s = -Math.hypot(b.x - here.x, b.z - here.z) / 1000 - F.sample('waterPollution', b.x, b.z) * 2 + this.rng.next();
+      if (s > bs) { bs = s; best = b; }
+    }
+    return best;
+  }
+  lodAllowsVehicle(x: number, z: number): boolean {
+    const n = this.traffic.count;
+    if (n < 1800) return true;
+    const d = Math.hypot(x - this.cam.x, z - this.cam.z);
+    return d < Math.max(600, this.cam.h * 3) || n < 2600 && this.rng.chance(0.4);
+  }
+
+  /** junction control: may a vehicle coming from edge e (direction dir) enter the node now? */
+  nodeAllow = (n: RNode, e: REdge, dir: number, distToStop: number, waited = 0): boolean => {
+    const deg = n.edges.length;
+    if (deg < 3) return true;
+    if (n.control === 2 || n.control === 4) {
+      if (!n.phases.length) this.computePhases(n);
+      const ph = n.phases[Math.floor(n.phase / 2) % n.phases.length];
+      const green = ph.includes(e.id);
+      if (!green) return false;
+      if (n.phase % 2 === 1) return distToStop < 10; // yellow
+      return true;
+    }
+    if (n.control === 3) return n.inJunction < 4 || waited > 12;
+    if (n.control === 1) {
+      let major = 0;
+      for (const id of n.edges) major = Math.max(major, this.roads.edges[id].cls);
+      return e.cls < major ? n.inJunction === 0 || waited > 9 : n.inJunction < 3;
+    }
+    return n.inJunction < 2 || waited > 6;
+  };
+
+  computePhases(n: RNode) {
+    const R = this.roads;
+    const inc = n.edges.map((id) => R.edges[id]).filter((e) => e.alive);
+    if (!inc.length) { n.phases = [[]]; return; }
+    const a0 = R.angleOf(inc[0], n.id);
+    const A: number[] = [], B: number[] = [];
+    for (const e of inc) {
+      const d = angDiffW(R.angleOf(e, n.id), a0);
+      (d < Math.PI / 4 || d > (3 * Math.PI) / 4 ? A : B).push(e.id);
+    }
+    n.phases = B.length ? [A, B] : [A];
+    n.phase = 0; n.phaseT = 0;
+  }
+
+  private signalNodes: RNode[] = [];
+  private signalVer = -1;
+  stepSignals(dt: number) {
+    if (this.signalVer !== this.roads.topoVer) {
+      this.signalVer = this.roads.topoVer;
+      this.signalNodes = this.roads.nodes.filter((n) => n.alive && (n.control === 2 || n.control === 4));
+      for (const n of this.signalNodes) this.computePhases(n);
+    }
+    for (const n of this.signalNodes) {
+      n.phaseT += dt;
+      const yellow = n.phase % 2 === 1;
+      let green = 20;
+      if (n.control === 4) {
+        // smart signal: green proportional to queues of the current group
+        const grp = n.phases[Math.floor(n.phase / 2) % n.phases.length];
+        let q = 0, qo = 0;
+        for (const id of n.edges) { const e = this.roads.edges[id]; const s = e.stopped[0] + e.stopped[1]; if (grp.includes(id)) q += s; else qo += s; }
+        green = Math.max(8, Math.min(40, 14 + (q - qo) * 2.5));
+      }
+      if (n.phaseT > (yellow ? 3 : green)) { n.phaseT = 0; n.phase = (n.phase + 1) % (n.phases.length * 2); }
+    }
+  }
+  signalsSnapshot = (): Int32Array => {
+    const out: number[] = [];
+    for (const n of this.signalNodes) {
+      const sorted = [...n.edges].filter((id) => this.roads.edges[id].alive && this.roads.edges[id].progress >= 1).sort((a, b) => a - b);
+      const grp = n.phases[Math.floor(n.phase / 2) % n.phases.length] ?? [];
+      let mask = 0;
+      sorted.forEach((id, k) => { if (grp.includes(id)) mask |= 1 << k; });
+      if (n.phase % 2 === 1) mask |= 1 << 16;
+      out.push(n.id, mask);
+    }
+    return new Int32Array(out);
+  };
+
+  /** funeral cortege: hearse + family cars from home to the cemetery */
+  funeral(home: Building, name: string, h: Household | undefined) {
+    const cem = this.buildings.list.find((b) => (b.kind === 'cemetery' || b.kind === 'crematorium') && b.state === 'done');
+    let plan: CarPlan | null = null;
+    if (cem) plan = carPlan(this.roads, home, cem);
+    else { const ex = this.exitNode(); if (ex >= 0) plan = carPlanToNode(this.roads, home, ex); }
+    this.deathsUnserved += cem ? 0 : 1;
+    if (!plan || this.traffic.capacityLeft < 20) return;
+    const slot = this.traffic.spawn(VType.Hearse, plan.path, plan.startS, plan.destS, { kind: P_FUNERAL, id: -1, aux: 0 }, home.id, cem?.id ?? -1);
+    for (let k = 0; k < 2 && h && h.car; k++) {
+      const s2 = this.traffic.spawn(VType.Car, plan.path, Math.max(0, plan.startS - 8 * (k + 1)), plan.destS, { kind: P_FUNERAL, id: -1, aux: 0 }, home.id, cem?.id ?? -1);
+      void s2;
+    }
+    if (slot >= 0) this.events.emit('funeral', home.x, home.z, 0.4, `Cortejo fúnebre de ${name}${cem ? ' segue para o ' + cem.name : ' deixa a cidade rumo ao cemitério regional'}`, { entity: { kind: 'vehicle', id: slot, gen: this.traffic.gen[slot] }, visual: 0.7 });
+  }
+  deathsUnserved = 0;
+
+  statsExtra = (s: import('../shared/protocol').Stats) => {
+    const E = this.economy, C = this.citizens;
+    s.employed = E.employed; s.unemployed = E.unemployed; s.students = E.students; s.jobs = E.jobsTotal; s.vacancies = E.vacancies;
+    s.gdp = E.gdp; s.avgIncome = E.avgIncome; s.inflation = (E.priceIndex - 1) * 100;
+    s.happiness = this.avgHappiness();
+    let edu = 0, n = 0;
+    for (let i = 0; i < C.max; i += 2) if (C.alive[i] && C.age[i] >= 18 && !C.tourist[i]) { edu += C.edu[i]; n++; }
+    s.education = n ? edu / n : 0;
+    const tot = C.modeCount.reduce((a, b) => a + b, 0) || 1;
+    s.modal = { walk: C.modeCount[0] / tot, bike: C.modeCount[1] / tot, car: C.modeCount[2] / tot, bus: C.modeCount[3] / tot, rail: C.modeCount[4] / tot };
+    s.money = this.budget.money; s.debt = this.budget.debt; s.income = this.budget.income; s.expenses = this.budget.expenses;
+    s.virtualTrips = 0;
+    for (let i = 0; i < C.max; i++) if (C.alive[i] && C.state[i] === 4) s.virtualTrips++;
+    this.statsHook?.(s);
+  };
+  statsHook: ((s: import('../shared/protocol').Stats) => void) | null = null;
+  inspectCitizen = (id: number) => this.citizens.inspect(id);
+  inspectPed = (slot: number) => { const c = this.peds.citizen[slot]; return c >= 0 ? this.citizens.inspect(c) : null; };
+  buildingOccupants = (id: number) => {
+    const C = this.citizens;
+    const out: { id: number; name: string; role: string }[] = [];
+    const b = this.buildings.byId.get(id);
+    if (!b) return out;
+    for (const hid of b.households) { const h = C.households.get(hid); if (h) for (const m of h.members) out.push({ id: m, name: C.name(m), role: C.tourist[m] ? 'hóspede' : 'morador' }); if (out.length > 30) break; }
+    for (const x of b.workers.slice(0, 15)) out.push({ id: x, name: C.name(x), role: 'trabalha aqui' });
+    for (const x of b.students.slice(0, 10)) out.push({ id: x, name: C.name(x), role: 'estuda aqui' });
+    return out;
+  };
+
+  /** construction logistics: trucks and workers going to the sites */
+  private constructionLogistics() {
+    for (const id of this.buildings.underConstruction) {
+      const b = this.buildings.byId.get(id);
+      if (!b || b.state === 'done') continue;
+      if (this.rng.next() > 0.5) continue;
+      const near = this.roads.nodesNear(b.x, b.z, 700).filter((n) => n.edges.length && this.roads.edges[n.edges[0]].progress >= 1);
+      if (!near.length) continue;
+      const from = near[Math.floor(this.rng.next() * near.length)];
+      const plan = carPlanFromNode(this.roads, from.id, b);
+      if (!plan) continue;
+      if (this.traffic.capacityLeft > 200) this.traffic.spawn(VType.Construction, plan.path, plan.startS, plan.destS, { kind: P_CONSTRUCTION, id: b.id, aux: 0 });
+      if (this.peds.capacityLeft > 300) {
+        const pts = walkPoints(this.roads, plan, { x: from.x, z: from.z }, doorOf(this.roads, b));
+        const n = 1 + Math.floor(this.rng.next() * 3);
+        for (let k = 0; k < n; k++) this.peds.spawn(pts, -1, this.rng.range(1.2, 1.5), PED_FLAG_WORKER, 0.13);
+      }
+    }
+  }
+
   clearTreesAlong(path: P2[], hw: number) {
     for (let i = 0; i < path.length - 1; i++) {
       const a = path[i], b = path[i + 1];
@@ -263,7 +497,17 @@ export class World {
   hasCitizens = false;
   railSent = false;
   evict(b: Building) {
-    if (!this.hasCitizens) b.households.length = 0;
+    if (!this.hasCitizens) { b.households.length = 0; return; }
+    for (const hid of [...b.households]) {
+      const h = this.citizens.households.get(hid);
+      if (!h) continue;
+      this.citizens.moveHousehold(h, -1);
+      for (const m of h.members) this.citizens.addBio(m, `Foi despejad${this.citizens.sex[m] ? 'a' : 'o'}: ${b.name} será demolido`);
+      this.economy.wantsToMove(h, 'despejo por demolição');
+    }
+    b.households.length = 0;
+    for (const x of [...b.workers]) this.economy.leaveJob(x);
+    for (const x of [...b.students]) { this.economy.leaveSchool(x); this.economy.findSchool(x); }
   }
 
   onRoadStarted(e: REdge, motive: string) {
@@ -282,6 +526,13 @@ export class World {
     const newDay = Math.floor(this.t / DAY_SECONDS);
     const newHour = Math.floor(this.t / HOUR_SECONDS);
     this.weather.update(dt, this.dayFrac, this.season, this.params.raininess, this.params.snow, this.t);
+    this.roads.stepRouting();
+    this.stepSignals(dt);
+    this.traffic.rain = this.weather.rain;
+    this.peds.rain = this.weather.rain;
+    this.traffic.step(dt, this.nodeAllow);
+    this.peds.step(dt);
+    this.citizens.step(dt);
     // construction progress
     for (const id of [...this.buildings.underConstruction]) {
       const b = this.buildings.byId.get(id);
@@ -339,14 +590,18 @@ export class World {
   hourly() {
     this.roads.hourTick();
     updateFields(this);
+    this.economy.hourly();
     this.updateDemand();
     this.runMarket();
+    this.constructionLogistics();
     this.updateEra();
     this.cityRadius = this.computeRadius();
   }
 
   daily() {
     this.roads.dayTick();
+    this.citizens.daily();
+    this.economy.daily();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
   }
 
@@ -358,22 +613,13 @@ export class World {
 
   // ---------------- demand & market (stage 1: synthetic) ----------------
   updateDemand() {
-    let hh = 0, hhCap = 0, jobs = 0, comJobs = 0, indJobs = 0;
-    for (const b of this.buildings.list) {
-      if (b.state !== 'done' && b.state !== 'demolishing') { hhCap += b.hhCap; continue; }
-      hh += b.households.length; hhCap += b.hhCap;
-      const j = b.jobCap[0] + b.jobCap[1] + b.jobCap[2] + b.jobCap[3];
-      jobs += j;
-      if (b.def.cat === 'com') comJobs += j;
-      if (b.def.cat === 'ind') indJobs += j;
-    }
+    let hh = 0;
+    for (const b of this.buildings.list) hh += b.households.length;
     this.households = hh;
-    this.population = Math.round(hh * 3.1);
-    const workers = this.population * 0.5;
-    this.demand.res = clamp((jobs * 1.15 - workers) / 3 + 6 * this.params.immigration - (hhCap - hh), -20, 40);
-    this.demand.com = clamp(this.population * 0.06 - comJobs, -20, 40);
-    this.demand.ind = clamp(workers * 0.4 - indJobs, -20, 40);
-    this.demand.off = clamp(workers * 0.15 * (0.3 + this.era * 0.3) - (jobs - comJobs - indJobs), -20, 40);
+    let pop = 0;
+    const C = this.citizens;
+    for (let i = 0; i < C.max; i++) if (C.alive[i] && !C.tourist[i]) pop++;
+    this.population = pop;
   }
 
   runMarket() {
@@ -384,12 +630,15 @@ export class World {
     const d = this.demand;
     const tries: [string, number, number][] = [];
     if (d.res > 0) {
-      const n = Math.ceil(d.res / 4);
+      const n = Math.ceil(d.res / 5);
+      const hd = this.economy.homelessDemand;
+      const tot = hd[0] + hd[1] + hd[2] + 0.001;
       for (let i = 0; i < n; i++) {
-        const r = this.rng.next();
-        const ineq = this.params.inequality;
-        const wealth = r < 0.3 + ineq * 0.4 ? 0 : r < 0.85 + ineq * 0.05 ? 1 : 2;
-        tries.push(['res', wealth, d.res]);
+        const r = this.rng.next() * tot;
+        const wealth = r < hd[0] ? 0 : r < hd[0] + hd[1] ? 1 : 2;
+        // the poorest who find nothing affordable build informally
+        if (wealth === 0 && hd[0] > 25 && this.rng.chance(0.35 * this.params.inequality + 0.05)) tries.push(['informal', 0, d.res]);
+        else tries.push(['res', wealth, d.res]);
       }
     }
     if (d.com > 0) tries.push(['com', 1, d.com]);

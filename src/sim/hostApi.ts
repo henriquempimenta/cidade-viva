@@ -32,6 +32,7 @@ export function makeSnapshot(w: World, cam: { x: number; z: number; h: number })
     signals: x.signalsSnapshot ? x.signalsSnapshot() : new Int32Array(0),
     crossings: x.crossingsSnapshot ? x.crossingsSnapshot() : new Uint8Array(0),
     turbine: w.weather.wind,
+    follow: (() => { const c = (w as unknown as { citizens?: { followed: number; position(i: number): { x: number; y: number; z: number; h: number; inside: boolean; building: number } | null } }).citizens; if (!c || c.followed < 0) return undefined; const p = c.position(c.followed); return p ? [p.x, p.y, p.z, p.h, p.inside ? 1 : 0, p.building] : undefined; })(),
   };
 }
 

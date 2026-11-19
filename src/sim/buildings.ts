@@ -198,7 +198,7 @@ export class Buildings {
     b.progress = Math.min(1, b.progress + dt / b.buildSecs);
     for (const [th, st] of STAGES) if (b.progress < th) { b.state = st; break; }
     if (b.progress >= 1) { b.state = 'done'; this.underConstruction.delete(b.id); }
-    if (b.state !== before || Math.random() < 0.15) this.dirty.add(b.id);
+    if (b.state !== before || this.rng.next() < 0.15) this.dirty.add(b.id);
     return b.state !== before;
   }
 

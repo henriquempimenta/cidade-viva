@@ -178,7 +178,7 @@ export class Transit {
     if (k < 0) return false;
     const n = this.serveStop(l, k, slot, 70);
     T.pAux[slot] = l.onboard.get(slot)?.length ?? 0;
-    return n > 0 || Math.random() < 0.5;
+    return n > 0 || (slot + node) % 2 === 0;
   };
 
   /** a bus completed its loop: respawn and keep passengers */

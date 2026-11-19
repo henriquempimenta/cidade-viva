@@ -146,7 +146,7 @@ export class Utilities {
       b.garbage -= take; capacity -= take;
       if (b.garbage < 0.5 && b.garbage + take >= 1.5) w.buildings.dirty.add(b.id);
     }
-    for (const b of w.buildings.list) if (b.garbage > 1.5 && Math.random() < 0.3) w.buildings.dirty.add(b.id);
+    for (const b of w.buildings.list) if (b.garbage > 1.5 && (b.id + w.day) % 3 === 0) w.buildings.dirty.add(b.id);
     // field
     const F = w.fields;
     F.f.garbage.fill(0);

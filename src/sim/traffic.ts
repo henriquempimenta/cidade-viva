@@ -80,7 +80,7 @@ export class Traffic {
     this.lane[slot] = type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus ? lanes - 1 : Math.max(0, lanes - 1 - (e.busLane && lanes > 1 ? 1 : 0));
     this.s[slot] = Math.max(this.sStart(e, de & 1), Math.min(startS, this.sEnd(e, de & 1) - 1));
     this.v[slot] = 0;
-    const vf = type === VType.Truck || type === VType.Garbage || type === VType.Construction ? 0.82 : type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus ? 0.85 : type === VType.Moto ? 1.12 : type === VType.Ambulance || type === VType.Police || type === VType.Fire ? (flags & VEH_FLAG_SIREN ? 1.35 : 1) : 0.92 + Math.random() * 0.16;
+    const vf = type === VType.Truck || type === VType.Garbage || type === VType.Construction ? 0.82 : type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus ? 0.85 : type === VType.Moto ? 1.12 : type === VType.Ambulance || type === VType.Police || type === VType.Fire ? (flags & VEH_FLAG_SIREN ? 1.35 : 1) : 0.92 + ((slot * 2654435761 + this.gen[slot] * 97) >>> 0) % 1000 / 1000 * 0.16;
     this.v0f[slot] = vf;
     this.len[slot] = VTYPE_LEN[type] ?? 4.5;
     this.lat[slot] = 0;

@@ -382,7 +382,7 @@ export class Transit {
     for (const l of this.lines) c += l.kind === 'bus' ? l.fleet * 12 : l.kind === 'brt' ? l.fleet * 16 : l.kind === 'metro' ? 300 : 120;
     return c;
   }
-  fares(): number { return this.ridersDay * 2.5; }
+  fares(): number { const f = this.ridersDay * 2.5; this.ridersDay = 0; return f; }
 
   static readonly ACT = Act;
   static readonly ST_IN = ST_IN;

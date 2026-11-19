@@ -263,9 +263,10 @@ export class App {
       if (used.has(e.id)) continue;
       const chain: THREE.Vector3[] = [];
       let cur = e;
+      const cc = this.cityCenter, RR = this.cityRadius + 250;
       for (let k = 0; k < 12 && cur; k++) {
         used.add(cur.id);
-        for (let i = 0; i < cur.pts.length; i += 9) chain.push(new THREE.Vector3(cur.pts[i], cur.pts[i + 1], cur.pts[i + 2]));
+        for (let i = 0; i < cur.pts.length; i += 9) if (Math.hypot(cur.pts[i] - cc.x, cur.pts[i + 2] - cc.z) < RR) chain.push(new THREE.Vector3(cur.pts[i], cur.pts[i + 1], cur.pts[i + 2]));
         const nxt = edges.find((o) => !used.has(o.id) && (o.a === cur.b || o.b === cur.b));
         if (!nxt) break;
         cur = nxt;
@@ -355,7 +356,12 @@ export class App {
     this.agents.update(dt, alpha);
     const simDt = this.simT - this.lastSimT;
     this.lastSimT = this.simT;
-    if (this.mode === 'auto' || this.mode === 'cinematic') {
+    if ((this.mode === 'auto' || this.mode === 'cinematic') && !this.buildings.all().length) {
+      // waiting for the first world diff: slow orbit over the map center
+      const a = U.uTime.value * 0.05, c = this.init.size / 2;
+      cam.position.set(c + Math.cos(a) * 900, 500, c + Math.sin(a) * 900);
+      cam.lookAt(c, 0, c);
+    } else if (this.mode === 'auto' || this.mode === 'cinematic') {
       this.director.update(dt);
       cam.position.copy(this.director.pose.pos);
       cam.lookAt(this.director.pose.look);

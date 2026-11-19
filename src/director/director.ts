@@ -149,6 +149,14 @@ export class Director {
     if (firstEver) { const p = this.evaluate(s, 0); this.pose.pos.copy(p.pos); this.pose.look.copy(p.look); }
     this.shot = s;
     this.onShotStart?.(s);
+    // far away? cut instead of a long fly-through
+    {
+      const tgt = this.evaluate(s, 0);
+      const c = this.w.center();
+      if (this.pose.pos.distanceTo(tgt.pos) > 2500 || Math.hypot(this.pose.pos.x - c.x, this.pose.pos.z - c.z) > this.w.cityRadius() * 3 + 1500) {
+        this.pose.pos.copy(tgt.pos); this.pose.look.copy(tgt.look); this.trans = this.transDur;
+      }
+    }
     if (s.ev) {
       this.history.push({ type: s.ev.type, x: s.ev.x, z: s.ev.z, shot: s.type, time: this.time });
       if (s.ev.type === 'construction_start' && s.ev.ref !== undefined) this.shownConstruction.add(s.ev.ref);
@@ -182,7 +190,7 @@ export class Director {
     const s = new Shot(type, focus, ev, a + Math.random() * (b - a));
     s.opts.dir = Math.random() < 0.5 ? 1 : -1;
     s.opts.angle = Math.random() * Math.PI * 2;
-    if (type === 'flyover') s.opts.path = this.pickPath(focus);
+    if (type === 'flyover') { s.opts.path = this.pickPath(focus); if (s.opts.path < 0) s.type = 'orbit'; }
     return s;
   }
 
@@ -200,7 +208,7 @@ export class Director {
     const s = new Shot(type, focus, null, a + Math.random() * (b - a));
     s.opts.dir = Math.random() < 0.5 ? 1 : -1;
     s.opts.angle = ang;
-    if (type === 'flyover') s.opts.path = this.pickPath(focus);
+    if (type === 'flyover') { s.opts.path = this.pickPath(focus); if (s.opts.path < 0) s.type = 'orbit'; }
     return s;
   }
 
@@ -249,7 +257,7 @@ export class Director {
       }
       case 'establishing': {
         const c = this.w.center();
-        const R = this.w.cityRadius() * 1.7 + 300;
+        const R = Math.min(this.w.cityRadius() * 1.5 + 250, this.w.mapSize * 0.42);
         const a = (s.opts.angle ?? 0) + dir * t * 0.025;
         pos.set(c.x + Math.cos(a) * R, Math.min(700, R * 0.55 + 120), c.z + Math.sin(a) * R);
         look.set(f.x * 0.3 + c.x * 0.7, 10, f.z * 0.3 + c.z * 0.7);
@@ -339,8 +347,8 @@ export class Director {
     }
     pos.y = Math.min(pos.y, 780); // stay below the cloud deck
     // keep inside a sane map region
-    pos.x = Math.max(-1500, Math.min(this.w.mapSize + 1500, pos.x));
-    pos.z = Math.max(-1500, Math.min(this.w.mapSize + 1500, pos.z));
+    pos.x = Math.max(60, Math.min(this.w.mapSize - 60, pos.x));
+    pos.z = Math.max(60, Math.min(this.w.mapSize - 60, pos.z));
     return { pos, look };
   }
 

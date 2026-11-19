@@ -264,17 +264,22 @@ export class App {
       }
       if (chain.length > 6) paths.push(chain);
     }
-    // river
+    // river: the longest contiguous stretch near the city
     const r = this.init.river;
     const c = this.cityCenter;
-    const riv: THREE.Vector3[] = [];
-    for (let i = 0; i < r.length; i += 2) if (Math.hypot(r[i] - c.x, r[i + 1] - c.z) < this.cityRadius * 2 + 400) riv.push(new THREE.Vector3(r[i], 2, r[i + 1]));
-    if (riv.length > 4) paths.push(riv);
+    const R = this.cityRadius + 350;
+    let run: THREE.Vector3[] = [], best: THREE.Vector3[] = [];
+    for (let i = 0; i < r.length; i += 2) {
+      if (Math.hypot(r[i] - c.x, r[i + 1] - c.z) < R) run.push(new THREE.Vector3(r[i], 2, r[i + 1]));
+      else { if (run.length > best.length) best = run; run = []; }
+    }
+    if (run.length > best.length) best = run;
+    if (best.length > 6) paths.push(best);
     // railway
     for (const re of this.rail.edges.values()) {
       const pts: THREE.Vector3[] = [];
-      for (let i = 0; i < re.pts.length; i += 3) pts.push(new THREE.Vector3(re.pts[i], re.pts[i + 1], re.pts[i + 2]));
-      if (pts.length > 4 && Math.hypot(pts[0].x - c.x, pts[0].z - c.z) < this.cityRadius * 2 + 300) paths.push(pts);
+      for (let i = 0; i < re.pts.length; i += 3) if (Math.hypot(re.pts[i] - c.x, re.pts[i + 2] - c.z) < R) pts.push(new THREE.Vector3(re.pts[i], re.pts[i + 1], re.pts[i + 2]));
+      if (pts.length > 4) paths.push(pts);
     }
     return paths;
   }
@@ -298,6 +303,7 @@ export class App {
 
   setMode(m: CamMode) {
     this.mode = m;
+    this.prevMode = m === 'free' ? 'free' : m;
     this.controls.enabled = m === 'free';
     if (m === 'auto' || m === 'cinematic') {
       this.director.takeOver({ pos: this.rig.camera.position.clone(), look: this.controls.target.clone() });
@@ -317,8 +323,9 @@ export class App {
     const t = this.rig.camera.position.clone().addScaledVector(dir, Math.max(60, this.rig.camera.position.y * 1.2));
     t.y = Math.max(0, this.terrain.heightAt(t.x, t.z));
     this.controls.target.copy(t);
-    this.prevMode = fromInput ? this.mode : 'free';
+    const prev = this.mode;
     this.setMode('free');
+    this.prevMode = fromInput ? prev : 'free';
   }
   private prevMode: CamMode = 'auto';
 

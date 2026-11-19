@@ -296,9 +296,11 @@ export class Director {
         const u = Math.min(total - 0.001, (t / s.dur) * total);
         const i = Math.floor(u), fr = u - i;
         const p = path[i].clone().lerp(path[i + 1], fr);
-        const ahead = path[Math.min(total, i + 2)].clone();
-        pos.set(p.x, p.y + 55 + Math.sin(t * 0.3) * 10, p.z);
-        look.set(ahead.x, ahead.y, ahead.z);
+        const ahead = path[Math.min(total, i + 5)].clone();
+        const side = (s.opts.dir ?? 1) * 25;
+        const dx = path[i + 1].x - path[i].x, dz = path[i + 1].z - path[i].z, dl = Math.hypot(dx, dz) || 1;
+        pos.set(p.x - (dz / dl) * side, p.y + 45 + Math.sin(t * 0.3) * 12, p.z + (dx / dl) * side);
+        look.set(ahead.x, ahead.y + 12, ahead.z);
         break;
       }
       case 'chase': case 'shoulder': {

@@ -17,6 +17,9 @@ export class Services {
   patrols = 0;
   firesToday = 0;
   avgCrime = 0;
+  /** emergency/collection responses that failed to reach the target due to gridlock */
+  delayedResponses = 0;
+  private lastDelayNotice = -1e9;
 
   constructor(private w: World) {}
 
@@ -219,10 +222,60 @@ export class Services {
     }
     if (kind === P_GARBAGE) {
       const b = w.buildings.byId.get(T.pId[slot]);
-      if (b && b.garbage > 0) { b.garbage = Math.max(0, b.garbage - 2); w.buildings.dirty.add(b.id); }
+      if (!b) return;
+      // truck actually reached the block: collect from the target and immediate neighbours up to its load
+      let cap = T.pAux[slot] > 0 ? T.pAux[slot] / 10 : 4;
+      let collected = 0;
+      const collect = (t: Building) => {
+        if (cap <= 0 || t.garbage <= 0) return;
+        const take = Math.min(t.garbage, cap);
+        t.garbage -= take;
+        cap -= take;
+        collected += take;
+        w.buildings.dirty.add(t.id);
+      };
+      collect(b);
+      if (cap > 0.1) {
+        for (const n of w.buildings.list) {
+          if (cap <= 0) break;
+          if (n.id === b.id || n.state !== 'done' || n.garbage <= 0.2) continue;
+          if (Math.hypot(n.x - b.x, n.z - b.z) <= 75) collect(n);
+        }
+      }
+      if (collected > 0) w.utils.garbage.stock += collected;
       return;
     }
     void P_CONSTRUCTION; void P_FUNERAL; void P_MOVING;
+  }
+
+  /** a service vehicle gave up in gridlock: never count the service as delivered */
+  stuck(slot: number) {
+    const w = this.w, T = w.traffic;
+    const kind = T.pKind[slot];
+    if (kind === P_PATROL) {
+      this.patrols = Math.max(0, this.patrols - 1);
+      const st = w.buildings.byId.get(T.pId[slot]);
+      if (st && this.patrols < this.patrolTarget && this.patrol(st, slot)) this.patrols++;
+      return;
+    }
+    if (kind === P_SERVICE) {
+      const inc = this.incidents.get(T.pId[slot]);
+      if (!inc) return;
+      this.incidents.delete(inc.id);
+      this.delayedResponses++;
+      const b = w.buildings.byId.get(inc.b);
+      if (b && inc.type === 'fire' && b.fire > 0) {
+        if (w.t - this.lastDelayNotice > HOUR_SECONDS * 2) {
+          this.lastDelayNotice = w.t;
+          w.events.emit('fire', b.x, b.z, 0.7, `Congestionamento impede chegada dos bombeiros em ${b.name}`, { ref: b.id });
+        }
+      }
+      return;
+    }
+    if (kind === P_GARBAGE) {
+      this.delayedResponses++;
+      return;
+    }
   }
 
   static HOUR = HOUR_SECONDS;

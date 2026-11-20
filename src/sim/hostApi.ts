@@ -1,6 +1,6 @@
 import { FIELD_NAMES, type FieldName, KINDS } from '../shared/catalog';
 import { MAX_PEDS, MAX_VEHICLES, PED_STRIDE, ROAD_NAMES, VEH_STRIDE, TRAIN_STRIDE, MAX_TRAIN_CARS } from '../shared/constants';
-import type { SimParams } from '../shared/params';
+import { sanitizeParams, type SimParams } from '../shared/params';
 import type { Snapshot, Stats, WorldDiff } from '../shared/protocol';
 import { TERM_LABELS } from './siting';
 import type { World } from './world';
@@ -87,9 +87,12 @@ export function fieldPayload(w: World, overlay: string | null): Partial<WorldDif
 }
 
 export function applyParams(w: World, p: Partial<SimParams>) {
-  Object.assign(w.params, p);
-  (w as Ext).paramsChanged?.(Object.keys(p));
-  w.events.emit('param', w.center.x, w.center.z, 0.1, `Parâmetro alterado: ${Object.keys(p).join(', ')}`);
+  const next = sanitizeParams(p, w.params);
+  const changed = (Object.keys(p) as (keyof SimParams)[]).filter((k) => w.params[k] !== next[k]);
+  if (!changed.length) return;
+  Object.assign(w.params, next);
+  (w as Ext).paramsChanged?.(changed);
+  w.events.emit('param', w.center.x, w.center.z, 0.1, `Parâmetro alterado: ${changed.join(', ')}`);
 }
 
 export function injectEvent(w: World, ev: string) {

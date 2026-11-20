@@ -88,7 +88,7 @@ export class World {
   inject = (ev: string) => this.happen.inject(ev);
   lastUpgrade!: Map<number, unknown>;
   transitAPI: { ridersOn(edge: number): number } | null = null;
-  buildBypass?: () => void;
+  buildBypass?: () => boolean;
   transitCost?: () => number;
   tourismTax?: () => number;
   extraProjects?: () => unknown[];
@@ -306,6 +306,7 @@ export class World {
     this.extraProjects = () => [...this.rail2.projects(), ...this.happen.projects()];
     this.transitCost = () => T.cost() - T.fares();
     this.serviceArrived = (slot) => this.services.arrived(slot);
+    this.serviceStuck = (slot) => this.services.stuck(slot);
     this.places.rebuild(this.buildings.list);
     this.traffic.onArrive = (slot) => this.vehicleArrived(slot);
     this.traffic.onStuck = (slot) => this.vehicleStuck(slot);
@@ -343,11 +344,17 @@ export class World {
     const T = this.traffic;
     if (T.pKind[slot] === P_CITIZEN) {
       const id = T.pId[slot];
-      if (this.citizens.slot[id] === slot) this.citizens.virtualArrive(id, T.remainingTime(slot));
+      if (this.citizens.slot[id] === slot) {
+        T.computePose(slot);
+        if (!this.citizens.switchToWalk(id, T.x[slot], T.z[slot])) {
+          this.citizens.virtualArrive(id, T.remainingTime(slot), T.x[slot], T.z[slot]);
+        }
+      }
     } else if (T.pKind[slot] === 3) this.transitSys.busArrived(slot);
-    else this.serviceArrived?.(slot);
+    else this.serviceStuck?.(slot);
   }
   serviceArrived: ((slot: number) => void) | null = null;
+  serviceStuck: ((slot: number) => void) | null = null;
 
   carPlan(a: Building, b: Building): CarPlan | null { return carPlan(this.roads, a, b); }
   entryNode(): number {
@@ -385,11 +392,13 @@ export class World {
     }
     return best;
   }
-  lodAllowsVehicle(x: number, z: number): boolean {
+  /** deterministic physical-traffic budget: camera framing never alters simulation state or RNG */
+  lodAllowsVehicle(seedKey = 0): boolean {
     const n = this.traffic.count;
     if (n < 1800) return true;
-    const d = Math.hypot(x - this.cam.x, z - this.cam.z);
-    return d < Math.max(600, this.cam.h * 3) || n < 2600 && this.rng.chance(0.4);
+    if (n >= 3000) return false;
+    const h = (((seedKey * 2654435761) ^ (Math.floor(this.t * 2) * 2246822519)) >>> 0) / 4294967296;
+    return h < (3000 - n) / 1200;
   }
 
   /** junction control: may a vehicle coming from edge e (direction dir) enter the node now? */
@@ -488,16 +497,16 @@ export class World {
   private sentFlood = 0;
 
   /** ring road / bypass: a new road around the built-up area, linking the highway before and after the city */
-  bypass() {
+  bypass(): boolean {
     const R = this.roads, T = this.terrain, F = this.fields;
     const hp = this.highwayPath;
     const near = (p: P2) => Math.hypot(p.x - this.center.x, p.z - this.center.z);
     const R0 = this.cityRadius * 1.35 + 150;
     let i0 = -1, i1 = -1;
     for (let i = 0; i < hp.length; i++) { if (near(hp[i]) < R0) { if (i0 < 0) i0 = Math.max(0, i - 1); i1 = Math.min(hp.length - 1, i + 1); } }
-    if (i0 < 0 || i1 - i0 < 3) return;
+    if (i0 < 0 || i1 - i0 < 3) return false;
     const a = R.nearestNode(hp[i0].x, hp[i0].z, 60), b = R.nearestNode(hp[i1].x, hp[i1].z, 60);
-    if (!a || !b) return;
+    if (!a || !b) return false;
     const path = terrainPath(T, { x: a.x, z: a.z }, { x: b.x, z: b.z }, { slopeW: 50, waterW: 12, cell: 25, avoid: (x, z) => { const k = F.idx(x, z); return (F.f.resDensity[k] + F.f.jobDensity[k]) > 0.2 ? 40 : 0; } });
     const pts = resample(simplify(path, 20), 95);
     let prev = a.id, ok = 0;
@@ -511,6 +520,7 @@ export class World {
       ok++;
     }
     if (ok) this.events.emit('road_upgrade', this.center.x, this.center.z, 1, 'Começam as obras do Anel Viário para desviar o tráfego de passagem', { headline: 'Anel Viário vai tirar caminhões do centro', visual: 1 });
+    return ok > 0;
   }
   diffHook: ((d: WorldDiff) => void) | null = null;
 
@@ -832,6 +842,7 @@ export class World {
     this.roads.updateNodeGeom(this.roads.nodes[e.b]);
     this.roads.topoVer++;
     this.roads.dirtyEdges.add(e.id);
+    if (e.busLane) this.transitSys?.checkPendingBRT();
   }
 
   hourly() {

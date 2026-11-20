@@ -2,7 +2,7 @@ import { RoadClass, ROAD_NAMES, ROAD_HALF_WIDTH, ROAD_LANES } from '../shared/co
 import { angDiff, projSeg, type REdge, type RNode } from './roads';
 import type { World } from './world';
 
-interface Option { label: string; benefit: number; cost: number; ratio: number; feasible: boolean; note: string; apply?: () => void }
+interface Option { label: string; benefit: number; cost: number; ratio: number; feasible: boolean; note: string; apply?: () => boolean }
 export interface UpgradeDecision { day: number; chosen: string; options: Option[]; edge: number }
 
 const PEAK_HOURS = 6; // equivalent hours/day at peak-like load
@@ -57,7 +57,7 @@ export class RoadUpgrades {
       // (120 days) and the treasury must keep a margin
       const big = !!best && best.cost > 3000;
       if (best && (big ? best.ratio > 1 / 60 && w.budget.money > best.cost * 1.3 && !w.structures.busy() : best.ratio > 0.4 && w.budget.money > best.cost)) {
-        best.apply!();
+        if (!best.apply!()) continue;
         w.budget.money -= best.cost;
         const dec: UpgradeDecision = { day: w.day, chosen: best.label, options: opt.map(strip), edge: n.edges[0] };
         for (const id of n.edges) this.decisions.set(id, dec);
@@ -84,7 +84,7 @@ export class RoadUpgrades {
       const benefit = this.savings(e, nc);
       const cost = e.len * (2.5 + lanes) * (lanes >= 3 ? 1.8 : 1);
       opts.push({ label: lanes >= 2 && e.cls < RoadClass.Avenue ? 'Alargar para avenida com canteiro' : 'Alargar a via (+1 faixa)', benefit, cost, ratio: benefit / cost, feasible, note: feasible ? `${e.lanes}→${lanes} faixas por sentido` : !room ? 'sem espaço lateral: edificações a menos de ' + newHalf.toFixed(0) + ' m do eixo' : 'limite de faixas, ponte ou mão única',
-        apply: () => this.startWork(e, { lanes, cls: newCls }, 'Alargamento') });
+        apply: () => { this.startWork(e, { lanes, cls: newCls }, 'Alargamento'); return true; } });
     }
     // 2. one-way pair with a parallel street
     const par = this.parallel(e);
@@ -101,7 +101,7 @@ export class RoadUpgrades {
       const benefit = feasible ? this.savings(e, cap, 0.62) : 0;
       const cost = relief ? relief.len * 3 + 80 : 0;
       opts.push({ label: 'Abrir via paralela', benefit, cost: cost || 1, ratio: feasible ? benefit / cost : 0, feasible, note: feasible ? `${relief!.len.toFixed(0)} m de nova via` : 'sem corredor livre',
-        apply: () => { const ne = R.applyPlan(relief!, { progress: 0, day: w.day, name: R.streetName(RoadClass.Collector) }); w.onRoadStarted(ne, 'Via paralela para desafogar ' + e.name); } });
+        apply: () => { const ne = R.applyPlan(relief!, { progress: 0, day: w.day, name: R.streetName(RoadClass.Collector) }); w.onRoadStarted(ne, 'Via paralela para desafogar ' + e.name); return true; } });
     }
     // 4. junction treatment at the busiest end
     const node = a.delay > b.delay ? a : b;
@@ -110,12 +110,12 @@ export class RoadUpgrades {
     if (e.lanes >= 2 && !e.busLane && w.transitAPI?.ridersOn(e.id)) {
       const riders = w.transitAPI.ridersOn(e.id);
       const benefit = riders * 0.6 - this.savings(e, cap * 0.8) * -1 * 0.2;
-      opts.push({ label: 'Faixa exclusiva de ônibus (BRT)', benefit, cost: e.len * 1.2, ratio: benefit / (e.len * 1.2), feasible: true, note: `${riders} passageiros/dia na linha`, apply: () => this.busLane(e) });
+      opts.push({ label: 'Faixa exclusiva de ônibus (BRT)', benefit, cost: e.len * 1.2, ratio: benefit / (e.len * 1.2), feasible: true, note: `${riders} passageiros/dia na linha`, apply: () => { this.busLane(e); return true; } });
     }
     // 6. bypass / ring road for congested highways through the city
     if (e.cls === RoadClass.Highway && w.era >= 2) {
       const benefit = this.savings(e, cap, 0.55) * 1.5;
-      opts.push({ label: 'Contorno rodoviário', benefit, cost: 4000, ratio: benefit / 4000, feasible: w.budget.money > 6000, note: 'tira o tráfego de passagem do centro', apply: () => w.buildBypass?.() });
+      opts.push({ label: 'Contorno rodoviário', benefit, cost: 4000, ratio: benefit / 4000, feasible: w.budget.money > 6000, note: 'tira o tráfego de passagem do centro', apply: () => !!w.buildBypass?.() });
     }
     const feasible = opts.filter((o) => o.feasible && o.benefit > 0);
     feasible.sort((x, y) => y.ratio - x.ratio);
@@ -124,7 +124,9 @@ export class RoadUpgrades {
     if (!best || (best.cost > money * 0.8 && best.cost > 250) || best.cost > money + 2000) {
       return { day: w.day, chosen: best ? `${best.label} (adiado: sem orçamento)` : 'nenhuma alternativa viável', options: opts.map(strip), edge: e.id };
     }
-    best.apply!();
+    if (!best.apply!()) {
+      return { day: w.day, chosen: `${best.label} (cancelado: sem conectividade/espaço)`, options: opts.map(strip), edge: e.id };
+    }
     w.budget.money -= best.cost;
     const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
     const vc = Math.max(...e.volume) / cap;
@@ -145,9 +147,9 @@ export class RoadUpgrades {
     const delayMin = (n.delay * flow * PEAK_HOURS) / 60;
     const clsMax = Math.max(...n.edges.map((id) => R.edges[id].cls));
     const clsMin = Math.min(...n.edges.map((id) => R.edges[id].cls));
-    if (n.control < 2) out.push({ label: 'Semáforo', benefit: delayMin * 0.5, cost: 60, ratio: (delayMin * 0.5) / 60, feasible: true, note: `espera média ${n.delay.toFixed(0)} s`, apply: () => this.setControl(n, 2) });
-    if (n.control !== 3 && clsMax <= RoadClass.Collector && n.edges.length <= 4) out.push({ label: 'Rotatória', benefit: delayMin * 0.6, cost: 220, ratio: (delayMin * 0.6) / 220, feasible: this.roundaboutSpace(n), note: 'fluxo contínuo em vias locais', apply: () => this.setControl(n, 3) });
-    if (n.control === 2 && w.era >= 2) out.push({ label: 'Semáforo inteligente', benefit: delayMin * 0.35, cost: 150, ratio: (delayMin * 0.35) / 150, feasible: true, note: 'tempos adaptados às filas', apply: () => this.setControl(n, 4) });
+    if (n.control < 2) out.push({ label: 'Semáforo', benefit: delayMin * 0.5, cost: 60, ratio: (delayMin * 0.5) / 60, feasible: true, note: `espera média ${n.delay.toFixed(0)} s`, apply: () => { this.setControl(n, 2); return true; } });
+    if (n.control !== 3 && clsMax <= RoadClass.Collector && n.edges.length <= 4) out.push({ label: 'Rotatória', benefit: delayMin * 0.6, cost: 220, ratio: (delayMin * 0.6) / 220, feasible: this.roundaboutSpace(n), note: 'fluxo contínuo em vias locais', apply: () => { this.setControl(n, 3); return true; } });
+    if (n.control === 2 && w.era >= 2) out.push({ label: 'Semáforo inteligente', benefit: delayMin * 0.35, cost: 150, ratio: (delayMin * 0.35) / 150, feasible: true, note: 'tempos adaptados às filas', apply: () => { this.setControl(n, 4); return true; } });
     // grade separation: only where a straight wide axis crosses the junction and only after signals failed
     if ((n.control === 2 || n.control === 4) && w.era >= 1 && clsMax >= RoadClass.Collector) {
       const axis = this.axis(n);
@@ -158,8 +160,8 @@ export class RoadUpgrades {
         const kind = w.structures.prefers(plan), cost = w.structures.cost(plan, kind);
         const label = kind === 'fly' ? 'Elevado sobre o cruzamento' : 'Túnel sob o cruzamento';
         out.push({ label, benefit: b, cost, ratio: b / cost, feasible: w.budget.money > cost * 1.3, note: kind === 'fly' ? `o fluxo da ${axis[0].name} passa por cima (${Math.round(plan.len)} m)` : `bairro valorizado recusa elevado: túnel de ${Math.round(plan.len)} m`,
-          apply: () => { w.structures.build(plan, kind, `espera média de ${n.delay.toFixed(0)} s no semáforo`); } });
-      } else if (axis && !plan) out.push({ label: 'Elevado sobre o cruzamento', benefit: 0, cost: 0, ratio: 0, feasible: false, note: w.structures.why || 'sem trecho para as rampas', apply: () => {} });
+          apply: () => !!w.structures.build(plan, kind, `espera média de ${n.delay.toFixed(0)} s no semáforo`) });
+      } else if (axis && !plan) out.push({ label: 'Elevado sobre o cruzamento', benefit: 0, cost: 0, ratio: 0, feasible: false, note: w.structures.why || 'sem trecho para as rampas', apply: () => false });
     }
     return out;
   }
@@ -208,7 +210,7 @@ export class RoadUpgrades {
 
   private busLane(e: REdge) { this.startWork(e, { busLane: true }, 'Faixa de ônibus'); }
 
-  private oneWayPair(e: REdge, p: REdge) {
+  private oneWayPair(e: REdge, p: REdge): boolean {
     const R = this.w.roads;
     // directions opposite: compare orientation
     const [ex, ez] = dirv(R, e), [px, pz] = dirv(R, p);
@@ -224,13 +226,14 @@ export class RoadUpgrades {
       [e.oneway, p.oneway, e.lanes, p.lanes, p.a, p.b] = before;
       R.computePts(p);
       R.invalidateRoutes();
-      return;
+      return false;
     }
     // vehicles already on the reversed edge keep moving the same physical way: their direction bit flips
     if (same) this.w.traffic.reverseEdge(p.id);
     // every vehicle and line whose remaining route now runs against the traffic is re-planned
     this.w.replanAfterTopology();
     R.dirtyEdges.add(e.id); R.dirtyEdges.add(p.id);
+    return true;
   }
 
   private parallel(e: REdge): REdge | null {

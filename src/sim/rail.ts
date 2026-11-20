@@ -6,7 +6,7 @@ import type { P2 } from './regional';
 import { segInt } from './roads';
 import type { Line, Stop } from './transit';
 import { carPlan } from './trips';
-import { P_CARGO } from './traffic';
+import { laneOffset, P_CARGO } from './traffic';
 import type { World } from './world';
 import { KINDS } from '../shared/catalog';
 
@@ -215,16 +215,27 @@ export class Rail {
     this.trains = this.trains.filter((tr) => {
       const l = this.lines[tr.line];
       const tail = tr.cars.reduce((s, c) => s + CAR_LEN[c], 0);
+      if (tr.kind === 'metro') {
+        if ((tr.dir > 0 && tr.s >= l.len) || (tr.dir < 0 && tr.s <= 0)) {
+          // reverse cleanly at the terminal platform instead of teleporting off-track
+          tr.s = Math.max(0, Math.min(l.len, tr.s));
+          tr.dir = -tr.dir;
+          tr.v = 0;
+          tr.dwell = Math.max(tr.dwell, 25);
+          tr.served.clear();
+        }
+        return true;
+      }
       if ((tr.dir > 0 && tr.s > l.len + tail) || (tr.dir < 0 && tr.s < -tail)) {
-        if (tr.kind === 'metro') { tr.dir = -tr.dir; tr.served.clear(); tr.s = tr.dir > 0 ? -tail + 1 : l.len + tail - 1; return true; }
         if (l.transit) { const pass = l.transit.onboard.get(tr.id + 100000) ?? []; for (const i of pass) w.citizens.virtualArrive(i, 60); l.transit.onboard.delete(tr.id + 100000); }
         return false;
       }
       return true;
     });
-    // level crossings
+    // level crossings (vehicles and pedestrians)
     if (this.crossVer !== w.roads.topoVer && w.hourIdx % 1 === 0) this.computeCrossings();
     w.traffic.closedCrossings.clear();
+    w.peds.closedGates.length = 0;
     for (const c of this.crossings) {
       const was = c.closed;
       c.closed = false;
@@ -235,7 +246,23 @@ export class Rail {
         const d = (c.s - tr.s) * tr.dir;
         if (d > -tail - 10 && d < 160) { c.closed = true; break; }
       }
-      if (c.closed) { let a = w.traffic.closedCrossings.get(c.edge); if (!a) w.traffic.closedCrossings.set(c.edge, (a = [])); a.push(c.t); }
+      if (c.closed) {
+        let a = w.traffic.closedCrossings.get(c.edge);
+        if (!a) w.traffic.closedCrossings.set(c.edge, (a = []));
+        a.push(c.t);
+        const e = w.roads.edges[c.edge];
+        if (e?.alive) {
+          const na = w.roads.nodes[e.a], nb = w.roads.nodes[e.b];
+          const el = Math.hypot(nb.x - na.x, nb.z - na.z) || 1;
+          w.peds.closedGates.push({
+            x: c.x, z: c.z,
+            ux: (nb.x - na.x) / el, uz: (nb.z - na.z) / el,
+            halfW: laneOffset(e, Math.max(0, e.lanes - 1)) + 5,
+          });
+        } else {
+          w.peds.closedGates.push({ x: c.x, z: c.z });
+        }
+      }
       void was;
     }
   }
@@ -625,35 +652,55 @@ export class Rail {
 
   private buildMetro(): boolean {
     const w = this.w, R = w.roads;
-    // corridor between the two densest areas far apart
+    // corridor between the two densest areas, with separation scaled to the actual urban footprint
     const F = w.fields;
     const cells: { k: number; v: number }[] = [];
-    for (let k = 0; k < F.G * F.G; k++) cells.push({ k, v: F.f.resDensity[k] + F.f.jobDensity[k] });
+    for (let k = 0; k < F.G * F.G; k++) {
+      const v = F.f.resDensity[k] + F.f.jobDensity[k];
+      if (v > 0.25) cells.push({ k, v });
+    }
+    if (cells.length < 2) return false;
     cells.sort((a, b) => b.v - a.v);
     const [ax, az] = F.center(cells[0].k);
+    const minSep = Math.max(700, Math.min(1500, w.cityRadius * 1.15));
     let bx = 0, bz = 0;
-    for (const c of cells.slice(1, 200)) { const [x, z] = F.center(c.k); if (Math.hypot(x - ax, z - az) > 1600) { bx = x; bz = z; break; } }
+    for (const c of cells.slice(1, 350)) { const [x, z] = F.center(c.k); if (Math.hypot(x - ax, z - az) >= minSep) { bx = x; bz = z; break; } }
     if (!bx) return false;
     const na = R.nearestNode(ax, az, 300), nb = R.nearestNode(bx, bz, 300);
-    if (!na || !nb) return false;
+    if (!na || !nb || na.id === nb.id) return false;
     R.buildBudget = 4;
     const route = R.route(na.id, nb.id);
-    if (!route) return false;
+    if (!route || route.length < 2) return false;
     const pts: P2[] = [{ x: na.x, z: na.z }];
     for (const de of route) { const e = R.edges[de >> 1]; const n = R.nodes[(de & 1) === 0 ? e.b : e.a]; pts.push({ x: n.x, z: n.z }); }
     const ys = pts.map((p) => Math.max(0, w.terrain.heightAt(p.x, p.z)) + 9);
     for (let it = 0; it < 4; it++) for (let i = 1; i < ys.length - 1; i++) ys[i] = (ys[i - 1] + ys[i] * 2 + ys[i + 1]) / 4;
     const l = this.addLine('metro', pts, ys, 2, true);
+    const step = Math.max(450, Math.min(650, l.len / 3));
     const stops: Stop[] = [];
-    for (let s = 0; s <= l.len; s += 650) {
-      const p = this.at(l, s);
+    for (let s = 0; s <= l.len; s += step) {
       const b = this.placeAlong(l, s, 'metroStation', 6);
-      l.stations.push({ s, b: b?.id ?? -1, name: 'Metrô ' + w.districtName(p[0], p[2]), stop: stops.length });
-      stops.push({ x: p[0], z: p[2], node: -1, s, name: 'Metrô ' + w.districtName(p[0], p[2]) });
+      if (!b) continue; // never register a phantom stop without an actual station building
+      const stS = this.projectS(l, b.x, b.z).s;
+      const p = this.at(l, stS);
+      const name = 'Metrô ' + w.districtName(b.x, b.z);
+      b.name = name;
+      l.stations.push({ s: stS, b: b.id, name, stop: stops.length });
+      stops.push({ x: p[0], z: p[2], node: -1, s: stS, name });
     }
+    if (stops.length < 2) {
+      // rollback: remove line and any single station placed
+      for (const st of l.stations) { const b = w.buildings.byId.get(st.b); if (b) w.buildings.demolish(b); }
+      this.lines.pop();
+      this.dirtyViews = true;
+      return false;
+    }
+    l.stations.sort((a, b) => a.s - b.s);
+    l.stations.forEach((st, idx) => (st.stop = idx));
+    stops.sort((a, b) => a.s - b.s);
     l.built = 0;
     this.pendingStops.set(l.id, stops);
-    w.events.emit('line_opened', ax, az, 1, `Metrô Linha 1 em construção entre ${w.districtName(ax, az)} e ${w.districtName(bx, bz)}`, { headline: 'Metrópole ganha sua primeira linha de metrô', visual: 1 });
+    w.events.emit('line_opened', ax, az, 1, `Metrô Linha 1 em construção entre ${w.districtName(ax, az)} e ${w.districtName(bx, bz)} (${stops.length} estações)`, { headline: 'Metrópole ganha sua primeira linha de metrô', visual: 1 });
     return true;
   }
 

@@ -1,9 +1,12 @@
 // Cada teste reproduz um achado do parecer técnico e verifica a invariante correspondente.
 import { describe, expect, it } from 'vitest';
 import { World } from '../src/sim/world';
-import { DEFAULT_PARAMS } from '../src/shared/params';
-import { VEH_FLAG_SIREN, VType } from '../src/shared/constants';
-import { P_CITIZEN, P_SERVICE } from '../src/sim/traffic';
+import { DEFAULT_PARAMS, MAX_WARMUP_DAYS, sanitizeParams, sanitizeWarmup } from '../src/shared/params';
+import { VEH_FLAG_SIREN, VType, RoadClass } from '../src/shared/constants';
+import { P_CITIZEN, P_GARBAGE, P_SERVICE } from '../src/sim/traffic';
+import { ST_VIRTUAL, ST_WALK } from '../src/sim/citizens';
+import { activePlan, carPlan } from '../src/sim/trips';
+import type { Line } from '../src/sim/transit';
 import { edgeNoiseIndex, RoadNetwork, type REdge } from '../src/sim/roads';
 import { InlineBackend, type RouteBackend, type RouteGraph } from '../src/sim/routeKernel';
 import { updateFields } from '../src/sim/fieldsUpdate';
@@ -220,5 +223,335 @@ describe('transporte: embarque no sentido certo', () => {
     S.serveStop(l, 1, 999, 400, (to) => (stops[to].s - stops[1].s) * dir > 0);
     expect(l.onboard.get(999)).toEqual([toC]);
     expect(l.waiting.get(1)).toEqual([toA]);
+  });
+});
+
+describe('câmera não altera a simulação (determinismo sob carga)', () => {
+  it('mover a câmera sob 2.400 veículos não muda lodAllowsVehicle nem consome o RNG', () => {
+    const a = run(world(202), 0.2), b = run(world(202), 0.2);
+    a.traffic.count = 2400;
+    b.traffic.count = 2400;
+    a.cam = { x: 100, z: 100, h: 120 };
+    b.cam = { x: 2200, z: 2200, h: 900 };
+    const ra: boolean[] = [], rb: boolean[] = [];
+    for (let id = 0; id < 80; id++) {
+      ra.push(a.lodAllowsVehicle(id));
+      rb.push(b.lodAllowsVehicle(id));
+    }
+    expect(rb).toEqual(ra);
+    expect(ra.some(Boolean)).toBe(true);
+    expect(ra.some((v) => !v)).toBe(true);
+    // neither call touched the simulation PRNG
+    expect(b.rng.next()).toBe(a.rng.next());
+  });
+});
+
+describe('transição de interseção: reserva comprimento real', () => {
+  it('ônibus não entra em faixa de saída onde só cabem 5 m livres', () => {
+    const w = run(world(17), 0.4);
+    const R = w.roads, T = w.traffic;
+    // find two connected usable edges: e1 -> node -> e2
+    let e1: REdge | null = null, e2: REdge | null = null, dir1 = 0, dir2 = 0;
+    for (const n of R.nodes) {
+      if (!n.alive || n.edges.length < 2) continue;
+      const live = n.edges.map((id) => R.edges[id]).filter((e) => e.alive && e.progress >= 1 && e.lanes === 1 && e.len > 60 && !e.oneway);
+      if (live.length >= 2) {
+        e1 = live[0]; e2 = live[1];
+        dir1 = e1.b === n.id ? 0 : 1;
+        dir2 = e2.a === n.id ? 0 : 1;
+        break;
+      }
+    }
+    expect(e1 && e2).toBeTruthy();
+    for (let i = 0; i < T.max; i++) if (T.active[i]) T.despawn(i);
+    // park a car right near the entry of e2 leaving only ~4 m behind it (too tight for a 12 m bus)
+    const ss2 = T.sStart(e2!, dir2);
+    const blocker = T.spawn(VType.Car, [e2!.id * 2 + dir2], ss2 + 8.5, e2!.len - 2, { kind: P_CITIZEN, id: -1, aux: 0 });
+    expect(blocker).toBeGreaterThanOrEqual(0);
+    T.dwell[blocker] = 999; // keep it parked
+    const bus = T.spawn(VType.Bus, [e1!.id * 2 + dir1, e2!.id * 2 + dir2], T.sEnd(e1!, dir1) - 18, e2!.len - 2, { kind: P_SERVICE, id: -1, aux: -1 });
+    expect(bus).toBeGreaterThanOrEqual(0);
+    for (let k = 0; k < 20; k++) T.step(0.5, () => true);
+    // bus must still be waiting on e1, never overlapped on e2
+    expect(T.edge[bus]).toBe(e1!.id);
+    expect(overlaps(w)).toBe(0);
+  });
+});
+
+describe('congestionamento honesto: serviços presos e viagens virtuais', () => {
+  it('bombeiro e caminhão de lixo presos no trânsito não entregam o serviço', () => {
+    const w = run(world(33), 1);
+    const b = w.buildings.list.find((x) => x.alive && x.state === 'done' && !x.def.public)!;
+    expect(b).toBeTruthy();
+    const e = longEdge(w, 60);
+    // active fire + fire truck stuck in traffic
+    b.fire = 2;
+    const incId = 99901;
+    w.services.incidents.set(incId, { id: incId, type: 'fire', b: b.id, t: w.t, responded: false });
+    const fslot = w.traffic.spawn(VType.Fire, [e.id * 2], 12, e.len - 2, { kind: P_SERVICE, id: incId, aux: -1 }, -1, b.id, VEH_FLAG_SIREN);
+    expect(fslot).toBeGreaterThanOrEqual(0);
+    const beforeDelays = w.services.delayedResponses;
+    w.vehicleStuck(fslot);
+    expect(b.fire).toBeGreaterThan(0); // fire was NOT magically extinguished
+    expect(w.services.delayedResponses).toBe(beforeDelays + 1);
+    // garbage truck stuck in traffic does NOT clean the building
+    b.garbage = 5;
+    const gslot = w.traffic.spawn(VType.Garbage, [e.id * 2], 35, e.len - 2, { kind: P_GARBAGE, id: b.id, aux: -1 }, -1, b.id);
+    expect(gslot).toBeGreaterThanOrEqual(0);
+    w.vehicleStuck(gslot);
+    expect(b.garbage).toBe(5);
+  });
+
+  it('viagem virtual não mostra cidadão dentro do destino antes da chegada, e preso perto muda para a pé', () => {
+    const w = run(world(44), 1);
+    const buildings = w.buildings.list.filter((x) => x.alive && x.state === 'done');
+    expect(buildings.length).toBeGreaterThanOrEqual(2);
+    const from = buildings[0], to = buildings[buildings.length - 1];
+    const cid = w.citizens.add({ age: 30, hh: -1 });
+    w.citizens.loc[cid] = from.id;
+    w.citizens.tripDest[cid] = to.id;
+    w.citizens.virtualArrive(cid, 120, from.x, from.z);
+    expect(w.citizens.state[cid]).toBe(ST_VIRTUAL);
+    const p0 = w.citizens.position(cid)!;
+    expect(p0.inside).toBe(false);
+    expect(p0.building).toBe(-1);
+    expect(Math.hypot(p0.x - from.x, p0.z - from.z)).toBeLessThan(1);
+    // halfway through the virtual trip, position advances smoothly instead of jumping inside destination
+    w.t += 60;
+    const pMid = w.citizens.position(cid)!;
+    expect(pMid.inside).toBe(false);
+    expect(Math.hypot(pMid.x - (from.x + to.x) / 2, pMid.z - (from.z + to.z) / 2)).toBeLessThan(1);
+    // stuck driver within 600 m of destination switches observably to walking
+    const switched = w.citizens.switchToWalk(cid, to.x + 80, to.z);
+    expect(switched).toBe(true);
+    expect(w.citizens.state[cid]).toBe(ST_WALK);
+    expect(w.citizens.tripMode[cid]).toBe(0);
+  });
+});
+
+describe('obras transacionais: binário e BRT', () => {
+  it('BRT não é anunciado sem faixa exclusiva nem antes da conclusão das obras', () => {
+    const w = run(world(55), 1);
+    const S = w.transitSys;
+    const e1 = longEdge(w, 60, (x) => x.lanes === 1);
+    const line1: Line = {
+      id: 901, kind: 'bus', color: '#e74c3c', name: 'Linha 901 · Teste',
+      stops: [{ x: w.center.x, z: w.center.z, node: e1.a, s: 0, name: 'A' }, { x: w.center.x + 100, z: w.center.z, node: e1.b, s: 100, name: 'B' }],
+      path: [e1.id * 2], startS: 0, destS: e1.len - 1, fleet: 2, vehicles: new Set<number>(),
+      ridersToday: 0, ridersYday: 900, waiting: new Map(), onboard: new Map(), edges: new Set([e1.id]),
+      headway: 120, lastSpawn: 0, pts: [],
+    };
+    S.lines.push(line1);
+    const evBefore = w.events.chronicle.length;
+    (S as unknown as { toBRT(l: Line): void }).toBRT(line1);
+    // 1-lane road cannot hold a dedicated bus lane -> stays ordinary bus, no BRT headline
+    expect(line1.kind).toBe('bus');
+    expect(w.events.chronicle.length).toBe(evBefore);
+    // now widen to 2 lanes: toBRT starts road works first, promotes to BRT only when finishUpgrade completes
+    e1.lanes = 2;
+    (S as unknown as { toBRT(l: Line): void }).toBRT(line1);
+    expect(line1.kind).toBe('bus');
+    expect(line1.pendingBRT).toBe(true);
+    expect(e1.upgrading).toBe(true);
+    w.finishUpgrade(e1);
+    expect(e1.busLane).toBe(true);
+    expect(line1.kind).toBe('brt');
+    expect(line1.name.startsWith('BRT')).toBe(true);
+    expect(w.events.chronicle.length).toBe(evBefore + 1);
+  });
+
+  it('oneWayPair com rollback de conectividade não cobra o caixa nem emite manchete', () => {
+    const w = run(world(61), 0.5);
+    const R = w.roads;
+    // build two dead-end parallel edges: turning them one-way breaks strong connectivity and forces rollback
+    const n1 = R.addNode(120, 120), n2 = R.addNode(220, 120);
+    const n3 = R.addNode(120, 200), n4 = R.addNode(220, 200);
+    const e1 = R.addEdge(n1.id, n2.id, 1, { progress: 1 });
+    const e2 = R.addEdge(n3.id, n4.id, 1, { progress: 1 });
+    const ok = (w.upgrades as unknown as { oneWayPair(a: REdge, b: REdge): boolean }).oneWayPair(e1, e2);
+    expect(ok).toBe(false);
+    expect(e1.oneway).toBe(0);
+    expect(e2.oneway).toBe(0);
+  });
+});
+
+describe('validação de parâmetros de URL e teto de warmup', () => {
+  it('sanitizeParams rejeita NaN/Infinity/enum inválido e faz clamp nas faixas válidas', () => {
+    const p = sanitizeParams({
+      seed: 'abc',
+      terrain: 'marte',
+      vocation: 'cripto',
+      mapSize: 999999,
+      taxRate: -5,
+      corruption: Infinity,
+      raininess: '0.75',
+      snow: 'true',
+      maxDensity: 12,
+    });
+    expect(p.seed).toBe(DEFAULT_PARAMS.seed);
+    expect(p.terrain).toBe(DEFAULT_PARAMS.terrain);
+    expect(p.vocation).toBe(DEFAULT_PARAMS.vocation);
+    expect(p.mapSize).toBe(4800);
+    expect(p.taxRate).toBe(0);
+    expect(p.corruption).toBe(DEFAULT_PARAMS.corruption);
+    expect(p.raininess).toBe(0.75);
+    expect(p.snow).toBe(true);
+    expect(p.maxDensity).toBe(5);
+  });
+
+  it('sanitizeWarmup bloqueia valores inválidos, negativos ou acima do teto', () => {
+    expect(sanitizeWarmup(undefined)).toBe(0);
+    expect(sanitizeWarmup('abc')).toBe(0);
+    expect(sanitizeWarmup(-10)).toBe(0);
+    expect(sanitizeWarmup(Infinity)).toBe(0);
+    expect(sanitizeWarmup('15')).toBe(15);
+    expect(sanitizeWarmup(99999)).toBe(MAX_WARMUP_DAYS);
+  });
+});
+
+describe('modos ativos independentes do carro e cancela para pedestres', () => {
+  it('caminhada funciona contra mão única onde carro não pode ir e exclui rodovia regional', () => {
+    const w = run(world(71), 0.2);
+    const R = w.roads;
+    // isolated one-way street: car can only go n1->n2, never n2->n1
+    const n1 = R.addNode(160, 160), n2 = R.addNode(300, 160);
+    const e = R.addEdge(n1.id, n2.id, RoadClass.Local, { progress: 1, oneway: 1 });
+    R.invalidateRoutes();
+    const b1 = w.buildings.create('res', { x: 185, z: 175, angle: 0, edge: e.id, t: 0.2, side: 1, access: n1.id, offDist: 10, total: 0, terms: {} }, { era: 0, day: 0, w: 10, d: 10, maxDensity: 2, decision: null });
+    const b2 = w.buildings.create('res', { x: 275, z: 175, angle: 0, edge: e.id, t: 0.8, side: 1, access: n2.id, offDist: 10, total: 0, terms: {} }, { era: 0, day: 0, w: 10, d: 10, maxDensity: 2, decision: null });
+    expect(carPlan(R, b2, b1)).toBeNull();
+    const walk = activePlan(R, b2, b1);
+    expect(walk).not.toBeNull();
+    expect(walk!.len).toBeGreaterThan(50);
+    // walkRoute must never use Highway edges
+    const hw = R.edges.find((x) => x.alive && x.progress >= 1 && x.cls === RoadClass.Highway);
+    expect(hw).toBeTruthy();
+    const route = R.walkRoute(hw!.a, hw!.b);
+    if (route) expect(route.some((de) => R.edges[de >> 1].cls === RoadClass.Highway)).toBe(false);
+  });
+
+  it('pedestre para diante de cancela fechada (inclusive em avenida de 3 faixas) sem inchar a heap', () => {
+    const w = world(72);
+    const P = w.peds;
+    // 3-lane avenue sidewalk sits ~12.2 m off the axis; oriented gate box covers carriageway + sidewalks
+    P.closedGates = [{ x: 150, z: 100, ux: 1, uz: 0, halfW: 14 }];
+    const slot = P.spawn([120, 112.2, 200, 112.2], 0, 1.5, 0, 0);
+    expect(slot).toBeGreaterThanOrEqual(0);
+    for (let k = 0; k < 80; k++) P.step(0.5); // 40 s waiting at the gate
+    expect(P.active[slot]).toBe(1);
+    P.pose(slot);
+    expect(P.x[slot]).toBeLessThan(148);
+    // heap must not accumulate stale entries while waiting
+    expect((P as unknown as { q: { size: number } }).q.size).toBeLessThanOrEqual(2);
+    // open the gate -> pedestrian finishes crossing and arrives
+    P.closedGates = [];
+    for (let k = 0; k < 120; k++) P.step(0.5);
+    expect(P.active[slot]).toBe(0);
+  });
+});
+
+describe('infraestrutura conectada: energia, água e coleta real de lixo', () => {
+  it('bairro isolado fica sem energia e água mesmo com sobra global, e usina remota exige linha pronta', () => {
+    const w = run(world(81), 0.3);
+    const R = w.roads;
+    // build an isolated road and house far from the village (> 250 m and disconnected graph)
+    const na = R.addNode(1950, 1950), nb = R.addNode(2050, 1950);
+    const isoEdge = R.addEdge(na.id, nb.id, RoadClass.Local, { progress: 1 });
+    const isoHouse = w.buildings.create('res', { x: 2000, z: 1965, angle: 0, edge: isoEdge.id, t: 0.5, side: 1, access: na.id, offDist: 10, total: 0, terms: {} }, { era: 0, day: 0, w: 10, d: 10, maxDensity: 2, decision: null });
+    isoHouse.state = 'done'; isoHouse.progress = 1;
+    // add huge local surplus in the village so global supply >> demand
+    const village = w.buildings.list.find((b) => b.state === 'done' && b.id !== isoHouse.id)!;
+    const plant = w.buildings.create('thermalPlant', { x: village.x + 20, z: village.z + 20, angle: 0, edge: village.edge, t: village.edgeT, side: 1, access: 0, offDist: 10, total: 0, terms: {} }, { era: 1, day: 0, w: 20, d: 20, maxDensity: 2, decision: null });
+    plant.state = 'done'; plant.progress = 1;
+    const waterSrc = w.buildings.create('waterTreatment', { x: village.x - 20, z: village.z + 20, angle: 0, edge: village.edge, t: village.edgeT, side: 1, access: 0, offDist: 10, total: 0, terms: {} }, { era: 1, day: 0, w: 20, d: 20, maxDensity: 2, decision: null });
+    waterSrc.state = 'done'; waterSrc.progress = 1;
+    w.utils.hourly();
+    expect(w.utils.power.supply).toBeGreaterThan(w.utils.power.demand);
+    expect(w.utils.water.supply).toBeGreaterThan(w.utils.water.demand);
+    expect(village.powered).toBe(true);
+    expect(village.watered).toBe(true);
+    expect(isoHouse.powered).toBe(false);
+    expect(isoHouse.watered).toBe(false);
+    // remote power plant (> 250 m from center) does not supply power while its transmission line has progress < 1
+    const supplyBefore = w.utils.power.supply;
+    const remotePlant = w.buildings.create('thermalPlant', { x: w.center.x + 600, z: w.center.z + 600, angle: 0, edge: -1, t: 0, side: 1, access: 0, offDist: 10, total: 0, terms: {} }, { era: 1, day: 0, w: 20, d: 20, maxDensity: 2, decision: null });
+    remotePlant.state = 'done'; remotePlant.progress = 1;
+    w.utils.hourly();
+    expect(w.utils.power.supply).toBeCloseTo(supplyBefore, 3);
+    // finish its transmission line -> supply rises
+    for (const l of w.utils.powerLines) l.progress = 1;
+    w.utils.hourly();
+    expect(w.utils.power.supply).toBeGreaterThan(supplyBefore);
+  });
+
+  it('prédio desconectado na mesma célula de 25 m não derruba energia de prédio conectado', () => {
+    const w = run(world(83), 0.3);
+    const R = w.roads;
+    const village = w.buildings.list.find((b) => b.state === 'done' && b.edge >= 0)!;
+    const plant = w.buildings.create('thermalPlant', { x: village.x + 15, z: village.z + 15, angle: 0, edge: village.edge, t: village.edgeT, side: 1, access: 0, offDist: 10, total: 0, terms: {} }, { era: 1, day: 0, w: 20, d: 20, maxDensity: 2, decision: null });
+    plant.state = 'done'; plant.progress = 1;
+    // put an isolated dead edge 400 m away, and place a disconnected building + connected building in the SAME 25 m cell
+    const na = R.addNode(1900, 1900), nb = R.addNode(1980, 1900);
+    const isoEdge = R.addEdge(na.id, nb.id, RoadClass.Local, { progress: 1 });
+    const disc = w.buildings.create('res', { x: 1940, z: 1910, angle: 0, edge: isoEdge.id, t: 0.5, side: 1, access: na.id, offDist: 10, total: 0, terms: {} }, { era: 0, day: 0, w: 10, d: 10, maxDensity: 2, decision: null });
+    disc.state = 'done'; disc.progress = 1;
+    // connected building right next to `disc` (same 25 m cell), attached to the village road
+    const conn = w.buildings.create('res', { x: 1942, z: 1912, angle: 0, edge: village.edge, t: village.edgeT, side: 1, access: 0, offDist: 10, total: 0, terms: {} }, { era: 0, day: 0, w: 10, d: 10, maxDensity: 2, decision: null });
+    conn.state = 'done'; conn.progress = 1;
+    expect(w.fields.idx(disc.x, disc.z)).toBe(w.fields.idx(conn.x, conn.z));
+    w.utils.hourly();
+    expect(disc.powered).toBe(false);
+    expect(conn.powered).toBe(true);
+  });
+
+  it('lixo só é removido quando o caminhão de coleta chega ao quarteirão e despacho escalonado evita explosão de spawnRefused', () => {
+    const w = run(world(82), 0.3);
+    const b = w.buildings.list.find((x) => x.state === 'done' && !x.def.public)!;
+    const dump = w.buildings.create('dump', { x: b.x + 30, z: b.z + 30, angle: 0, edge: b.edge, t: b.edgeT, side: 1, access: 0, offDist: 10, total: 0, terms: {} }, { era: 0, day: 0, w: 20, d: 20, maxDensity: 2, decision: null });
+    dump.state = 'done'; dump.progress = 1;
+    for (const x of w.buildings.list) if (x.state === 'done' && !x.def.public) x.garbage = 6;
+    const stockBefore = w.utils.garbage.stock;
+    const refBefore = w.traffic.spawnRefused;
+    w.utils.daily();
+    // daily() dispatches at most a small shift per hour and breaks on occupied gate (never hammering spawn)
+    expect(w.traffic.spawnRefused - refBefore).toBeLessThanOrEqual(2);
+    // daily() does NOT magically zero garbage before arrival
+    expect(b.garbage).toBeGreaterThanOrEqual(6);
+    expect(w.utils.garbage.stock).toBe(stockBefore);
+    // when a collection truck arrives, garbage drops and landfill stock rises
+    const e = longEdge(w, 40);
+    const slot = w.traffic.spawn(VType.Garbage, [e.id * 2], 10, e.len - 2, { kind: P_GARBAGE, id: b.id, aux: 40 }, dump.id, b.id);
+    expect(slot).toBeGreaterThanOrEqual(0);
+    w.services.arrived(slot);
+    expect(b.garbage).toBeLessThan(6);
+    expect(w.utils.garbage.stock).toBeGreaterThan(stockBefore);
+  });
+});
+
+describe('metrô terminal e velocidade no inspetor do cidadão', () => {
+  it('trem de metrô inverte no terminal sem saltar para fora dos trilhos', () => {
+    const w = world(91);
+    const rail = w.rail2 as unknown as {
+      lines: { id: number; kind: string; len: number; x: number[]; z: number[]; y: number[]; cum: number[]; tracks: number; elevated: boolean; stations: { s: number; b: number; name: string; stop: number }[] }[];
+      trains: { id: number; line: number; kind: string; s: number; dir: number; v: number; vmax: number; cars: number[]; dwell: number; served: Set<number>; gen: number }[];
+    };
+    const l = { id: rail.lines.length, kind: 'metro', len: 1000, x: [0, 1000], z: [0, 0], y: [10, 10], cum: [0, 1000], tracks: 2, elevated: true, stations: [] };
+    rail.lines.push(l);
+    const tr = { id: 777, line: l.id, kind: 'metro', s: 999, dir: 1, v: 10, vmax: 19, cars: [5, 5, 5, 5], dwell: 0, served: new Set<number>([0]), gen: 0 };
+    rail.trains.push(tr);
+    w.rail2.step(0.5);
+    expect(tr.dir).toBe(-1);
+    expect(tr.s).toBe(1000);
+    expect(tr.dwell).toBeGreaterThanOrEqual(25);
+  });
+
+  it('inspetor do cidadão reporta velocidade atual em km/h quando em movimento', () => {
+    const w = run(world(92), 0.3);
+    const cid = w.citizens.add({ age: 25, hh: -1 });
+    const pslot = w.peds.spawn([100, 100, 300, 100], cid, 1.5, 0, 0);
+    w.citizens.state[cid] = ST_WALK;
+    w.citizens.slot[cid] = pslot;
+    const info = w.citizens.inspect(cid)!;
+    expect(info.speedKmh).toBeCloseTo(w.peds.speed[pslot] * 3.6, 2);
   });
 });

@@ -66,6 +66,72 @@ export const DEFAULT_PARAMS: SimParams = {
 
 export const RESTART_KEYS: (keyof SimParams)[] = ['seed', 'terrain', 'mapSize'];
 
+export const TERRAINS: readonly TerrainType[] = ['litoral', 'vale', 'serra', 'planicie'];
+export const VOCATIONS: readonly Vocation[] = ['industria', 'servicos', 'turismo', 'agricultura'];
+export const MAX_WARMUP_DAYS = 120;
+
+const NUM_BOUNDS: Record<string, [number, number, boolean?]> = {
+  seed: [1, 999999999, true],
+  mapSize: [1200, 4800, true],
+  raininess: [0, 1],
+  immigration: [0, 2.5],
+  natality: [0, 2.5],
+  lifeExpectancy: [50, 95, true],
+  inequality: [0, 1],
+  taxRate: [0, 0.3],
+  energyCost: [0.5, 2],
+  budgetMult: [0.3, 2.5],
+  transitPriority: [0, 1],
+  maxDensity: [1, 5, true],
+  pollutionTolerance: [0, 1],
+  envPreservation: [0, 1],
+  gridGrowth: [0, 1],
+  baseCrime: [0, 2],
+  policeEfficiency: [0, 2],
+  initialEducation: [0, 1],
+  corruption: [0, 1],
+  transparency: [0, 1],
+  disasterFreq: [0, 3],
+  festivalFreq: [0, 3],
+};
+
+/** Validate and clamp arbitrary/URL parameter input onto safe, finite simulation bounds. */
+export function sanitizeParams(raw: Partial<Record<keyof SimParams, unknown>> | Record<string, unknown>, base: SimParams = DEFAULT_PARAMS): SimParams {
+  const out: SimParams = { ...base };
+  const rec = out as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(raw ?? {})) {
+    if (!(k in out) || v === undefined || v === null) continue;
+    if (k === 'terrain') {
+      if (typeof v === 'string' && (TERRAINS as readonly string[]).includes(v)) out.terrain = v as TerrainType;
+      continue;
+    }
+    if (k === 'vocation') {
+      if (typeof v === 'string' && (VOCATIONS as readonly string[]).includes(v)) out.vocation = v as Vocation;
+      continue;
+    }
+    if (k === 'snow') {
+      if (typeof v === 'boolean') out.snow = v;
+      else if (v === '1' || v === 'true') out.snow = true;
+      else if (v === '0' || v === 'false') out.snow = false;
+      continue;
+    }
+    const b = NUM_BOUNDS[k];
+    if (!b) continue;
+    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+    if (!Number.isFinite(n)) continue;
+    const clamped = Math.max(b[0], Math.min(b[1], n));
+    rec[k] = b[2] ? Math.round(clamped) : clamped;
+  }
+  return out;
+}
+
+/** Validate and cap initial warm-up days so malformed URLs cannot freeze worker startup. */
+export function sanitizeWarmup(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(MAX_WARMUP_DAYS, Math.round(n)));
+}
+
 export const PRESETS: Record<string, Partial<SimParams>> = {
   'Cidade industrial': {
     vocation: 'industria', pollutionTolerance: 0.9, envPreservation: 0.1, transitPriority: 0.3,

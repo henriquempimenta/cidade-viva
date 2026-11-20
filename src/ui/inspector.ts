@@ -16,7 +16,7 @@ interface BuildingInfo {
 interface CitizenInfo {
   id: number; name: string; age: number; sex: string; traits: string[]; edu: string; job: string; home: string; income: number; money: number;
   needs: Record<string, number>; state: string; activity: string; agenda: { h: string; act: string; done: boolean }[]; bio: { year: number; text: string }[];
-  family: string[]; mode: string; happiness: number; tourist: boolean; insideBuilding: number;
+  family: string[]; mode: string; speedKmh?: number | null; happiness: number; tourist: boolean; insideBuilding: number;
 }
 interface EdgeInfo {
   id: number; name: string; cls: string; lanes: number; oneway: number; len: number; volume: number[]; capacity: number; vc: number; history: number[];
@@ -82,6 +82,10 @@ export class Inspector {
 
   async showBuilding(id: number) {
     this.kind = 'building'; this.id = id; this.pendingOpen = true;
+    await this.refreshBuilding(true);
+  }
+  private async refreshBuilding(drawMarkers: boolean) {
+    const id = this.id;
     const d = await this.app.inspect<BuildingInfo>('building', id);
     if (!d || this.kind !== 'building' || this.id !== id) return;
     this.open();
@@ -116,8 +120,8 @@ export class Inspector {
             ${worst ? `pesou contra: <b>${worst.label}</b> ${worst.value.toFixed(2)}${chosenTerm ? ` (aqui: ${chosenTerm.value.toFixed(2)})` : ''}` : ''}</div>`;
         });
       }
-      this.drawMarkers(d);
-    } else this.clearMarkers();
+      if (drawMarkers) this.drawMarkers(d);
+    } else if (drawMarkers) this.clearMarkers();
     if (d.occupants?.length) {
       html += `<h4>Quem está aqui</h4><p class="hint">Clique numa pessoa para segui-la.</p>` + d.occupants.slice(0, 14).map((o) => `<div class="tag" data-cid="${o.id}" style="cursor:pointer">${o.name} · ${o.role}</div>`).join('');
     }
@@ -159,7 +163,7 @@ export class Inspector {
       <div style="margin:2px 0 4px">${d.traits.map((t) => `<span class="tag">${t}</span>`).join('')}</div>
       <div class="state-pill">${d.state}</div>
       <div class="kv"><span>Casa</span><span>${d.home}</span><span>${d.tourist ? 'Hotel' : 'Trabalho/escola'}</span><span>${d.job}</span>
-      <span>Renda/dia</span><span>$${d.income.toFixed(0)}</span><span>Economias</span><span>$${d.money.toFixed(0)}</span><span>Transporte</span><span>${d.mode}</span><span>Felicidade</span><span>${Math.round(d.happiness * 100)}%</span></div>`;
+      <span>Renda/dia</span><span>$${d.income.toFixed(0)}</span><span>Economias</span><span>$${d.money.toFixed(0)}</span><span>Transporte</span><span>${d.mode}</span>${d.speedKmh != null ? `<span>Velocidade atual</span><span>${d.speedKmh.toFixed(0)} km/h</span>` : ''}<span>Felicidade</span><span>${Math.round(d.happiness * 100)}%</span></div>`;
     html += `<h4>Necessidades</h4>`;
     for (const [k, v] of Object.entries(d.needs)) html += `<div class="term"><span>${NEED_LABEL[k] ?? k}</span><div class="tb"><i style="left:0;width:${Math.round(v * 100)}%;background:${v > 0.6 ? 'var(--good)' : v > 0.3 ? 'var(--warn)' : 'var(--bad)'}"></i></div><span class="v">${Math.round(v * 100)}</span></div>`;
     if (d.agenda.length) html += `<h4>Agenda de hoje</h4>` + d.agenda.map((a) => `<div class="alt" style="${a.done ? 'color:#93a598;text-decoration:line-through' : ''}">${a.h} · ${a.act}</div>`).join('');
@@ -172,8 +176,12 @@ export class Inspector {
   async showEdge(id: number) {
     this.kind = 'edge'; this.id = id; this.pendingOpen = true;
     this.clearMarkers();
+    await this.refreshEdge(true);
+  }
+  private async refreshEdge(drawOD: boolean) {
+    const id = this.id;
     const d = await this.app.inspect<EdgeInfo>('edge', id);
-    if (!d) return;
+    if (!d || this.kind !== 'edge' || this.id !== id) return;
     this.open();
     let html = this.head('Por que congestionado?', d.name, `${d.cls} · ${d.lanes} faixa(s)/sentido${d.oneway ? ' · mão única' : ''}${d.busLane ? ' · faixa de ônibus' : ''}${d.upgrading ? ' · 🚧 em obras' : ''}`) + `
       <div class="score-card"><span>Volume / capacidade</span><strong style="color:${d.vc > 0.85 ? 'var(--bad)' : 'inherit'}">${Math.round(d.vc * 100)}%</strong></div>
@@ -207,12 +215,14 @@ export class Inspector {
     this.panel.innerHTML = html;
     this.panel.querySelector('.close')!.addEventListener('click', () => this.close());
     this.panel.querySelector('.listen')?.addEventListener('click', () => this.app.listenAt(d.mid));
-    this.app.overlays.showOD?.(d.pairs);
+    if (drawOD) this.app.overlays.showOD?.(d.pairs);
   }
 
   frame() {
     const now = performance.now();
     if (this.kind === 'citizen' && now - this.lastRefresh > 1000) { this.lastRefresh = now; this.refreshCitizen(); }
+    else if (this.kind === 'edge' && now - this.lastRefresh > 2000) { this.lastRefresh = now; this.refreshEdge(false); }
+    else if (this.kind === 'building' && now - this.lastRefresh > 2000) { this.lastRefresh = now; this.refreshBuilding(false); }
     for (const m of this.markers.children) if ((m as THREE.Mesh).geometry?.type === 'OctahedronGeometry') m.rotation.y += 0.03;
   }
 }

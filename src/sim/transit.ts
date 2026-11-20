@@ -3,7 +3,7 @@ import type { TransitLineView } from '../shared/protocol';
 import type { Building } from './buildings';
 import { Act, ST_IN, ST_TRANSIT } from './citizens';
 import { P_BUS } from './traffic';
-import { doorOf } from './trips';
+import { activePlanFromPoint, activePlanToPoint, doorOf, walkPoints } from './trips';
 import type { World } from './world';
 import { KINDS } from '../shared/catalog';
 
@@ -14,6 +14,7 @@ export interface Line {
   fleet: number; vehicles: Set<number>; ridersToday: number; ridersYday: number;
   waiting: Map<number, number[]>; onboard: Map<number, number[]>; edges: Set<number>;
   headway: number; lastSpawn: number; pts: number[];
+  pendingBRT?: boolean;
 }
 interface Ride { line: number; from: number; to: number; phase: number; since: number; dest: number }
 
@@ -75,7 +76,9 @@ export class Transit {
     this.rides.set(i, { line: l.id, from: opt.a, to: opt.b, phase: 0, since: w.t, dest: to.id });
     const door = doorOf(w.roads, from);
     if (w.peds.capacityLeft > 40) {
-      const slot = w.peds.spawn([door.x, door.z, st.x, st.z], i, 1.35, 0, 0);
+      const wp = Math.hypot(st.x - door.x, st.z - door.z) > 35 ? activePlanToPoint(w.roads, from, st.x, st.z) : null;
+      const pts = wp ? walkPoints(w.roads, wp, door, st) : [door.x, door.z, st.x, st.z];
+      const slot = w.peds.spawn(pts, i, 1.35, 0, 0);
       if (slot >= 0) { w.citizens.slot[i] = slot; w.citizens.state[i] = ST_TRANSIT; return true; }
     }
     // virtual walk to the stop
@@ -142,7 +145,9 @@ export class Transit {
         const st = l.stops[k];
         if (dest && w.peds.capacityLeft > 40) {
           const door = doorOf(w.roads, dest);
-          const slot = w.peds.spawn([st.x, st.z, door.x, door.z], i, 1.35, 0, 0);
+          const wp = Math.hypot(door.x - st.x, door.z - st.z) > 35 ? activePlanFromPoint(w.roads, st.x, st.z, dest) : null;
+          const pts = wp ? walkPoints(w.roads, wp, st, door) : [st.x, st.z, door.x, door.z];
+          const slot = w.peds.spawn(pts, i, 1.35, 0, 0);
           if (slot >= 0) { w.citizens.slot[i] = slot; continue; }
         }
         this.rides.delete(i);
@@ -239,6 +244,7 @@ export class Transit {
 
   hourly() {
     const w = this.w;
+    this.checkPendingBRT();
     for (const l of this.lines) {
       if (l.kind !== 'bus' && l.kind !== 'brt') continue;
       for (const v of [...l.vehicles]) if (!w.traffic.active[v] || w.traffic.pKind[v] !== P_BUS || w.traffic.pId[v] !== l.id) l.vehicles.delete(v);
@@ -335,13 +341,56 @@ export class Transit {
   }
 
   private toBRT(l: Line) {
+    if (l.kind === 'brt' || l.pendingBRT) return;
     const w = this.w;
+    let ready = 0;
+    const todo = [];
+    for (const id of l.edges) {
+      const e = w.roads.edges[id];
+      if (!e?.alive) continue;
+      if (e.busLane) ready++;
+      else if (e.lanes >= 2 && !e.upgrading) todo.push(e);
+    }
+    // never announce BRT when no dedicated bus lanes exist or can be built
+    if (!ready && !todo.length) return;
+    if (!todo.length) { this.promoteBRT(l, ready); return; }
+    for (const e of todo) {
+      e.upgrading = true;
+      e.upgradeTo = { busLane: true };
+      e.workP = 0;
+      w.roadWorks.set(e.id, { motive: 'BRT', speed: 0.4, kind: 'upgrade' });
+      w.roads.dirtyEdges.add(e.id);
+    }
+    l.pendingBRT = true;
+    const s = l.stops[0];
+    w.events.emit('road_upgrade', s.x, s.z, 0.7, `Obras de faixa exclusiva para a ${l.name} em ${todo.length} trecho(s)`, { visual: 0.6 });
+  }
+
+  /** promote pending BRT lines only once their exclusive bus-lane works have finished */
+  checkPendingBRT() {
+    const w = this.w;
+    for (const l of this.lines) {
+      if (!l.pendingBRT || l.kind === 'brt') continue;
+      let stillWorking = false, ready = 0;
+      for (const id of l.edges) {
+        const e = w.roads.edges[id];
+        if (!e?.alive) continue;
+        if (e.upgrading && e.upgradeTo?.busLane) stillWorking = true;
+        if (e.busLane) ready++;
+      }
+      if (stillWorking) continue;
+      l.pendingBRT = false;
+      if (ready > 0) this.promoteBRT(l, ready);
+    }
+  }
+
+  private promoteBRT(l: Line, lanes: number) {
     l.kind = 'brt';
     l.name = l.name.replace('Linha', 'BRT');
-    let n = 0;
-    for (const id of l.edges) { const e = w.roads.edges[id]; if (e.alive && e.lanes >= 2 && !e.busLane && !e.upgrading) { e.upgrading = true; e.upgradeTo = { busLane: true }; e.workP = 0; w.roadWorks.set(e.id, { motive: 'BRT', speed: 0.4, kind: 'upgrade' }); n++; } }
+    l.pendingBRT = false;
+    this.dirty.add(l.id);
     const s = l.stops[0];
-    w.events.emit('line_opened', s.x, s.z, 0.9, `${l.name} ganha faixa exclusiva em ${n} trechos`, { headline: `Linha mais lotada vira BRT com faixa exclusiva`, visual: 0.8 });
+    this.w.events.emit('line_opened', s.x, s.z, 0.9, `${l.name} entra em operação com faixa exclusiva em ${lanes} trecho(s)`, { headline: `Linha mais lotada vira BRT com faixa exclusiva`, visual: 0.8 });
   }
 
   /** new stop list for a line (a station opened in between): riders and queues follow their stop, matched by position */

@@ -709,6 +709,54 @@ export class RoadNetwork {
   }
   /** drop every cached tree (direction changes make them unsafe even if they still look connected) */
   invalidateRoutes() { this.trees.clear(); this.graph = null; this.topoVer++; }
+  /**
+   * Active-mode route (walking / cycling): ignores one-way restrictions and forbids regional highways
+   * and grade-separated decks, minimizing physical street distance instead of car travel time.
+   */
+  walkRoute(from: number, dest: number, maxDist = 5200): number[] | null {
+    if (from === dest) return [];
+    const N = this.nodes.length;
+    if (from < 0 || dest < 0 || from >= N || dest >= N) return null;
+    if (!this.nodes[from]?.alive || !this.nodes[dest]?.alive) return null;
+    const dist = new Float32Array(N).fill(Infinity);
+    const prevDe = new Int32Array(N).fill(-1);
+    const heap = new MinHeap();
+    dist[from] = 0;
+    heap.push(from, 0);
+    while (heap.size) {
+      const d = heap.peekPri();
+      const u = heap.pop();
+      if (d > dist[u]) continue;
+      if (d > maxDist) break;
+      if (u === dest) break;
+      for (const eid of this.nodes[u].edges) {
+        const e = this.edges[eid];
+        if (!e.alive || e.progress < 1 || e.cls === RoadClass.Highway || e.deck !== undefined) continue;
+        const v = e.a === u ? e.b : e.a;
+        const dir = e.a === u ? 0 : 1;
+        const nd = d + e.len;
+        if (nd < dist[v] && nd <= maxDist) {
+          dist[v] = nd;
+          prevDe[v] = eid * 2 + dir;
+          heap.push(v, nd);
+        }
+      }
+    }
+    if (prevDe[dest] < 0) return null;
+    const out: number[] = [];
+    let cur = dest;
+    let guard = 0;
+    while (cur !== from && guard++ < 600) {
+      const de = prevDe[cur];
+      if (de < 0) return null;
+      out.push(de);
+      const e = this.edges[de >> 1];
+      cur = (de & 1) === 0 ? e.a : e.b;
+    }
+    if (cur !== from) return null;
+    out.reverse();
+    return out;
+  }
   pathTime(path: number[]): number {
     let t = 0;
     for (const de of path) t += this.travelTime(this.edges[de >> 1], de & 1);

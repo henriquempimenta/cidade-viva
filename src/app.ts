@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import { DAYS_PER_YEAR, DAYS_PER_SEASON, SEASONS, MAX_VEHICLES } from './shared/constants';
-import type { SimParams } from './shared/params';
+import { sanitizeParams, sanitizeWarmup, type SimParams } from './shared/params';
 import type { FromWorker, SimEvent, Snapshot, Stats, ToWorker, WorldDiff, WorldInit } from './shared/protocol';
 import { SceneRig } from './render/scene';
 import { TerrainView } from './render/terrainMesh';
@@ -69,11 +69,11 @@ export class App {
   constructor(private canvas: HTMLCanvasElement, public uiRoot: HTMLElement) {}
 
   start(params: SimParams) {
-    this.params = params;
+    this.params = sanitizeParams(params);
     this.worker = new Worker(new URL('./sim/worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent<FromWorker>) => this.onMessage(e.data);
-    const warm = Number(new URLSearchParams(location.search).get('warmup') ?? 0);
-    this.send({ type: 'init', params, warmup: warm });
+    const warm = sanitizeWarmup(new URLSearchParams(location.search).get('warmup'));
+    this.send({ type: 'init', params: this.params, warmup: warm });
     this.send({ type: 'speed', speed: this.speed });
   }
 
@@ -146,6 +146,7 @@ export class App {
     this.controls.maxDistance = 4000;
     this.controls.enabled = false;
     const markInput = () => {
+      this.camGlide = null;
       this.lastInput = performance.now();
       if (this.mode === 'auto' || this.mode === 'cinematic') this.enterFree(true);
     };
@@ -315,6 +316,7 @@ export class App {
   }
 
   setMode(m: CamMode) {
+    this.camGlide = null;
     this.mode = m;
     this.prevMode = m === 'free' ? 'free' : m;
     this.controls.enabled = m === 'free';
@@ -377,6 +379,14 @@ export class App {
     } else if (this.mode === 'follow') {
       this.updateFollow(dt);
     } else {
+      if (this.camGlide) {
+        const g = this.camGlide;
+        g.t = Math.min(1, g.t + dt / g.dur);
+        const f = g.t * g.t * (3 - 2 * g.t);
+        cam.position.lerpVectors(g.fromPos, g.toPos, f);
+        this.controls.target.lerpVectors(g.fromTarget, g.toTarget, f);
+        if (g.t >= 1) this.camGlide = null;
+      }
       this.controls.update();
       // clearance in free mode as well
       const g = this.groundClear(cam.position.x, cam.position.z) - 3;
@@ -474,6 +484,7 @@ export class App {
   lookAtBuilding(id: number) {
     const b = this.buildings.get(id);
     if (!b) return;
+    this.camGlide = null;
     this.enterFree(true);
     this.controls.target.set(b.x, b.y + b.height * 0.4, b.z);
     const r = Math.max(70, b.height * 2.4);
@@ -481,12 +492,15 @@ export class App {
     this.lastInput = performance.now();
   }
 
-  /** "Ouvir este trecho": drop the camera to the curb and switch the ambience on */
+  private camGlide: { fromPos: THREE.Vector3; toPos: THREE.Vector3; fromTarget: THREE.Vector3; toTarget: THREE.Vector3; t: number; dur: number } | null = null;
+
+  /** "Ouvir este trecho": glide smoothly to the curb and switch the ambience on */
   listenAt(m: { x: number; y: number; z: number; hx: number; hz: number }) {
     this.enterFree(true);
     const l = Math.hypot(m.hx, m.hz) || 1, nx = -m.hz / l, nz = m.hx / l;
-    this.controls.target.set(m.x, m.y + 1.5, m.z);
-    this.rig.camera.position.set(m.x + nx * 16 + (m.hx / l) * 10, m.y + 4.5, m.z + nz * 16 + (m.hz / l) * 10);
+    const toTarget = new THREE.Vector3(m.x, m.y + 1.5, m.z);
+    const toPos = new THREE.Vector3(m.x + nx * 16 + (m.hx / l) * 10, m.y + 4.5, m.z + nz * 16 + (m.hz / l) * 10);
+    this.camGlide = { fromPos: this.rig.camera.position.clone(), toPos, fromTarget: this.controls.target.clone(), toTarget, t: 0, dur: 0.9 };
     this.lastInput = performance.now() + 20000; // stay here a while before the director resumes
     if (!this.audio.enabled) { this.audio.toggle?.(); document.querySelector('.scene-tools .icon-button')?.classList.add('active'); this.hud.toast('Áudio ambiente ligado — ouvindo o trecho'); }
   }

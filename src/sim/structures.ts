@@ -194,6 +194,15 @@ export class Structures {
   // ------------------------------------------------------------------ building
   build(p: BypassPlan, kind: 'fly' | 'tunnel', motive: string): REdge | null {
     const w = this.w, R = w.roads;
+    // validate both endpoints before mutating the graph with any edge split
+    const canResolve = (e: End): boolean => {
+      if ('node' in e) return !!R.nodes[e.node]?.alive;
+      return !!R.nearestEdgePoint(e.x, e.z, 2);
+    };
+    if (!canResolve(p.ends[0]) || !canResolve(p.ends[1])) return null;
+    if ('node' in p.ends[0] && 'node' in p.ends[1] && p.ends[0].node === p.ends[1].node) return null;
+    const p0 = this.pos(p.ends[0]), p1 = this.pos(p.ends[1]);
+    if (Math.hypot(p1.x - p0.x, p1.z - p0.z) < 20) return null;
     const node = (e: End): number => {
       if ('node' in e) return e.node;
       const pe = R.nearestEdgePoint(e.x, e.z, 2);

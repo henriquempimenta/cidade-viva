@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import { MOTION_DT } from '../shared/constants';
+import { sanitizeParams, sanitizeWarmup } from '../shared/params';
 import type { FromWorker, ToWorker } from '../shared/protocol';
 import { World } from './world';
 import { SimHost } from './host';
@@ -29,8 +30,8 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
   const m = ev.data;
   if (m.type === 'init') {
     host?.stop();
-    const world = new World(m.params);
-    const warm = (m as { warmup?: number }).warmup ?? 0;
+    const world = new World(sanitizeParams(m.params));
+    const warm = sanitizeWarmup((m as { warmup?: number }).warmup);
     for (let d = 0; d < warm; d++) for (let k = 0; k < 4800; k++) world.step(MOTION_DT);
     // warm-up ran inline; from here on routing refreshes go to the thread pool
     const backend = routePool();

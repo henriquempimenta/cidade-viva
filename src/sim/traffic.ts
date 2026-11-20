@@ -142,10 +142,14 @@ export class Traffic {
   /** does [s-len, s] on this lane overlap another vehicle (with the entry gap)? */
   laneFree(e: REdge, dir: number, lane: number, s: number, len: number, self = -1): boolean {
     const G = Traffic.ENTRY_GAP;
+    const ss = this.sStart(e, dir);
     for (const o of this.occupants(e, dir, lane)) {
       if (o === self || !this.active[o] || this.edge[o] !== e.id || this.dir[o] !== dir || this.lane[o] !== lane) continue;
       const so = this.s[o];
-      if (s + G > so - this.len[o] && s - len - G < so) return false;
+      // a vehicle still crossing the junction box has already reserved [sStart, sStart + len] on this exit lane
+      const lo = so < ss ? ss : so - this.len[o];
+      const hi = so < ss ? ss + this.len[o] : so;
+      if (s + G > lo && s - len - G < hi) return false;
     }
     return true;
   }
@@ -275,9 +279,10 @@ export class Traffic {
               const narr = this.laneArr[this.key(ne.id, nde & 1, nl)];
               if (narr && narr.length) {
                 const o = narr[0];
-                const room = this.s[o] - this.sStart(ne, nde & 1) - this.len[o];
-                // gridlock relief may squeeze in, but never into space that is physically occupied
-                if (room < 3 && (this.stuck[i] < 25 || room < this.len[i] * 0.25 + 0.5)) ok = false;
+                const ns = this.sStart(ne, nde & 1);
+                const room = this.s[o] < ns ? -1 : this.s[o] - ns - this.len[o];
+                // never squeeze into space shorter than the vehicle + entry gap ("don't block the box")
+                if (room < this.len[i] + Traffic.ENTRY_GAP) ok = false;
                 else { const g2 = distEnd + room + 6; if (g2 < gap) { gap = g2; vl = this.v[o]; } }
               }
             }
@@ -346,10 +351,11 @@ export class Traffic {
         if (this.pKind[i] === P_BUS && this.onStop(i, node.id)) { this.dwell[i] = 14; }
         let nl = this.chooseLane(e, dir, ne, nde & 1, i);
         // the exit lane must have physical room for the whole vehicle before it commits to the junction
-        const entryS = this.sStart(ne, nde & 1) + 0.5;
-        if (!this.laneFree(ne, nde & 1, nl, entryS, 0)) {
+        const vlen = this.len[i];
+        const entryS = this.sStart(ne, nde & 1) + vlen;
+        if (!this.laneFree(ne, nde & 1, nl, entryS, vlen, i)) {
           let alt = -1;
-          for (let l = 0; l < ne.lanes; l++) if (l !== nl && this.laneFree(ne, nde & 1, l, entryS, 0)) { alt = l; break; }
+          for (let l = 0; l < ne.lanes; l++) if (l !== nl && this.laneFree(ne, nde & 1, l, entryS, vlen, i)) { alt = l; break; }
           if (alt < 0) { this.s[i] = sEnd - 0.06; this.v[i] = 0; if (this.stuck[i] > 50) { this.onStuck(i); this.despawn(i); } continue; }
           nl = alt;
         }

@@ -1,9 +1,9 @@
-import { DAY_SECONDS, DAYS_PER_YEAR, HOUR_SECONDS, MAX_CITIZENS, PED_FLAG_FUNERAL, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, VType } from '../shared/constants';
+import { DAY_SECONDS, DAYS_PER_YEAR, HOUR_SECONDS, MAX_CITIZENS, PED_FLAG_FUNERAL, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, RoadClass, VType } from '../shared/constants';
 import { FIRST_F, FIRST_M, LAST } from '../shared/names';
 import { MinHeap } from './heap';
 import type { Building } from './buildings';
 import type { World } from './world';
-import { carPlan, carPlanFromNode, carPlanToNode, doorOf, pathLength, walkPoints, type CarPlan } from './trips';
+import { activePlan, activePlanFromPoint, carPlan, carPlanFromNode, carPlanToNode, doorOf, pathLength, walkPoints, type CarPlan } from './trips';
 import { P_CITIZEN, P_FUNERAL, P_MOVING } from './traffic';
 import { PED_FLAG_BIKE } from './peds';
 import type { PlaceCat } from './places';
@@ -47,6 +47,10 @@ export class Citizens {
   tripAct = new Uint8Array(0);
   tripDur = new Float32Array(0);
   tripMode = new Uint8Array(0);
+  vFromX = new Float32Array(0);
+  vFromZ = new Float32Array(0);
+  vStartT = new Float32Array(0);
+  vEndT = new Float32Array(0);
   first = new Uint16Array(0);
   last = new Uint16Array(0);
   birthYear = new Int16Array(0);
@@ -98,6 +102,10 @@ export class Citizens {
     { const b = new Uint8Array(n * 1); b.set(this.tripAct);  this.tripAct = b; }
     { const b = new Float32Array(n * 1); b.set(this.tripDur);  this.tripDur = b; }
     { const b = new Uint8Array(n * 1); b.set(this.tripMode);  this.tripMode = b; }
+    { const b = new Float32Array(n * 1); b.set(this.vFromX);  this.vFromX = b; }
+    { const b = new Float32Array(n * 1); b.set(this.vFromZ);  this.vFromZ = b; }
+    { const b = new Float32Array(n * 1); b.set(this.vStartT);  this.vStartT = b; }
+    { const b = new Float32Array(n * 1); b.set(this.vEndT);  this.vEndT = b; }
     { const b = new Uint16Array(n * 1); b.set(this.first);  this.first = b; }
     { const b = new Uint16Array(n * 1); b.set(this.last);  this.last = b; }
     { const b = new Int16Array(n * 1); b.set(this.birthYear);  this.birthYear = b; }
@@ -390,60 +398,99 @@ export class Citizens {
     const r = this.rng;
     const h = this.households.get(this.hh[i])!;
     const d = Math.hypot(to.x - from.x, to.z - from.z) * 1.3;
-    const plan = carPlan(w.roads, from, to);
+    const canDrive = h.car && this.age[i] >= 18;
+    // active modes route independently (ignoring one-way car restrictions and avoiding highways)
+    const walkP = d < 4600 ? activePlan(w.roads, from, to, 4800) : null;
+    const carP = canDrive || !walkP ? carPlan(w.roads, from, to) : null;
     this.tripDest[i] = to.id; this.tripAct[i] = a; this.tripDur[i] = dur;
     this.act[i] = a;
-    if (!plan) { this.virtualArrive(i, d / 6 + 30); return; }
+    const activeLen = walkP ? walkP.len : Infinity;
+    const carLen = carP ? pathLength(w.roads, carP) : Infinity;
+    const refLen = Number.isFinite(activeLen) ? activeLen : Number.isFinite(carLen) ? carLen : d;
+    w.transitSys?.recordTrip(from, to, refLen);
+    const tr = w.transit2?.transitOption(from, to, refLen) ?? null;
+    if (!walkP && !carP && !tr) { this.virtualArrive(i, d / 6 + 30); return; }
     const tp = w.params.transitPriority;
     const vot = 0.3 + this.income[i] / 80; // value of time
     const rain = w.weather.rain;
-    const len = pathLength(w.roads, plan);
-    w.transitSys?.recordTrip(from, to, len);
     const costs: number[] = [Infinity, Infinity, Infinity, Infinity, Infinity];
-    costs[0] = len < 1800 ? (len / 1.35) * vot * (1 + rain * 1.5) : Infinity;
-    if ((this.traits[i] & T_SPORT || this.age[i] < 30 && h.wealth === 0) && len < 4500 && this.age[i] > 10 && this.age[i] < 65) costs[1] = (len / 4.5) * vot * (1 + rain * 2) + 20;
-    if (h.car && this.age[i] >= 18) costs[2] = (plan.time + 60) * vot + len * 0.012 * (1 + tp * 1.5) + w.fields.sample('landValue', to.x, to.z) * 15 * (1 + tp);
-    const tr = w.transit2?.transitOption(from, to, len);
+    if (walkP && activeLen < 1800) costs[0] = (activeLen / 1.35) * vot * (1 + rain * 1.5);
+    if (walkP && (this.traits[i] & T_SPORT || this.age[i] < 30 && h.wealth === 0) && activeLen < 4500 && this.age[i] > 10 && this.age[i] < 65) costs[1] = (activeLen / 4.5) * vot * (1 + rain * 2) + 20;
+    if (canDrive && carP) costs[2] = (carP.time + 60) * vot + carLen * 0.012 * (1 + tp * 1.5) + w.fields.sample('landValue', to.x, to.z) * 15 * (1 + tp);
     if (tr) costs[tr.mode] = tr.time * vot * (1 - tp * 0.35) + tr.fare;
     let mode = 0, mc = Infinity;
     for (let m = 0; m < 5; m++) if (costs[m] < mc) { mc = costs[m]; mode = m; }
-    if (mc === Infinity) mode = h.car ? 2 : 0;
+    if (mc === Infinity) mode = canDrive && carP ? 2 : walkP ? 0 : tr ? tr.mode : 0;
     this.tripMode[i] = mode;
     this.modeCount[mode]++;
     if (mode === 3 || mode === 4) {
-      if (w.transit2?.board(i, from, to, tr!)) { this.state[i] = ST_TRANSIT; return; }
-      mode = 0;
+      if (tr && w.transit2?.board(i, from, to, tr)) { this.state[i] = ST_TRANSIT; return; }
+      mode = walkP ? 0 : canDrive && carP ? 2 : 0;
     }
-    if (mode === 2) {
+    if (mode === 2 && carP) {
       const vt = this.income[i] > 200 && r.chance(0.25) ? VType.Car : r.chance(0.08) ? VType.Moto : r.chance(0.05) && w.era >= 1 ? VType.Taxi : VType.Car;
-      if (w.traffic.capacityLeft > 60 && w.lodAllowsVehicle(from.x, from.z)) {
-        const slot = w.traffic.spawn(vt, plan.path, plan.startS, plan.destS, { kind: P_CITIZEN, id: i, aux: 0 }, from.id, to.id);
+      if (w.traffic.capacityLeft > 60 && w.lodAllowsVehicle(i)) {
+        const slot = w.traffic.spawn(vt, carP.path, carP.startS, carP.destS, { kind: P_CITIZEN, id: i, aux: 0 }, from.id, to.id);
         if (slot >= 0) { this.state[i] = ST_CAR; this.slot[i] = slot; return; }
         // no room to pull out onto the street: a short trip changes mode to walking instead of teleporting
-        if (len < 1500) { mode = 0; this.modeCount[2]--; this.modeCount[0]++; this.tripMode[i] = 0; }
+        if (walkP && activeLen < 1500) { mode = 0; this.modeCount[2]--; this.modeCount[0]++; this.tripMode[i] = 0; }
       }
       if (mode === 2) {
-      // virtual car trip still loads the network
-      for (const de of plan.path) w.roads.loadVirtual(de, from.id, to.id, vt === VType.Moto ? 1 : 0);
-      this.virtualArrive(i, plan.time + 30);
-      return;
+        // virtual car trip still loads the network
+        for (const de of carP.path) w.roads.loadVirtual(de, from.id, to.id, vt === VType.Moto ? 1 : 0);
+        this.virtualArrive(i, carP.time + 30);
+        return;
       }
     }
     const speed = mode === 1 ? r.range(4, 5.5) : r.range(1.2, 1.5) * (this.age[i] > 70 ? 0.75 : 1);
-    if (w.peds.capacityLeft > 30) {
-      const pts = walkPoints(w.roads, plan, doorOf(w.roads, from), doorOf(w.roads, to));
+    const activeRoute = walkP ?? (carP && carP.path.every((de) => { const e = w.roads.edges[de >> 1]; return !!e && e.cls !== RoadClass.Highway && e.deck === undefined; }) ? carP : null);
+    if (activeRoute && w.peds.capacityLeft > 30) {
+      const pts = walkPoints(w.roads, activeRoute, doorOf(w.roads, from), doorOf(w.roads, to));
       const slot = w.peds.spawn(pts, i, speed, (mode === 1 ? PED_FLAG_BIKE : 0) | (this.tourist[i] ? PED_FLAG_TOURIST | (a === Act.Hotel ? PED_FLAG_LUGGAGE : 0) : 0), this.colorOf(i));
       if (slot >= 0) { this.state[i] = ST_WALK; this.slot[i] = slot; return; }
     }
-    this.virtualArrive(i, len / speed);
+    this.virtualArrive(i, refLen / speed);
   }
 
   colorOf(i: number) { return ((i * 2654435761) >>> 0) % 997 / 997; }
 
-  virtualArrive(i: number, secs: number) {
+  virtualArrive(i: number, secs: number, fromX?: number, fromZ?: number) {
+    const dur = Math.max(5, secs);
+    let fx = fromX, fz = fromZ;
+    if (fx === undefined || fz === undefined) {
+      const origin = this.w.buildings.byId.get(this.loc[i])
+        ?? this.w.buildings.byId.get(this.households.get(this.hh[i])?.home ?? -1)
+        ?? this.w.buildings.byId.get(this.tripDest[i]);
+      fx = origin?.x ?? this.w.center.x;
+      fz = origin?.z ?? this.w.center.z;
+    }
+    this.vFromX[i] = fx;
+    this.vFromZ[i] = fz;
+    this.vStartT[i] = this.w.t;
+    this.vEndT[i] = this.w.t + dur;
     this.state[i] = ST_VIRTUAL;
     this.slot[i] = -1;
-    this.schedule(i, this.w.t + Math.max(5, secs));
+    this.schedule(i, this.w.t + dur);
+  }
+
+  /** gridlocked driver abandons the jam on foot when the destination is within walking distance */
+  switchToWalk(i: number, x: number, z: number): boolean {
+    if (!this.alive[i]) return false;
+    const w = this.w;
+    const dest = w.buildings.byId.get(this.tripDest[i]);
+    if (!dest) return false;
+    const door = doorOf(w.roads, dest);
+    const dist = Math.hypot(door.x - x, door.z - z);
+    if (dist > 600 || w.peds.capacityLeft <= 30) return false;
+    const speed = 1.35 * (this.age[i] > 70 ? 0.75 : 1);
+    const wp = dist > 35 ? activePlanFromPoint(w.roads, x, z, dest, 900) : null;
+    const pts = wp ? walkPoints(w.roads, wp, { x, z }, door) : [x, z, door.x, door.z];
+    const slot = w.peds.spawn(pts, i, speed, this.tourist[i] ? PED_FLAG_TOURIST : 0, this.colorOf(i));
+    if (slot < 0) return false;
+    this.tripMode[i] = 0;
+    this.state[i] = ST_WALK;
+    this.slot[i] = slot;
+    return true;
   }
 
   /** physical or virtual arrival */
@@ -666,13 +713,19 @@ export class Citizens {
     const traits: string[] = [];
     TRAITS.forEach((t, k) => { if (this.traits[i] & (1 << k)) traits.push(t); });
     const fmtH = (x: number) => `${String(Math.floor(x)).padStart(2, '0')}:${String(Math.floor((x % 1) * 60)).padStart(2, '0')}`;
+    const s = this.slot[i];
+    const speedKmh = st === ST_CAR && s >= 0 && w.traffic.active[s]
+      ? w.traffic.v[s] * 3.6
+      : st === ST_WALK && s >= 0 && w.peds.active[s]
+        ? w.peds.speed[s] * 3.6
+        : null;
     return {
       id: i, name: this.name(i), age: Math.floor(this.age[i]), sex: this.sex[i] ? 'mulher' : 'homem', traits, edu: EDU_LABEL[this.edu[i]] + (this.studying[i] ? ` (estudando: ${['', 'creche', 'escola', 'ensino médio', 'universidade'][this.studying[i]]})` : ''),
       job: job ? `${job.name}${this.job[i] >= 0 ? '' : ' (estudante)'}` : this.age[i] >= 65 ? 'aposentado(a)' : this.age[i] < 6 ? '—' : 'desempregado(a)',
       home: home ? `${home.name} · ${w.districtName(home.x, home.z)}` : '—', income: this.income[i], money: h?.money ?? 0, needs, state, activity: ACT_LABEL[a],
       agenda: this.agenda[i].map((g) => ({ h: fmtH(g.h), act: ACT_LABEL[g.act], done: g.done })), bio: this.bio[i] ?? [],
       family: h ? h.members.filter((m) => m !== i).map((m) => `${this.name(m)} (${Math.floor(this.age[m])})`) : [],
-      mode: MODE_LABEL[this.tripMode[i]], happiness: this.happiness[i], tourist: !!this.tourist[i], insideBuilding: st === ST_IN ? this.loc[i] : -1,
+      mode: MODE_LABEL[this.tripMode[i]], speedKmh, happiness: this.happiness[i], tourist: !!this.tourist[i], insideBuilding: st === ST_IN ? this.loc[i] : -1,
     };
   }
 
@@ -685,6 +738,16 @@ export class Citizens {
     if (st === ST_CAR && s >= 0 && w.traffic.active[s]) { w.traffic.computePose(s); return { x: w.traffic.x[s], y: w.traffic.y[s], z: w.traffic.z[s], h: w.traffic.h[s], inside: false, building: -1 }; }
     if (st === ST_WALK && s >= 0 && w.peds.active[s]) { w.peds.pose(s); return { x: w.peds.x[s], y: Math.max(0.2, w.terrain.heightAt(w.peds.x[s], w.peds.z[s])) + 0.1, z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     if (st === ST_TRANSIT) { const p = w.transit2?.position(i); if (p) return p; }
+    if (st === ST_VIRTUAL) {
+      const dest = w.buildings.byId.get(this.tripDest[i]);
+      const fx = this.vFromX[i], fz = this.vFromZ[i];
+      const tx = dest?.x ?? fx, tz = dest?.z ?? fz;
+      const span = Math.max(1, this.vEndT[i] - this.vStartT[i]);
+      const f = Math.max(0, Math.min(1, (w.t - this.vStartT[i]) / span));
+      const x = fx + (tx - fx) * f, z = fz + (tz - fz) * f;
+      const y = Math.max(0.2, w.terrain.heightAt(x, z)) + 0.5;
+      return { x, y, z, h: Math.atan2(tz - fz, tx - fx), inside: false, building: -1 };
+    }
     const bid = st === ST_IN ? this.loc[i] : this.tripDest[i];
     const b = w.buildings.byId.get(bid) ?? w.buildings.byId.get(this.households.get(this.hh[i])?.home ?? -1);
     if (!b) return null;

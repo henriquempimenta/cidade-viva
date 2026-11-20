@@ -1,4 +1,4 @@
-import { RoadClass, ROAD_NAMES } from '../shared/constants';
+import { RoadClass, ROAD_NAMES, ROAD_HALF_WIDTH, ROAD_LANES } from '../shared/constants';
 import { angDiff, projSeg, type REdge, type RNode } from './roads';
 import type { World } from './world';
 
@@ -75,12 +75,15 @@ export class RoadUpgrades {
     // 1. widen
     {
       const lanes = e.lanes + 1;
-      const feasible = lanes <= (e.cls === RoadClass.Highway ? 4 : 3) && !e.oneway;
+      const newCls = e.cls < RoadClass.Collector ? RoadClass.Collector : e.cls < RoadClass.Avenue && lanes >= 2 ? RoadClass.Avenue : e.cls;
+      // real lateral room: the widened carriageway must not reach any building footprint
+      const newHalf = ROAD_HALF_WIDTH[newCls] + (lanes > ROAD_LANES[newCls] ? 3 : 0);
+      const room = !R.footprintCheck?.(a.x, a.z, b.x, b.z, newHalf + 0.5, 8, 8);
+      const feasible = lanes <= (e.cls === RoadClass.Highway ? 4 : 3) && !e.oneway && !e.bridge && e.deck === undefined && room;
       const nc = cap * lanes / e.lanes;
       const benefit = this.savings(e, nc);
       const cost = e.len * (2.5 + lanes) * (lanes >= 3 ? 1.8 : 1);
-      const newCls = e.cls < RoadClass.Collector ? RoadClass.Collector : e.cls < RoadClass.Avenue && lanes >= 2 ? RoadClass.Avenue : e.cls;
-      opts.push({ label: lanes >= 2 && e.cls < RoadClass.Avenue ? 'Alargar para avenida com canteiro' : 'Alargar a via (+1 faixa)', benefit, cost, ratio: benefit / cost, feasible, note: feasible ? `${e.lanes}→${lanes} faixas por sentido` : 'sem espaço lateral',
+      opts.push({ label: lanes >= 2 && e.cls < RoadClass.Avenue ? 'Alargar para avenida com canteiro' : 'Alargar a via (+1 faixa)', benefit, cost, ratio: benefit / cost, feasible, note: feasible ? `${e.lanes}→${lanes} faixas por sentido` : !room ? 'sem espaço lateral: edificações a menos de ' + newHalf.toFixed(0) + ' m do eixo' : 'limite de faixas, ponte ou mão única',
         apply: () => this.startWork(e, { lanes, cls: newCls }, 'Alargamento') });
     }
     // 2. one-way pair with a parallel street
@@ -214,15 +217,19 @@ export class RoadUpgrades {
     e.oneway = 1; p.oneway = 1;
     if (same) { const t = p.a; p.a = p.b; p.b = t; R.computePts(p); }
     e.lanes = e.lanes * 2; p.lanes = p.lanes * 2;
-    R.topoVer++;
+    R.invalidateRoutes();
     // keep the network strongly connected: test reachability both ways
     const ok = R.route(e.a, e.b) && R.route(e.b, e.a) && R.route(p.a, p.b) && R.route(p.b, p.a);
     if (!ok) {
       [e.oneway, p.oneway, e.lanes, p.lanes, p.a, p.b] = before;
       R.computePts(p);
-      R.topoVer++;
+      R.invalidateRoutes();
       return;
     }
+    // vehicles already on the reversed edge keep moving the same physical way: their direction bit flips
+    if (same) this.w.traffic.reverseEdge(p.id);
+    // every vehicle and line whose remaining route now runs against the traffic is re-planned
+    this.w.replanAfterTopology();
     R.dirtyEdges.add(e.id); R.dirtyEdges.add(p.id);
   }
 

@@ -42,7 +42,7 @@ export class Structures {
   /** nodes already passed over/under by a structure (no second one on top) */
   flown = new Set<number>();
   /** structures under construction and the street segments they will replace */
-  private swaps: { deck: number[]; pairs: [number, number][]; passed: number[]; name: string; kind: 'fly' | 'tunnel'; over: string }[] = [];
+  private swaps: { deck: number[]; pairs: [number, number][]; passed: number[]; name: string; kind: 'fly' | 'tunnel'; over: string; wait?: number }[] = [];
   /** why the last plan failed (shown in the junction decision) */
   why = '';
   private lastHill = -10;
@@ -254,6 +254,11 @@ export class Structures {
     this.swaps = this.swaps.filter((sw) => {
       if (sw.deck.some((id) => R.edges[id].progress < 1)) return true;
       if (sw.deck.some((id) => !R.edges[id].alive)) { for (const [x, y] of sw.pairs) { const q = R.edgeBetween(x, y); if (q) q.locked = false; } return false; }
+      // the swap waits (up to half a day) for the street to empty, so nobody vanishes with the asphalt
+      const T = w.traffic;
+      const ids = new Set(sw.pairs.map(([x, y]) => R.edgeBetween(x, y)?.id ?? -1));
+      sw.wait = (sw.wait ?? 0) + 1;
+      if (sw.wait < 12) { for (let i = 0; i < T.max; i++) if (T.active[i] && ids.has(T.edge[i])) return true; }
       for (const [x, y] of sw.pairs) { const q = R.edgeBetween(x, y); if (q) R.removeEdge(q.id); }
       for (const nid of sw.passed) {
         const n = R.nodes[nid];
@@ -263,6 +268,7 @@ export class Structures {
         R.updateNodeGeom(n);
       }
       R.topoVer++; // signal lists and routing refresh
+      w.replanAfterTopology();
       const e = R.edges[sw.deck[0]], A = R.nodes[e.a];
       w.events.emit('road_upgrade', A.x, A.z, 0.7, sw.kind === 'fly' ? `${sw.name} entra em operação: o trecho no chão foi desativado e a via agora passa por cima de ${sw.over}` : `${sw.name} entra em operação: a via agora passa por baixo de ${sw.over}`, { entity: { kind: 'edge', id: e.id }, ref: e.id, visual: 0.6 });
       return false;

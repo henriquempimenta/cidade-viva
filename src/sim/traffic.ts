@@ -1,4 +1,4 @@
-import { LANE_WIDTH, MAX_VEHICLES, RoadClass, VEH_FLAG_BRAKE, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_FLAG_FULL, VEH_STRIDE, VType, VTYPE_LEN, HOUR_SECONDS } from '../shared/constants';
+import { EMERGENCY_CAP, EMERGENCY_EXCESS, MODE_CAP, LANE_WIDTH, MAX_VEHICLES, RoadClass, VEH_FLAG_BRAKE, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_FLAG_FULL, VEH_STRIDE, VType, VTYPE_LEN, HOUR_SECONDS } from '../shared/constants';
 import { vehicleSound, type RNode, type REdge, type RoadNetwork } from './roads';
 
 export interface Payload { kind: number; id: number; aux: number }
@@ -90,23 +90,30 @@ export class Traffic {
     const de = path[0];
     const e = this.R.edges[de >> 1];
     if (!e || !e.alive) return -1;
+    const lanes = e.lanes;
+    const vlen = VTYPE_LEN[type] ?? 4.5;
+    const pref = type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus ? lanes - 1 : Math.max(0, lanes - 1 - (e.busLane && lanes > 1 ? 1 : 0));
+    const s0 = Math.max(this.sStart(e, de & 1), Math.min(startS, this.sEnd(e, de & 1) - 1));
+    // reserve real road space: a vehicle never materialises on top of another one
+    const place = this.findRoom(e, de & 1, pref, s0, vlen);
+    if (!place) { this.spawnRefused++; return -1; }
     const slot = this.free.pop()!;
     this.active[slot] = 1;
     this.gen[slot] = (this.gen[slot] + 1) & 0xffff;
     this.type[slot] = type;
     this.edge[slot] = e.id;
     this.dir[slot] = de & 1;
-    const lanes = e.lanes;
-    this.lane[slot] = type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus ? lanes - 1 : Math.max(0, lanes - 1 - (e.busLane && lanes > 1 ? 1 : 0));
-    this.s[slot] = Math.max(this.sStart(e, de & 1), Math.min(startS, this.sEnd(e, de & 1) - 1));
+    this.lane[slot] = place[0];
+    this.s[slot] = place[1];
     this.v[slot] = 0;
-    const vf = type === VType.Truck || type === VType.Garbage || type === VType.Construction ? 0.82 : type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus ? 0.85 : type === VType.Moto ? 1.12 : type === VType.Ambulance || type === VType.Police || type === VType.Fire ? (flags & VEH_FLAG_SIREN ? 1.35 : 1) : 0.92 + ((slot * 2654435761 + this.gen[slot] * 97) >>> 0) % 1000 / 1000 * 0.16;
+    // compliance with the posted limit: drivers choose 88–100 % of it (nobody exceeds it except sirens, see step())
+    const vf = 0.88 + ((slot * 2654435761 + this.gen[slot] * 97) >>> 0) % 1000 / 1000 * 0.12;
     this.v0f[slot] = vf;
     this.len[slot] = VTYPE_LEN[type] ?? 4.5;
     this.lat[slot] = 0;
     this.stuck[slot] = 0;
     this.flags[slot] = flags;
-    this.path[slot] = path;
+    this.path[slot] = path.slice(); // own copy: topology patches (splits, reversals) edit it in place
     this.pidx[slot] = 0;
     this.destS[slot] = destS;
     this.jnode[slot] = -1;
@@ -115,9 +122,55 @@ export class Traffic {
     this.origin[slot] = origin; this.dest[slot] = dest;
     this.dwell[slot] = 0;
     this.count++;
+    this.occupy(slot);
     e.count[de & 1]++;
     if (origin >= 0 || dest >= 0) this.R.logOD(e, origin, dest);
     return slot;
+  }
+
+  /** spawns refused because there was no free road space at the access point */
+  spawnRefused = 0;
+  /** minimum free space kept around a vehicle when it enters a lane (m) */
+  static ENTRY_GAP = 2;
+
+  /** vehicles currently on (edge, dir, lane), including those that entered since the last rebuild */
+  private occupants(e: REdge, dir: number, lane: number): number[] {
+    const arr = this.laneArr[this.key(e.id, dir, lane)];
+    return arr ?? [];
+  }
+
+  /** does [s-len, s] on this lane overlap another vehicle (with the entry gap)? */
+  laneFree(e: REdge, dir: number, lane: number, s: number, len: number, self = -1): boolean {
+    const G = Traffic.ENTRY_GAP;
+    for (const o of this.occupants(e, dir, lane)) {
+      if (o === self || !this.active[o] || this.edge[o] !== e.id || this.dir[o] !== dir || this.lane[o] !== lane) continue;
+      const so = this.s[o];
+      if (s + G > so - this.len[o] && s - len - G < so) return false;
+    }
+    return true;
+  }
+
+  /** a free lane position at or near s0 (moving back towards the entrance, then forward), or null */
+  findRoom(e: REdge, dir: number, pref: number, s0: number, len: number): [number, number] | null {
+    const lanes: number[] = [pref];
+    for (let l = 0; l < e.lanes; l++) if (l !== pref) lanes.push(l);
+    const lo = this.sStart(e, dir) + len, hi = this.sEnd(e, dir) - 1;
+    const offs = [0, -6, 6, -12, 12, -20, 20];
+    for (const d of offs) for (const l of lanes) {
+      const s = s0 + d;
+      if (d !== 0 && (s < lo || s > hi)) continue;
+      if (this.laneFree(e, dir, l, s, len)) return [l, s];
+    }
+    return null;
+  }
+
+  /** register a slot in its lane list right away, so later spawns and entries in the same tick see it */
+  private occupy(i: number) {
+    const k = this.key(this.edge[i], this.dir[i], this.lane[i]);
+    let arr = this.laneArr[k];
+    if (!arr) this.laneArr[k] = arr = [];
+    if (!arr.length) this.usedKeys.push(k);
+    arr.push(i);
   }
 
   despawn(slot: number) {
@@ -175,7 +228,7 @@ export class Traffic {
       const e = R.edges[eid];
       if (!e || !e.alive) { for (const i of arr) this.despawn(i); continue; }
       const sEnd = this.sEnd(e, dir);
-      const vmax = R.freeSpeed(e) * rainF;
+      const vmax = R.speedLimit(e) * rainF;
       const sirenS = sirens.get(eid * 2 + dir);
       const crossing = this.closedCrossings.get(eid);
       for (let idx = 0; idx < arr.length; idx++) {
@@ -188,12 +241,16 @@ export class Traffic {
         if (yieldNow) this.flags[i] |= VEH_FLAG_YIELD; else this.flags[i] &= ~VEH_FLAG_YIELD;
         // dwell (bus stops, deliveries)
         if (this.dwell[i] > 0) { this.dwell[i] -= dt; this.v[i] = 0; continue; }
-        const v0 = (emergency ? vmax * 1.3 : vmax) * this.v0f[i] * (yieldNow ? 0.3 : 1);
+        const ty0 = this.type[i];
+        const cap = MODE_CAP[ty0] ?? Infinity;
+        // desired speed = posted limit × compliance, capped per mode; sirens get a declared, bounded exception
+        const v0 = emergency ? Math.min(EMERGENCY_CAP, vmax + EMERGENCY_EXCESS) : Math.min(vmax * this.v0f[i], cap * rainF) * (yieldNow ? 0.3 : 1);
         let gap = 1e9, vl = 0;
         // leader in lane
         for (let j = idx + 1; j < arr.length; j++) {
           const o = arr[j];
-          if (emergency && this.flags[o] & VEH_FLAG_YIELD) continue;
+          // overtake only a vehicle that has actually pulled over to the curb
+          if (emergency && this.flags[o] & VEH_FLAG_YIELD && this.lat[o] > 1.0) continue;
           gap = this.s[o] - this.s[i] - this.len[o];
           vl = this.v[o];
           break;
@@ -219,15 +276,16 @@ export class Traffic {
               if (narr && narr.length) {
                 const o = narr[0];
                 const room = this.s[o] - this.sStart(ne, nde & 1) - this.len[o];
-                if (room < 3 && !emergency && this.stuck[i] < 25) ok = false;
+                // gridlock relief may squeeze in, but never into space that is physically occupied
+                if (room < 3 && (this.stuck[i] < 25 || room < this.len[i] * 0.25 + 0.5)) ok = false;
                 else { const g2 = distEnd + room + 6; if (g2 < gap) { gap = g2; vl = this.v[o]; } }
               }
             }
             if (!ok) { const g2 = distEnd - 1; if (g2 < gap) { gap = g2; vl = 0; } node.waitAcc += dt; }
           }
         }
-        // closed level crossing
-        if (crossing && !emergency) {
+        // closed level crossing: a physical barrier, sirens included (they get no preemption from a train)
+        if (crossing) {
           for (const ct of crossing) {
             const cs = dir === 0 ? ct * e.len : (1 - ct) * e.len;
             const g2 = cs - 7 - this.s[i];
@@ -286,7 +344,15 @@ export class Traffic {
         if (!ne || !ne.alive) { this.onStuck(i); this.despawn(i); continue; }
         const node = R.nodes[dir === 0 ? e.b : e.a];
         if (this.pKind[i] === P_BUS && this.onStop(i, node.id)) { this.dwell[i] = 14; }
-        const nl = this.chooseLane(e, dir, ne, nde & 1, i);
+        let nl = this.chooseLane(e, dir, ne, nde & 1, i);
+        // the exit lane must have physical room for the whole vehicle before it commits to the junction
+        const entryS = this.sStart(ne, nde & 1) + 0.5;
+        if (!this.laneFree(ne, nde & 1, nl, entryS, 0)) {
+          let alt = -1;
+          for (let l = 0; l < ne.lanes; l++) if (l !== nl && this.laneFree(ne, nde & 1, l, entryS, 0)) { alt = l; break; }
+          if (alt < 0) { this.s[i] = sEnd - 0.06; this.v[i] = 0; if (this.stuck[i] > 50) { this.onStuck(i); this.despawn(i); } continue; }
+          nl = alt;
+        }
         this.setJunction(i, e, dir, this.lane[i], ne, nde & 1, nl, node);
         this.edge[i] = ne.id; this.dir[i] = nde & 1; this.lane[i] = nl;
         this.s[i] = this.sStart(ne, nde & 1) - this.jlen[i] + Math.max(0, this.s[i] - sEnd);
@@ -294,10 +360,77 @@ export class Traffic {
         this.jnode[i] = node.id;
         node.inJunction++;
         ne.count[nde & 1]++;
+        this.occupy(i);
         if (this.origin[i] >= 0) R.logOD(ne, this.origin[i], this.dest[i]);
       } else if (this.stuck[i] > 50) { this.onStuck(i); this.despawn(i); }
     }
   }
+
+  /** an edge was split in two (a→n = e1, n→b = e2): vehicles and paths move onto the halves, nobody vanishes */
+  splitEdge(old: REdge, e1: REdge, e2: REdge, t: number) {
+    const cut0 = t * old.len, cut1 = (1 - t) * old.len;
+    for (let i = 0; i < this.max; i++) {
+      if (!this.active[i]) continue;
+      const p = this.path[i];
+      if (!p) continue;
+      for (let k = p.length - 1; k >= 0; k--) {
+        if (p[k] >> 1 !== old.id) continue;
+        const d = p[k] & 1;
+        const pair = d === 0 ? [e1.id * 2, e2.id * 2] : [e2.id * 2 + 1, e1.id * 2 + 1];
+        p.splice(k, 1, pair[0], pair[1]);
+        if (k < this.pidx[i]) this.pidx[i]++;
+        else if (k === this.pidx[i] && this.edge[i] === old.id) {
+          const cut = d === 0 ? cut0 : cut1;
+          if (this.s[i] < cut) this.edge[i] = pair[0] >> 1;
+          else { this.edge[i] = pair[1] >> 1; this.s[i] -= cut; this.pidx[i]++; }
+        }
+        if (k === p.length - 2 && this.pidx[i] <= k + 1) {
+          // destination offset was measured on the old edge
+          const cut = d === 0 ? cut0 : cut1;
+          if (this.destS[i] >= cut) this.destS[i] -= cut;
+          else p.pop(); // the door is on the first half: the trip ends there
+        }
+      }
+      if (this.edge[i] === old.id) { this.edge[i] = (this.dir[i] === 0 ? e1 : e2).id; }
+    }
+  }
+
+  /** an edge had its ends swapped: re-express everything on it in the new orientation */
+  reverseEdge(eid: number) {
+    for (let i = 0; i < this.max; i++) {
+      if (!this.active[i]) continue;
+      if (this.edge[i] === eid) this.dir[i] ^= 1;
+      const p = this.path[i];
+      if (p) for (let k = 0; k < p.length; k++) if (p[k] >> 1 === eid) p[k] ^= 1;
+    }
+  }
+
+  /** re-plan the remaining route of every vehicle whose path became illegal; returns [replanned, dropped] */
+  revalidate(): [number, number] {
+    const R = this.R;
+    let rp = 0, dropped = 0;
+    for (let i = 0; i < this.max; i++) {
+      if (!this.active[i]) continue;
+      const p = this.path[i]!;
+      const pi = this.pidx[i];
+      if (R.validPath(p, pi + 1) && (pi + 1 >= p.length || this.joins(p[pi], p[pi + 1]))) continue;
+      // keep the current edge (the vehicle is physically on it) and the final edge (where the door is)
+      const cur = p[pi], last = p[p.length - 1];
+      const head = this.headOf(cur);
+      let np: number[] | null = null;
+      if (pi === p.length - 1) np = [cur];
+      else if (R.legal(last)) {
+        const lastTail = (last & 1) === 0 ? R.edges[last >> 1].a : R.edges[last >> 1].b;
+        const mid = head === lastTail ? [] : R.route(head, lastTail);
+        if (mid) np = [cur, ...mid, last];
+      }
+      if (np && R.validPath(np, 1)) { this.path[i] = np; this.pidx[i] = 0; rp++; }
+      else { this.onStuck(i); this.despawn(i); dropped++; }
+    }
+    return [rp, dropped];
+  }
+  private headOf(de: number) { const e = this.R.edges[de >> 1]; return (de & 1) === 0 ? e.b : e.a; }
+  private joins(a: number, b: number) { const e = this.R.edges[b >> 1]; return this.headOf(a) === ((b & 1) === 0 ? e.a : e.b); }
 
   chooseLane(_e: REdge, dir: number, ne: REdge, ndir: number, slot: number): number {
     const t = this.type[slot];
@@ -409,7 +542,8 @@ export class Traffic {
   inspect(slot: number) {
     if (!this.active[slot]) return null;
     const e = this.R.edges[this.edge[slot]];
-    return { type: this.type[slot], speed: this.v[slot], edge: e?.name, kind: this.pKind[slot], id: this.pId[slot] };
+    const limit = e ? this.R.speedLimit(e) : 0;
+    return { type: this.type[slot], speed: this.v[slot], limit, cap: MODE_CAP[this.type[slot]] ?? null, edge: e?.name, kind: this.pKind[slot], id: this.pId[slot], siren: (this.flags[slot] & VEH_FLAG_SIREN) !== 0 };
   }
 
   static hourSeconds = HOUR_SECONDS;

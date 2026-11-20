@@ -77,11 +77,20 @@ describe('road network geometry', () => {
 
 describe('emergent siting', () => {
   it('polluting industry is rejected by its neighbors (NIMBY term is negative near homes)', () => {
-    const w = run(3, 5);
-    const sites = sampleSites(w.siteCtx(), 50, 50, 40, {});
+    const w = run(6, 5);
+    const sites = sampleSites(w.siteCtx(), 50, 50, 160, { offRoad: true });
     const prof = profileFor('factory', 1, w.params);
     for (const c of sites) evaluate(w.siteCtx(), c, 'factory', prof, 50, 50);
-    const withHomes = sites.filter((c) => w.fields.sample('resDensity', c.x, c.z) > 1);
-    for (const c of withHomes) expect(c.terms.nimby ?? 0).toBeLessThanOrEqual(0);
+    // neighbours counted from the actual homes, not from a smoothed field
+    const homes = w.buildings.list.filter((b) => b.alive && b.def.cat === 'res');
+    const near = sites.map((c) => homes.filter((b) => Math.hypot(b.x - c.x, b.z - c.z) < 160).length);
+    const withHomes = sites.filter((_, k) => near[k] >= 3);
+    const empty = sites.filter((c) => !homes.some((b) => Math.hypot(b.x - c.x, b.z - c.z) < 450));
+    // the comparison needs real samples on both sides, otherwise the loop proves nothing
+    expect(withHomes.length).toBeGreaterThanOrEqual(5);
+    expect(empty.length).toBeGreaterThanOrEqual(3);
+    for (const c of withHomes) expect(c.terms.nimby ?? 0).toBeLessThan(0);
+    const mean = (a: typeof sites) => a.reduce((s, c) => s + (c.terms.nimby ?? 0), 0) / a.length;
+    expect(mean(withHomes)).toBeLessThan(mean(empty));
   }, 60000);
 });

@@ -2,13 +2,41 @@
 
 Tech demo 3D de uma cidade procedural que nasce como vila e cresce sozinha. O usuário não constrói nada: ele assiste. Uma câmera auto‑diretora mostra os acontecimentos mais interessantes, e um painel de parâmetros muda as regras ao vivo.
 
+Requer Node.js 20 ou mais novo (testado com 22). Para instalar exatamente as versões do lockfile:
+
 ```bash
-npm install
-npm run dev        # http://localhost:5173
-npm test           # determinismo, geometria viária, rejeição NIMBY
+npm ci
 ```
 
-Parâmetros pela URL, por exemplo `?seed=42&terrain=litoral&warmup=20`. O `warmup` avança N dias antes de abrir a cena.
+```bash
+npm run dev        # http://localhost:5173
+```
+
+```bash
+npm test           # suíte Vitest: determinismo, invariantes e regressões do parecer
+```
+
+```bash
+npm run build      # checagem de tipos + build de produção
+```
+
+Parâmetros pela URL, por exemplo `?seed=42&terrain=litoral&warmup=20`. O `warmup` avança N dias antes de abrir a cena. A seed padrão é `1234` (terreno `vale`); as seeds `42` e `1234` no `litoral` entram nos testes de implantação.
+
+### Testes e diagnósticos
+
+- `tests/sim.test.ts`: determinismo, roteamento em threads igual ao inline, crescimento sem teto, geometria da malha e rejeição NIMBY (com amostras mínimas obrigatórias dos dois lados, para o teste não passar vazio).
+- `tests/regressions.test.ts`: cada achado do parecer técnico virou um teste. Cobre partida sem sobreposição na faixa, cancela fechada para carro, moto e ambulância com sirene, rota em cache sem contramão após virar mão única, veículos replanejados, eixo e pista sem cortar prédios (seeds 42 e 1234 no litoral, 1234 no vale), backend de rotas trocado, travado ou com erro, ruído com a mesma medição na via, no mapa e no valor do solo, limites de velocidade por modo e embarque no sentido certo.
+- Diagnósticos fora da suíte (executáveis), compilados com esbuild:
+
+```bash
+./node_modules/.bin/esbuild tests/headless.ts --bundle --platform=node --format=esm --outfile=headless.mjs
+```
+
+```bash
+node headless.mjs 70 1234 vale     # dias, seed, terreno
+```
+
+`tests/probe-occ.ts` procura vias que entram em prédios (`paved` testa a meia largura da pista, não só o eixo). `tests/corruption.ts` e `tests/stage3.ts` são sondas de política e de fase avançada.
 
 ## Arquitetura
 
@@ -110,6 +138,20 @@ Os agentes andam em velocidade real (m/s), mas o calendário é comprimido: 1 di
 
 Medido no navegador com a seed padrão e cerca de 2,8 mil habitantes: 100× e 400× sustentados, em 3 threads. No modo headless, um dia de jogo com 5 mil habitantes caiu de cerca de 42 s para cerca de 16 s de CPU numa única thread.
 
-**Não implementado:** impostores para prédios distantes e túneis.
+A medição acima foi feita antes das correções do parecer e não foi repetida; FPS, percentis de quadro e velocidade efetiva no navegador ainda precisam de uma sessão instrumentada.
 
-**Determinismo:** a mesma seed com os mesmos parâmetros gera a mesma cidade. Com mais de cerca de 1.800 veículos, o LOD que depende da câmera pode alterar trajetórias individuais.
+**Não implementado:** impostores para prédios distantes.
+
+**Determinismo:** a mesma seed com os mesmos parâmetros gera a mesma cidade, com 0 ou N threads de roteamento. Com mais de cerca de 1.800 veículos, o LOD que depende da câmera decide quais viagens são animadas. A viagem virtual carrega a via com contagem, origem–destino e a emissão sonora estimada, mas o volume entra de uma vez em todo o caminho. Por isso a câmera ainda pode alterar trajetórias individuais e o momento exato da carga.
+
+## Invariantes (correções do parecer técnico)
+
+- **Espaço na faixa.** Um veículo só nasce onde há espaço livre para o seu comprimento, mais 2 m de folga. Se não houver, tenta outra faixa ou outra posição próxima. Ainda sem espaço, a partida é recusada: viagens curtas viram caminhada e as demais seguem como viagem virtual. Na troca de via, o veículo só entra na junção quando a faixa de saída tem espaço físico. O "destravamento" por espera longa também nunca entra em espaço ocupado.
+- **Cancela é barreira física.** Sirene dá preempção em semáforo, nunca diante de um trem. Ambulância, carro e moto param igual.
+- **Sentido da via.** Cada salto de rota é conferido contra a topologia atual, inclusive o sentido. Uma árvore em cache que conflita com uma mudança de sentido é descartada e recalculada. Ao criar um binário, os veículos sobre a rua invertida mantêm o sentido físico, as rotas que passariam na contramão são replanejadas e as linhas de ônibus são refeitas pelas suas paradas. Quando uma via é dividida, os veículos passam para as metades em vez de sumir. A troca da rua por um elevado ou túnel espera a rua esvaziar (até meio dia).
+- **Implantação.** O corredor de uma via nova é conferido no raster e também geometricamente contra os volumes reais dos prédios. A ponta de um beco sem saída é conferida até a ponta (antes, os 10 m finais ficavam fora do teste). O alargamento só é viável se a nova seção não alcança nenhum prédio.
+- **Relógio e rotas.** O lote de rotas guarda o backend que o emitiu e o próprio grafo. Trocar de backend não perde o lote. Worker com erro, mensagem inválida ou atraso de mais de 2 s faz o lote ser recalculado inline com o mesmo kernel e o mesmo grafo, no mesmo passo. O resultado é idêntico e o relógio nunca congela.
+- **Ruído.** Via, mapa de calor, felicidade e valor do solo usam a mesma medição: a emissão de cada veículo pelo peso, velocidade e aceleração, em média horária. O inspetor mostra o mesmo índice. A ferrovia é uma fonte fixa separada.
+- **Velocidade.** Cada classe tem um limite sinalizado (30/40/50/60/90 km/h), reduzido em obra. Motoristas escolhem entre 88% e 100% do limite. Caminhões, ônibus e veículos de obra têm teto próprio. Só a sirene permite exceder o limite, em até 20 km/h, com teto de 100 km/h. O elevado não dá bônus de velocidade, e o inspetor mostra o limite ao lado da média observada.
+- **Trens.** O passageiro só embarca no trem que segue para a sua estação. A capacidade vem dos vagões da composição, e a ficha da linha mostra os trens que estão de fato em serviço. Uma estação nova não reindexa os passageiros em viagem.
+- **Manchetes.** "Chegam os primeiros turistas" sai no primeiro check-in de verdade, não quando a demanda aparece. A delegacia não é decidida de novo enquanto houver outra em obra.

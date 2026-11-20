@@ -202,11 +202,15 @@ export class Rail {
           if (tr.kind === 'freight') { this.freightToday++; w.economy.railBonus = Math.min(2, (w.economy.railBonus ?? 0) + 0.2); }
           else if (l.transit) {
             const k = l.stations.indexOf(st as never);
-            if (k >= 0) w.transitSys.serveStop(l.transit, k, tr.id + 100000, 400);
+            // riders board only a train heading to their station; capacity follows the consist
+            const seats = tr.cars.reduce((n, c) => n + (c === 1 ? 120 : c === 5 ? 150 : 0), 0);
+            if (k >= 0) w.transitSys.serveStop(l.transit, k, tr.id + 100000, seats, (to) => (l.stations[to].s - st.s) * tr.dir > 0);
           }
         }
       }
     }
+    // the line card shows the trains actually running on it (not a stored zero)
+    for (const l of this.lines) if (l.transit) l.transit.fleet = this.trains.reduce((n, t) => n + (t.line === l.id && t.kind !== 'freight' ? 1 : 0), 0);
     // end of line
     this.trains = this.trains.filter((tr) => {
       const l = this.lines[tr.line];
@@ -592,7 +596,7 @@ export class Rail {
     // register as a transit line (citizens can ride between stations)
     const stops: Stop[] = main.stations.map((st) => { const p = this.at(main, st.s); return { x: p[0], z: p[2], node: -1, s: st.s, name: st.name }; });
     if (!main.transit) main.transit = w.transitSys.addRailLine('rail', 'Trem Regional', stops, [], HOUR_SECONDS * 1.5);
-    else { main.transit.stops = stops; w.transitSys.dirty.add(main.transit.id); }
+    else w.transitSys.replaceStops(main.transit, stops); // keeps riders bound to their stations, not to old indices
     main.transit.pts = main.x.flatMap((x, i) => [x, main.y[i], main.z[i]]);
     this.dirtyStations.push({ id: b.id, x: b.x, z: b.z, y: b.y, angle: b.angle, len: b.w, kind: 'pass', name });
     w.events.emit('station', b.x, b.z, 0.9, `${name} começa a ser construída`, { headline: `${name}: trem de passageiros vai parar na cidade`, entity: { kind: 'building', id: b.id }, ref: b.id, visual: 0.8 });

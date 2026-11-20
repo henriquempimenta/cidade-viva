@@ -1,3 +1,4 @@
+import { segRectDist } from './geom';
 import { KINDS } from '../shared/catalog';
 import { DAY_SECONDS, DAYS_PER_SEASON, DAYS_PER_YEAR, ERA_POP, ERAS, HOUR_SECONDS, RoadClass, SEASONS } from '../shared/constants';
 import type { SimParams } from '../shared/params';
@@ -249,6 +250,27 @@ export class World {
     this.citizens = new Citizens(this);
     this.economy = new Economy(this);
     this.traffic = new Traffic(this.roads);
+    this.roads.footprintCheck = (ax, az, bx, bz, hw, ta, tb) => {
+      const len = Math.hypot(bx - ax, bz - az);
+      if (len <= ta + tb) return false;
+      const ux = (bx - ax) / len, uz = (bz - az) / len;
+      const x0 = ax + ux * ta, z0 = az + uz * ta, x1 = bx - ux * tb, z1 = bz - uz * tb;
+      const r = this.occ.segRect(x0, z0, x1, z1, hw + 8);
+      for (const id of this.occ.ownersInRect(r.cx, r.cz, r.angle, r.w + 16, r.d)) {
+        const b = this.buildings.byId.get(id);
+        if (!b || !b.alive) continue;
+        if (segRectDist(x0 - b.x, z0 - b.z, x1 - b.x, z1 - b.z, Math.cos(b.angle), Math.sin(b.angle), b.w / 2, b.d / 2) < hw) return true;
+      }
+      return false;
+    };
+    this.roads.onSplit = (o, e1, e2, t) => {
+      this.traffic.splitEdge(o, e1, e2, t);
+      for (const l of this.transitSys?.lines ?? []) {
+        if (!l.edges.has(o.id)) continue;
+        l.path = l.path.flatMap((de) => de >> 1 !== o.id ? [de] : (de & 1) === 0 ? [e1.id * 2, e2.id * 2] : [e2.id * 2 + 1, e1.id * 2 + 1]);
+        l.edges = new Set(l.path.map((d) => d >> 1));
+      }
+    };
     this.peds = new Peds(this.terrain);
     this.hasCitizens = true;
     this.utils = new Utilities(this);
@@ -301,6 +323,13 @@ export class World {
     for (let i = 0; i < this.citizens.max; i++) if (this.citizens.alive[i]) this.economy.seekJobSoon(i);
     this.economy.hourly();
     this.updateDemand();
+  }
+
+  /** a direction or connectivity change: re-plan vehicles and lines that would otherwise drive against the traffic */
+  replanAfterTopology(): [number, number, number] {
+    const [rp, dropped] = this.traffic.revalidate();
+    const lines = this.transitSys.revalidateLines();
+    return [rp, dropped, lines];
   }
 
   vehicleArrived(slot: number) {

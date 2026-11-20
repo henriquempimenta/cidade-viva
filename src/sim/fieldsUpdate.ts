@@ -1,5 +1,9 @@
 import { RoadClass } from '../shared/constants';
 import { clamp } from '../shared/rng';
+import { edgeNoisePower } from './roads';
+
+/** field units per unit of measured acoustic power (per 55 m) */
+export const NOISE_GAIN = 1;
 import type { World } from './world';
 
 let scratch: Record<string, Float32Array> = {};
@@ -31,6 +35,7 @@ export function updateFields(w: World) {
     const deckE = e.deck !== undefined;
     if (deckE && e.tunnel) continue; // underground: no noise, no frontage
     const vol = e.volume[0] + e.volume[1];
+    const power = edgeNoisePower(e);
     const n = Math.max(1, Math.round(e.len / 15));
     const p = e.pts;
     for (let i = 0; i <= n; i++) {
@@ -39,7 +44,8 @@ export function updateFields(w: World) {
       const x = p[k * 3], z = p[k * 3 + 2];
       const kk = F.idx(x, z);
       if (!deckE) roadProx[kk] = Math.max(roadProx[kk], e.cls === RoadClass.Highway ? 0.5 : 0.6 + e.cls * 0.1);
-      noiseSrc[kk] += (0.04 + vol * 0.004) * (1 + e.cls * 0.4);
+      // the measured emission of the street (weight, speed, acceleration of what actually drove on it) — same source as the inspector
+      noiseSrc[kk] += 0.02 + NOISE_GAIN * power;
       airSrc[kk] += vol * 0.0006 * (1 - w.params.transitPriority * 0.3);
       if (!deckE) foot[kk] += vol * 0.02 * (e.cls >= RoadClass.Collector ? 1.5 : 1) + (e.cls >= RoadClass.Avenue ? 0.4 : 0);
     }

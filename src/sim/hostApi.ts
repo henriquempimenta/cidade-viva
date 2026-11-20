@@ -4,6 +4,7 @@ import type { SimParams } from '../shared/params';
 import type { Snapshot, Stats, WorldDiff } from '../shared/protocol';
 import { TERM_LABELS } from './siting';
 import type { World } from './world';
+import { edgeNoiseIndex } from './roads';
 
 type Ext = World & {
   traffic?: { fillSnapshot(veh: Float32Array): number; count: number; max: number; virtualTrips: number; inspect(id: number): unknown };
@@ -136,14 +137,14 @@ export function inspect(w: World, kind: string, id: number): unknown {
     return {
       id: e.id, name: e.name, cls: ROAD_NAMES[e.cls], lanes: e.lanes, oneway: e.oneway, len: e.len,
       volume: e.volume, capacity: w.roads.capacity(e), vc: Math.max(e.volume[0], e.volume[1]) / w.roads.capacity(e),
+      limit: w.roads.speedLimit(e),
       history: e.vcHistory, congestedDays: e.congestedDays, busLane: e.busLane, upgrading: e.upgrading,
       od: Object.entries(od).sort((a, b) => b[1] - a[1]).slice(0, 8), pairs,
       noise: (() => {
         const m = e.sndMean;
         if (!m) return null;
         const power = m[0] + m[1] + m[2];
-        const bins = Math.max(1, e.len / 55);
-        return { light: m[0], moto: m[1], heavy: m[2], power, index: Math.min(1, Math.log1p((power / bins) * 0.93) * 0.37), speed: m[4] > 0.02 ? m[3] / m[4] : 0, samples: m[4] };
+        return { light: m[0], moto: m[1], heavy: m[2], power, index: edgeNoiseIndex(e), speed: m[4] > 0.02 ? m[3] / m[4] : 0, samples: m[4] };
       })(),
       mid: (() => { const p = e.pts, k = Math.floor(p.length / 6) * 3; return { x: p[k], y: p[k + 1], z: p[k + 2], hx: p[Math.min(p.length - 3, k + 3)] - p[k], hz: p[Math.min(p.length - 1, k + 5)] - p[k + 2] }; })(),
       gate: w.rail2?.gateInfo(e.id) ?? null,

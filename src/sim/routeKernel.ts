@@ -43,7 +43,8 @@ export function runTreeJob(job: { graph: RouteGraph; dests: number[] }): Int32Ar
 export interface RouteBackend {
   submit(graph: RouteGraph, dests: number[]): number;
   ready(ticket: number): boolean;
-  take(ticket: number): Int32Array[];
+  /** results, or null when the job failed (the caller recomputes inline: same kernel, same answer) */
+  take(ticket: number): Int32Array[] | null;
   readonly threads: number;
 }
 
@@ -53,7 +54,7 @@ export class InlineBackend implements RouteBackend {
   private done = new Map<number, Int32Array[]>();
   submit(graph: RouteGraph, dests: number[]) { const id = ++this.seq; this.done.set(id, runTreeJob({ graph, dests })); return id; }
   ready() { return true; }
-  take(ticket: number) { const r = this.done.get(ticket)!; this.done.delete(ticket); return r; }
+  take(ticket: number) { const r = this.done.get(ticket) ?? null; this.done.delete(ticket); return r; }
 }
 
 /** Pool of routing workers; a job is split across all of them and reassembled in order. */
@@ -61,16 +62,25 @@ export class WorkerBackend implements RouteBackend {
   private seq = 0;
   private parts = new Map<number, { left: number; out: Int32Array[][] }>();
   private done = new Map<number, Int32Array[]>();
+  private failed = new Set<number>();
+  /** jobs that failed on a worker (error, bad message, crashed thread) */
+  failures = 0;
   constructor(private workers: Worker[]) {
     workers.forEach((w, wi) => {
-      w.onmessage = (ev: MessageEvent<{ id: number; nexts: Int32Array[] }>) => {
+      w.onmessage = (ev: MessageEvent<{ id: number; nexts?: Int32Array[]; error?: string }>) => {
         const p = this.parts.get(ev.data.id);
         if (!p) return;
+        if (!ev.data.nexts || ev.data.error) { this.fail(ev.data.id); return; }
         p.out[wi] = ev.data.nexts;
         if (--p.left === 0) { this.parts.delete(ev.data.id); this.done.set(ev.data.id, p.out.flat()); }
       };
+      // a thread that dies takes its share of every open job with it: fail them all, the sim recomputes inline
+      const dead = () => { for (const id of [...this.parts.keys()]) this.fail(id); };
+      w.onerror = dead;
+      w.onmessageerror = dead;
     });
   }
+  private fail(id: number) { this.parts.delete(id); this.failed.add(id); this.failures++; }
   get threads() { return this.workers.length; }
   submit(graph: RouteGraph, dests: number[]) {
     const id = ++this.seq;
@@ -85,6 +95,9 @@ export class WorkerBackend implements RouteBackend {
     }
     return id;
   }
-  ready(ticket: number) { return this.done.has(ticket); }
-  take(ticket: number) { const r = this.done.get(ticket)!; this.done.delete(ticket); return r; }
+  ready(ticket: number) { return this.done.has(ticket) || this.failed.has(ticket); }
+  take(ticket: number) {
+    if (this.failed.delete(ticket)) return null;
+    const r = this.done.get(ticket) ?? null; this.done.delete(ticket); return r;
+  }
 }

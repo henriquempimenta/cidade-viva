@@ -419,11 +419,15 @@ export class Citizens {
       if (w.traffic.capacityLeft > 60 && w.lodAllowsVehicle(from.x, from.z)) {
         const slot = w.traffic.spawn(vt, plan.path, plan.startS, plan.destS, { kind: P_CITIZEN, id: i, aux: 0 }, from.id, to.id);
         if (slot >= 0) { this.state[i] = ST_CAR; this.slot[i] = slot; return; }
+        // no room to pull out onto the street: a short trip changes mode to walking instead of teleporting
+        if (len < 1500) { mode = 0; this.modeCount[2]--; this.modeCount[0]++; this.tripMode[i] = 0; }
       }
+      if (mode === 2) {
       // virtual car trip still loads the network
-      for (const de of plan.path) { const e = w.roads.edges[de >> 1]; e.count[de & 1]++; w.roads.logOD(e, from.id, to.id); }
+      for (const de of plan.path) w.roads.loadVirtual(de, from.id, to.id, vt === VType.Moto ? 1 : 0);
       this.virtualArrive(i, plan.time + 30);
       return;
+      }
     }
     const speed = mode === 1 ? r.range(4, 5.5) : r.range(1.2, 1.5) * (this.age[i] > 70 ? 0.75 : 1);
     if (w.peds.capacityLeft > 30) {

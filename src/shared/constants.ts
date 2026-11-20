@@ -35,7 +35,13 @@ export const PED_FLAG_TOURIST = 1, PED_FLAG_UMBRELLA = 2, PED_FLAG_LUGGAGE = 4, 
 export enum RoadClass { Dirt = 0, Local = 1, Collector = 2, Avenue = 3, Highway = 4 }
 export const ROAD_NAMES = ['Estrada de terra', 'Rua local', 'Rua coletora', 'Avenida', 'Via expressa'];
 export const ROAD_HALF_WIDTH = [3.2, 4, 5.5, 9, 10]; // half carriageway incl. median
-export const ROAD_SPEED = [8, 11, 13, 16, 25]; // m/s
+/** posted speed limit per class (km/h) and the same in m/s */
+export const ROAD_LIMIT_KMH = [30, 40, 50, 60, 90];
+export const ROAD_SPEED = ROAD_LIMIT_KMH.map((k) => k / 3.6); // m/s
+/** top speed each kind of vehicle may drive at regardless of the posted limit (m/s) */
+export const MODE_CAP: Partial<Record<number, number>> = { [VType.Truck]: 80 / 3.6, [VType.Garbage]: 60 / 3.6, [VType.Construction]: 60 / 3.6, [VType.Bus]: 70 / 3.6, [VType.SchoolBus]: 60 / 3.6, [VType.TourBus]: 80 / 3.6 };
+/** with siren: emergency vehicles may exceed the posted limit by this much (m/s), up to EMERGENCY_CAP */
+export const EMERGENCY_EXCESS = 20 / 3.6, EMERGENCY_CAP = 100 / 3.6;
 export const ROAD_LANES = [1, 1, 1, 2, 2]; // lanes per direction
 export const LANE_WIDTH = 3.2;
 export const LOT_SETBACK = 11; // lots start this far from centerline => avenues can widen in place

@@ -21,6 +21,7 @@ interface CitizenInfo {
 interface EdgeInfo {
   id: number; name: string; cls: string; lanes: number; oneway: number; len: number; volume: number[]; capacity: number; vc: number; history: number[];
   congestedDays: number; busLane: boolean; upgrading: boolean; od: [string, number][]; pairs: { ox: number; oz: number; dx: number; dz: number }[];
+  limit?: number;
   noise: null | { light: number; moto: number; heavy: number; power: number; index: number; speed: number; samples: number };
   mid: { x: number; y: number; z: number; hx: number; hz: number };
   gate: null | { wait: number; hot: number; separated: boolean };
@@ -196,6 +197,7 @@ export class Inspector {
         html += `<div class="term"><span>${l}</span><div class="tb"><i style="left:0;width:${f * 100}%;background:#7c9db8"></i></div><span class="v">${Math.round(f * 100)}%</span></div>`;
       }
       html += `<div class="kv"><span>Velocidade média observada</span><span>${(n.speed * 3.6).toFixed(0)} km/h</span></div>`;
+      if (d.limit) html += `<div class="kv"><span>Limite sinalizado</span><span>${Math.round(d.limit * 3.6)} km/h${d.upgrading ? ' (obra)' : ''}</span></div>`;
       html += `<button class="button listen">${icon('speaker', 15)} Ouvir este trecho</button>`;
     } else html += `<h4>Ruído do tráfego</h4><p class="empty">Sem amostras de ruído veicular na última hora.</p>`;
     if (d.upgrade) {

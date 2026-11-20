@@ -1,7 +1,7 @@
 import { HOUR_SECONDS, LOT_SETBACK, ROAD_HALF_WIDTH, ROAD_LANES, ROAD_SPEED, RoadClass } from '../shared/constants';
 import type { EdgeView, NodeView } from '../shared/protocol';
 import { MinHeap } from './heap';
-import { dijkstraTree, InlineBackend, type RouteBackend, type RouteGraph } from './routeKernel';
+import { dijkstraTree, InlineBackend, runTreeJob, type RouteBackend, type RouteGraph } from './routeKernel';
 import type { Terrain } from './terrain';
 import { OCC_ROAD, type Occupancy } from './occupancy';
 import type { RNG } from '../shared/rng';
@@ -71,6 +71,17 @@ export function vehicleSound(cls: number, speed: number, accel: number, dirt: bo
   const rolling = Math.pow(speed / 13, 1.35) * (dirt ? 1.28 : 1);
   const engine = 0.22 + Math.max(0, accel) * 0.23 + Math.max(0, -accel - 0.45) * 0.055;
   return w * (engine + rolling);
+}
+
+/** acoustic power per 55 m of street, from the measured hourly means (the one number map, inspector and city all use) */
+export function edgeNoisePower(e: { len: number; sndMean?: Float32Array }): number {
+  const m = e.sndMean;
+  if (!m) return 0;
+  return (m[0] + m[1] + m[2]) / Math.max(1, e.len / 55);
+}
+/** 0..1 street noise index shown to the observer (log scale of the same power) */
+export function edgeNoiseIndex(e: { len: number; sndMean?: Float32Array }): number {
+  return Math.min(1, Math.log1p(edgeNoisePower(e) * 0.93) * 0.37);
 }
 
 export interface SegmentPlan {
@@ -285,6 +296,10 @@ export class RoadNetwork {
     this.dirtyNodes.add(n.id);
   }
 
+  /** true if a road corridor (axis ± halfW, trimmed at junction ends) overlaps a building footprint */
+  footprintCheck: ((ax: number, az: number, bx: number, bz: number, halfW: number, trimA: number, trimB: number) => boolean) | null = null;
+  /** observers of an edge split (traffic moves its vehicles onto the two halves) */
+  onSplit: ((old: REdge, e1: REdge, e2: REdge, t: number) => void) | null = null;
   /** split edge at parameter t, returns new node */
   splitEdge(eid: number, t: number): RNode {
     const e = this.edges[eid];
@@ -298,6 +313,7 @@ export class RoadNetwork {
     e1.busLane = e2.busLane = busLane;
     e1.volume = [...e.volume] as [number, number]; e2.volume = [...e.volume] as [number, number];
     e1.vcHistory = [...e.vcHistory]; e2.vcHistory = [...e.vcHistory];
+    this.onSplit?.(e, e1, e2, t);
     return n;
   }
 
@@ -448,8 +464,12 @@ export class RoadNetwork {
     // 5. the railway is a barrier: few, square, well-spaced crossings
     if (this.railCheck) { const why = this.railCheck(ax, az, bx, bz, cls); if (why) return fail(plan, why); }
     // 6. corridor free of buildings
-    const fr = this.occ.segFree(ax, az, bx, bz, ROAD_HALF_WIDTH[cls] + 1.5, 10);
+    // junction ends skip the area already paved by the street they join; a free dead end is checked to its tip
+    const joinsB = plan.toNode >= 0 || !!plan.split;
+    const fr = this.occ.segFree(ax, az, bx, bz, ROAD_HALF_WIDTH[cls] + 1.5, from ? 8 : 0, joinsB ? 8 : 0);
     if (!fr.ok) return fail(plan, 'edificações no caminho');
+    // continuous geometric check against the real footprints (the raster only samples cell centres)
+    if (this.footprintCheck) { const hit = this.footprintCheck(ax, az, bx, bz, ROAD_HALF_WIDTH[cls] + 0.5, from ? 6 : 0, joinsB ? 6 : 0); if (hit) return fail(plan, 'edificações no caminho'); }
     plan.ok = true;
     plan.cost = len * (cls + 1) * 0.12 + water * 8 + grade * len * 2;
     return plan;
@@ -470,15 +490,33 @@ export class RoadNetwork {
     const f = cls === RoadClass.Highway ? 1.6 : cls === RoadClass.Avenue ? 1.25 : cls === RoadClass.Dirt ? 0.6 : 1;
     return e.lanes * CAP_PER_LANE_HOUR * f * (e.busLane ? 0.8 : 1) * (e.oneway ? 1.3 : 1);
   }
-  freeSpeed(e: REdge): number {
-    return ROAD_SPEED[e.cls] * (e.upgrading ? 0.6 : 1) * (e.deck !== undefined ? 1.15 : 1);
+  /** posted limit (m/s): the class limit, reduced in work zones */
+  speedLimit(e: REdge): number {
+    return ROAD_SPEED[e.cls] * (e.upgrading ? 0.6 : 1);
   }
+  /** free-flow speed used for travel times: drivers keep to the limit (grade separation pays off by removing junctions, not by speeding) */
+  freeSpeed(e: REdge): number { return this.speedLimit(e); }
   travelTime(e: REdge, dir: number): number {
     const t0 = e.len / this.freeSpeed(e);
     const vc = e.volume[dir] / this.capacity(e);
     return t0 * (1 + 0.15 * Math.pow(vc, 4)) + e.stopped[dir] * 1.5 + (this.nodes[dir === 0 ? e.b : e.a].delay || 0) * 0.5;
   }
   usable(e: REdge) { return e.alive && e.progress >= 1; }
+  /**
+   * a trip that is accounted for but not animated (virtual) loads the street exactly like a physical one would:
+   * a count, an OD record and the sound of crossing it at the current travel time (so what is drawn never changes what is measured)
+   */
+  loadVirtual(de: number, origin: number, dest: number, sc = 0) {
+    const e = this.edges[de >> 1];
+    if (!e?.alive) return;
+    e.count[de & 1]++;
+    this.logOD(e, origin, dest);
+    const v = Math.max(1, e.len / Math.max(0.5, this.travelTime(e, de & 1)));
+    const steps = e.len / v / 0.5;
+    const snd = e.snd ?? (e.snd = new Float32Array(5));
+    snd[sc] += vehicleSound(sc, v, 0.15, e.cls === RoadClass.Dirt) * steps;
+    snd[3] += v * steps; snd[4] += steps;
+  }
 
   /** hourly rollover of counters */
   hourTick() {
@@ -520,7 +558,13 @@ export class RoadNetwork {
   private rollIdx = 0;
   private stepNo = 0;
   private graph: RouteGraph | null = null;
-  private pending: { ticket: number; dests: number[]; due: number; ver: number; t: number } | null = null;
+  /** the batch in flight remembers the backend that issued it (swapping backends never loses it) and its graph */
+  private pending: { ticket: number; backend: RouteBackend; graph: RouteGraph; dests: number[]; due: number; ver: number; t: number; waitSince: number; fallback: boolean } | null = null;
+  /** batches recomputed inline because the worker failed or took longer than ROUTE_TIMEOUT_MS */
+  routeFallbacks = 0;
+  static ROUTE_TIMEOUT_MS = 2000;
+  /** wall clock used only for the timeout (results do not depend on it) */
+  static now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
   static readonly EPOCH = 8; // steps between batched refreshes
   static readonly BATCH = 64;
 
@@ -555,7 +599,12 @@ export class RoadNetwork {
   /** true when the next step can run (its scheduled routing results have arrived) */
   routingReady(): boolean {
     const p = this.pending;
-    return !p || this.stepNo + 1 < p.due || this.backend.ready(p.ticket);
+    if (!p || p.fallback || this.stepNo + 1 < p.due) return true;
+    if (p.backend.ready(p.ticket)) return true;
+    const now = RoadNetwork.now();
+    if (p.waitSince < 0) p.waitSince = now;
+    else if (now - p.waitSince > RoadNetwork.ROUTE_TIMEOUT_MS) p.fallback = true; // stuck worker: compute here
+    return p.fallback;
   }
 
   stepRouting() {
@@ -564,7 +613,9 @@ export class RoadNetwork {
     const p = this.pending;
     if (p && this.stepNo >= p.due) {
       // install at a fixed step → identical results whatever thread computed them
-      const nexts = this.backend.take(p.ticket);
+      // a failed or late job is recomputed with the same kernel and graph: identical trees, the clock never hangs
+      let nexts = p.backend.ready(p.ticket) ? p.backend.take(p.ticket) : null;
+      if (!nexts) { nexts = runTreeJob({ graph: p.graph, dests: p.dests }); this.routeFallbacks++; }
       p.dests.forEach((d, k) => {
         const old = this.trees.get(d);
         this.trees.set(d, { dist: new Float32Array(0), next: nexts[k], ver: p.ver, built: p.t, lastUse: old ? old.lastUse : p.t });
@@ -583,7 +634,7 @@ export class RoadNetwork {
     }
     if (!dests.length) return;
     const g = this.routeGraph();
-    this.pending = { ticket: this.backend.submit(g, dests), dests, due: this.stepNo + RoadNetwork.EPOCH, ver: g.ver, t: this.time };
+    this.pending = { ticket: this.backend.submit(g, dests), backend: this.backend, graph: g, dests, due: this.stepNo + RoadNetwork.EPOCH, ver: g.ver, t: this.time, waitSince: -1, fallback: false };
   }
   tree(dest: number, force = false): Tree | null {
     let t = this.trees.get(dest);
@@ -629,7 +680,8 @@ export class RoadNetwork {
         const e = this.edges[de >> 1];
         if (!e.alive || e.progress < 1) { ok = false; break; }
         const tail = (de & 1) === 0 ? e.a : e.b;
-        if (tail !== u) { ok = false; break; }
+        // cached trees can predate a direction change: every hop is checked against the current topology
+        if (tail !== u || ((de & 1) === 1 && e.oneway)) { ok = false; this.graph = null; break; } // stale snapshot: rebuild it too
         out.push(de);
         u = (de & 1) === 0 ? e.b : e.a;
       }
@@ -637,6 +689,26 @@ export class RoadNetwork {
     }
     return null;
   }
+  /** is this directed edge usable right now (alive, open, right way)? */
+  legal(de: number): boolean {
+    const e = this.edges[de >> 1];
+    return !!e && e.alive && e.progress >= 1 && !((de & 1) === 1 && e.oneway);
+  }
+  /** a path is valid when every hop is legal and consecutive hops share their node */
+  validPath(path: number[], from = 0): boolean {
+    let prev = -1;
+    for (let k = from; k < path.length; k++) {
+      const de = path[k];
+      if (!this.legal(de)) return false;
+      const e = this.edges[de >> 1];
+      const tail = (de & 1) === 0 ? e.a : e.b;
+      if (prev >= 0 && tail !== prev) return false;
+      prev = (de & 1) === 0 ? e.b : e.a;
+    }
+    return true;
+  }
+  /** drop every cached tree (direction changes make them unsafe even if they still look connected) */
+  invalidateRoutes() { this.trees.clear(); this.graph = null; this.topoVer++; }
   pathTime(path: number[]): number {
     let t = 0;
     for (const de of path) t += this.travelTime(this.edges[de >> 1], de & 1);

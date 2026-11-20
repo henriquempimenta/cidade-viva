@@ -40,7 +40,8 @@ export class Tourism {
     this.attractiveness = clamp((avgTop * 0.45 + landmarks * 0.05 + heritage * 0.015 + water + (w.festivalDays > 0 ? 0.1 : 0)) * safety * clean * voc, 0, 2);
     if (!this.started && this.attractiveness > this.threshold) {
       this.started = true;
-      w.events.emit('tourists', w.center.x, w.center.z, 1, `A cidade entra no mapa do turismo (atratividade ${this.attractiveness.toFixed(2)} > ${this.threshold})`, { headline: 'Chegam os primeiros turistas: cidade entra no roteiro regional', visual: 0.9 });
+      // demand exists now; the "first tourists" headline waits for the first guest actually checking in
+      w.events.emit('tourists', w.center.x, w.center.z, 0.6, `A cidade entra no radar do turismo (atratividade ${this.attractiveness.toFixed(2)} > ${this.threshold}); faltam ${rooms0(w) ? 'só visitantes' : 'hotéis para recebê-los'}`, { visual: 0.5 });
     }
     // overtourism: shops near hotspots turn into tourist shops
     let rooms = 0;
@@ -73,6 +74,7 @@ export class Tourism {
     void placed;
   }
 
+  private firstGuest = false;
   private arrive(hotel: Building): boolean {
     const w = this.w, C = w.citizens;
     const size = w.rng.int(1, 3);
@@ -90,6 +92,10 @@ export class Tourism {
     }
     this.stays.set(h.id, { hh: h.id, until: w.day + w.rng.int(2, 4), visited: new Set() });
     this.count += h.members.length;
+    if (!this.firstGuest && h.members.length) {
+      this.firstGuest = true;
+      w.events.emit('tourists', hotel.x, hotel.z, 1, `Primeiros hóspedes no ${hotel.name}: ${h.members.length} turista(s) fazem check-in`, { headline: 'Chegam os primeiros turistas: cidade entra no roteiro regional', entity: { kind: 'building', id: hotel.id }, ref: hotel.id, visual: 0.9 });
+    }
     // arrival: by tour bus / car from the highway, or by train at the station
     const station = w.buildings.list.find((b) => b.kind === 'railStation' && b.state === 'done');
     const entry = w.entryNode();
@@ -151,4 +157,10 @@ export class Tourism {
     for (const m of [...h.members]) C.remove(m);
     if (C.households.has(hid)) C.removeHousehold(h);
   }
+}
+
+function rooms0(w: World): number {
+  let r = 0;
+  for (const b of w.buildings.list) if ((b.kind === 'hotel' || b.kind === 'hostel') && b.state === 'done') r += b.hhCap;
+  return r;
 }

@@ -201,7 +201,8 @@ export class CityHall {
     // ---- police: react to rising crime ----
     const crimeGap = this.crimeGap();
     const trend = w.services.crimeTrend();
-    if (crimeGap > 3 || (trend > 2 && w.day - this.lastCrimeReaction > 4)) {
+    // one answer per hotspot: wait for the station already under construction (and its coverage) before deciding again
+    if (!this.building(['police']) && w.day - this.lastCrimeReaction > 1 && (crimeGap > 3 || (trend > 2 && w.day - this.lastCrimeReaction > 4))) {
       const hot = this.crimeHotspot();
       add('police', crimeGap * 2 + Math.max(0, trend) * 4 + 6, `Criminalidade em alta${hot ? ` em ${w.districtName(hot.x, hot.z)}` : ''} (ocorrências/dia: ${w.services.crimeHistory.slice(-3).join(', ')})`, { gapField: 'cov_police', radius: 800, near: hot ? { x: hot.x, z: hot.z, r: 700 } : undefined });
       if (pop > 4000 && !this.has('prison')) add('prison', 10, 'Sistema prisional saturado');

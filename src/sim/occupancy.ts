@@ -75,12 +75,15 @@ export class Occupancy {
     return { cx: (ax + bx) / 2, cz: (az + bz) / 2, angle: Math.atan2(dz, dx), w: len, d: halfW * 2 };
   }
 
-  segFree(ax: number, az: number, bx: number, bz: number, halfW: number, trim: number): { ok: boolean; water: number; blockedBy: number } {
+  /** corridor check; `trim` skips the junction area at the start, `trimB` at the end (0 for a free dead end) */
+  segFree(ax: number, az: number, bx: number, bz: number, halfW: number, trim: number, trimB = trim): { ok: boolean; water: number; blockedBy: number } {
     const dx = bx - ax, dz = bz - az;
     const len = Math.hypot(dx, dz);
-    if (len <= trim * 2) return { ok: true, water: 0, blockedBy: 0 };
+    if (len <= trim + trimB) return { ok: true, water: 0, blockedBy: 0 };
     const ux = dx / len, uz = dz / len;
-    const r = this.segRect(ax + ux * trim, az + uz * trim, bx - ux * trim, bz - uz * trim, halfW);
+    // a dead end stops at its centre point but the asphalt still extends half a width past it
+    const ext = trimB === 0 ? halfW : 0;
+    const r = this.segRect(ax + ux * trim, az + uz * trim, bx - ux * (trimB - ext), bz - uz * (trimB - ext), halfW);
     let water = 0, blocked = 0;
     this.forRect(r.cx, r.cz, r.angle, r.w, r.d, (k) => {
       if (k < 0) { blocked++; return; }

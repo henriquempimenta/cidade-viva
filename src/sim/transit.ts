@@ -121,7 +121,11 @@ export class Transit {
   }
 
   /** a vehicle of line l is at stop index k: alight & board */
-  serveStop(l: Line, k: number, vkey: number, capacity: number): number {
+  /**
+   * `heading(to)`: does this vehicle travel towards stop `to` from here? Linear lines (rail, metro) only take riders
+   * going their way; loop lines reach every stop, so they leave it undefined.
+   */
+  serveStop(l: Line, k: number, vkey: number, capacity: number, heading?: (to: number) => boolean): number {
     const w = this.w;
     let onboard = l.onboard.get(vkey);
     if (!onboard) l.onboard.set(vkey, (onboard = []));
@@ -153,7 +157,7 @@ export class Transit {
       for (const i of q) {
         const r = this.rides.get(i);
         if (!r || !w.citizens.alive[i]) continue;
-        if (onboard.length >= capacity) { rest.push(i); continue; }
+        if (onboard.length >= capacity || (heading && !heading(r.to))) { rest.push(i); continue; }
         const s = w.citizens.slot[i];
         if (s >= 0 && w.peds.citizen[s] === i) w.peds.despawn(s);
         w.citizens.slot[i] = -1;
@@ -196,9 +200,38 @@ export class Transit {
     for (const i of pass) this.giveUp(i);
   }
 
+  /** after a topology change (one-way conversion, street replaced by a structure): re-route lines through their stops */
+  revalidateLines(): number {
+    const R = this.w.roads;
+    let fixed = 0;
+    for (const l of this.lines) {
+      if ((l.kind !== 'bus' && l.kind !== 'brt') || !l.path.length || R.validPath(l.path)) continue;
+      const e0 = R.edges[l.path[0] >> 1];
+      const start = (l.path[0] & 1) === 0 ? e0.a : e0.b;
+      const seq = [start, ...l.stops.map((s) => s.node).filter((n) => n !== start), start];
+      const path: number[] = [];
+      let ok = true;
+      R.buildBudget = Math.max(R.buildBudget, seq.length + 2);
+      for (let k = 0; k + 1 < seq.length && ok; k++) {
+        const seg = seq[k] === seq[k + 1] ? [] : R.route(seq[k], seq[k + 1], 800);
+        if (!seg) ok = false; else path.push(...seg);
+      }
+      if (!ok || path.length < 2) { l.fleet = 0; continue; } // suspended until the network allows it again
+      l.path = path;
+      l.destS = R.edges[path[path.length - 1] >> 1].len - 1;
+      l.edges = new Set(path.map((d) => d >> 1));
+      l.pts = [];
+      for (const de of path) { const e = R.edges[de >> 1]; const a = R.nodes[(de & 1) === 0 ? e.a : e.b]; l.pts.push(a.x, a.y + 0.5, a.z); }
+      l.headway = this.headway(l);
+      this.dirty.add(l.id);
+      fixed++;
+    }
+    return fixed;
+  }
+
   private spawnBus(l: Line): number {
     const w = this.w;
-    if (w.traffic.capacityLeft < 30) return -1;
+    if (w.traffic.capacityLeft < 30 || !w.roads.validPath(l.path)) return -1;
     const slot = w.traffic.spawn(l.kind === 'brt' ? VType.Bus : VType.Bus, l.path, l.startS, l.destS, { kind: P_BUS, id: l.id, aux: 0 });
     if (slot >= 0) { l.vehicles.add(slot); l.lastSpawn = w.t; }
     return slot;
@@ -309,6 +342,17 @@ export class Transit {
     for (const id of l.edges) { const e = w.roads.edges[id]; if (e.alive && e.lanes >= 2 && !e.busLane && !e.upgrading) { e.upgrading = true; e.upgradeTo = { busLane: true }; e.workP = 0; w.roadWorks.set(e.id, { motive: 'BRT', speed: 0.4, kind: 'upgrade' }); n++; } }
     const s = l.stops[0];
     w.events.emit('line_opened', s.x, s.z, 0.9, `${l.name} ganha faixa exclusiva em ${n} trechos`, { headline: `Linha mais lotada vira BRT com faixa exclusiva`, visual: 0.8 });
+  }
+
+  /** new stop list for a line (a station opened in between): riders and queues follow their stop, matched by position */
+  replaceStops(l: Line, stops: Stop[]) {
+    const map = l.stops.map((o) => { let bi = -1, bd = Infinity; stops.forEach((n, k) => { const d = Math.hypot(n.x - o.x, n.z - o.z); if (d < bd) { bd = d; bi = k; } }); return bi; });
+    for (const r of this.rides.values()) if (r.line === l.id) { r.from = map[r.from] ?? r.from; r.to = map[r.to] ?? r.to; }
+    const wq = new Map<number, number[]>();
+    for (const [k, q] of l.waiting) { const nk = map[k] ?? k; wq.set(nk, [...(wq.get(nk) ?? []), ...q]); }
+    l.waiting = wq;
+    l.stops = stops;
+    this.dirty.add(l.id);
   }
 
   /** register a rail/metro line so citizens can ride it */

@@ -77,6 +77,16 @@ Outra ideia adaptada da v14: lá, a ferrovia é traçada respeitando a cidade. A
 - **Visual.** Painel de borracha na travessia, faixas de retenção, postes com cruz de Santo André e luzes vermelhas alternadas, cancelas que baixam sobre a faixa de quem chega, aterros com taludes, e trilhos nivelados com a rua na travessia. O material rodante tem truques e rodas, vagões-tanque com cintas, hoppers com nervuras, contêineres, e janelas e faróis acesos à noite.
 - **Obra e ruído.** O metrô é construído trecho a trecho ao longo de cerca de 14 dias, e mais devagar quando há corrupção. Só opera depois de pronto, com frota proporcional ao comprimento da linha. O barulho dos trens entra no campo de ruído, proporcional aos trens de carga e passageiros do dia.
 
+## Elevados e túneis emergentes
+
+Nenhuma estrutura é desenhada por decreto: um elevado ou túnel é uma aresta real do grafo viário, que sai da rua antes de um obstáculo e volta depois dele. O roteamento decide sozinho se vale a pena usá-la: o tráfego de passagem sobe, quem vai virar fica embaixo.
+
+- **Quando surge:** num cruzamento que continua travado mesmo depois do semáforo (e do semáforo inteligente), atravessado por um eixo largo e contínuo. Também numa passagem de nível de uma via larga cujas cancelas seguem saturadas: a via passa por cima dos trilhos, e o cruzamento em nível fica para o tráfego local.
+- **Forma:** as rampas têm cerca de 125 m (aproximadamente 6%) e o vão fica a 7,5 m de altura. O elevado acompanha curvas suaves da via e se estende sobre outros cruzamentos travados em sequência, como um "Minhocão" que nasce do congestionamento. Os pilares apoiam no chão real, há guarda-corpos e fachada, e a obra avança vão a vão.
+- **Elevado ou túnel:** corredores valorizados ou densos recusam o elevado e, se o caixa permitir, ganham um túnel (três vezes mais caro). Sob um elevado o terreno perde valor por sombra e ruído, então a degradação ao longo dele também emerge.
+- **Túnel sob o morro:** a cada poucos dias a prefeitura procura bairros separados por um morro de verdade cujas ruas fazem um desvio de mais de 2,2 vezes a distância em linha reta. Se encontra, fura um túnel reto com emboques de concreto.
+- **Regras:** nada se conecta a um tabuleiro ou túnel. Ruas novas passam por baixo do vão ou por cima do túnel, nunca numa rampa. Os trilhos não são elevados onde um viaduto rodoviário já passa por cima, e um elevado não cruza uma ferrovia já elevada.
+
 ## Tempo
 
 Os agentes andam em velocidade real (m/s), mas o calendário é comprimido: 1 dia de jogo dura 2.400 s de movimento, 1 ano tem 12 dias e 4 estações. As velocidades são 1×, 10×, 100× e time‑lapse (400×), além de um modo automático controlado pelo diretor.

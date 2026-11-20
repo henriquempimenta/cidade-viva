@@ -114,7 +114,7 @@ export class RoadGrowth {
     let built = 0;
     const center = w.center;
     const radius = w.cityRadius;
-    const nodes = R.nodes.filter((n) => n.alive && n.edges.length > 0 && n.edges.length < 4 && n.edges.some((id) => R.edges[id].progress >= 1));
+    const nodes = R.nodes.filter((n) => n.alive && !n.deck && n.edges.length > 0 && n.edges.length < 4 && n.edges.some((id) => R.edges[id].progress >= 1));
     if (!nodes.length) return 0;
     const planned = rng.next() < w.params.gridGrowth * (w.era >= 1 ? 1 : 0.5);
     for (let a = 0; a < attempts * 6 && built < attempts; a++) {
@@ -158,7 +158,7 @@ export class RoadGrowth {
   /** close loops at dead ends so the network doesn't become a tree of culs-de-sac */
   closeLoops(attempts: number) {
     const w = this.w, R = w.roads;
-    const dead = R.nodes.filter((n) => n.alive && n.edges.length === 1 && R.edges[n.edges[0]].progress >= 1);
+    const dead = R.nodes.filter((n) => n.alive && !n.deck && n.edges.length === 1 && R.edges[n.edges[0]].progress >= 1);
     for (let i = 0; i < attempts && dead.length; i++) {
       const n = dead[Math.floor(w.rng.next() * dead.length)];
       const own = R.edges[n.edges[0]];

@@ -8,7 +8,7 @@ import { bendLine, junction, type Arm } from './junctions';
 const COL = {
   asphalt: new THREE.Color(0x3d4044), asphaltOld: new THREE.Color(0x4a4c4f), dirt: new THREE.Color(0x9b7f5a), earth: new THREE.Color(0x7d6243),
   walk: new THREE.Color(0xb9b4aa), curb: new THREE.Color(0xd2cdc2), white: new THREE.Color(0xf2f2ee), yellow: new THREE.Color(0xf2c230),
-  median: new THREE.Color(0x6f9e4c), bus: new THREE.Color(0x9c3b34), concrete: new THREE.Color(0xb8b3aa), rail: new THREE.Color(0x777777),
+  median: new THREE.Color(0x6f9e4c), bus: new THREE.Color(0x9c3b34), concrete: new THREE.Color(0xb8b3aa), tunnel: new THREE.Color(0x1d1f22), rail: new THREE.Color(0x777777),
 };
 
 export function edgeHalfWidth(e: { cls: number; lanes: number; oneway: number }): number {
@@ -51,6 +51,19 @@ function ribbon(g: GB, pl: PL, s0: number, s1: number, o0: number, o1: number, d
     prev = cur;
   }
 }
+/** vertical wall along a polyline at lateral offset o, from dy0 to dy1 above it (double-sided material) */
+function wall(g: GB, pl: PL, s0: number, s1: number, o: number, dy0: number, dy1: number, c: THREE.Color, step = 8) {
+  if (s1 - s0 < 0.2) return;
+  const n = Math.max(1, Math.ceil((s1 - s0) / step));
+  let prev = at(pl, s0);
+  for (let i = 1; i <= n; i++) {
+    const cur = at(pl, s0 + ((s1 - s0) * i) / n);
+    const P = (q: [number, number, number, number, number], dy: number) => [q[0] - q[4] * o, q[1] + dy, q[2] + q[3] * o];
+    const nx = -cur[4] * Math.sign(o || 1), nz = cur[3] * Math.sign(o || 1);
+    g.quad([P(prev, dy0), P(cur, dy0), P(cur, dy1), P(prev, dy1)], [nx, 0, nz], c);
+    prev = cur;
+  }
+}
 function dashes(g: GB, pl: PL, s0: number, s1: number, off: number, w: number, dash: number, gap: number, dy: number, c: THREE.Color) {
   for (let s = s0; s + dash <= s1; s += dash + gap) ribbon(g, pl, s, s + dash, off - w / 2, off + w / 2, dy, c, dash);
 }
@@ -86,7 +99,7 @@ export class RoadsLayer {
         .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.25, uRain);')
         .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.9,0.92,0.95), uSnow*0.35);');
     };
-    this.bridgeMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 });
+    this.bridgeMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8, side: THREE.DoubleSide });
     const poleG = new THREE.CylinderGeometry(0.1, 0.14, 7, 5).translate(0, 3.5, 0);
     const armG = new THREE.BoxGeometry(1.8, 0.12, 0.12).translate(0.9, 7, 0);
     const pg = mergeSimple([poleG, armG]);
@@ -121,7 +134,7 @@ export class RoadsLayer {
   private nodeRCache = new Map<number, number>();
   private nodeR(id: number) {
     const n = this.nodes.get(id);
-    if (!n || n.deg <= 2) return 0;
+    if (!n || this.rdeg(n) <= 2) return 0;
     let r = this.nodeRCache.get(id);
     if (r === undefined) {
       r = 3;
@@ -196,7 +209,9 @@ export class RoadsLayer {
   private rebuild() {
     this.nodeRCache.clear();
     this.edgesByNode.clear();
+    this.deckAt.clear();
     for (const e of this.edges.values()) {
+      if (e.deck !== undefined) { for (const nid of [e.a, e.b]) this.deckAt.set(nid, (this.deckAt.get(nid) ?? 0) + 1); continue; }
       if (e.progress < 1) continue;
       for (const nid of [e.a, e.b]) { let a = this.edgesByNode.get(nid); if (!a) this.edgesByNode.set(nid, (a = [])); a.push(e); }
     }
@@ -223,7 +238,7 @@ export class RoadsLayer {
     };
     const bendR = new Map<number, number>();
     for (const n of this.nodes.values()) {
-      if (n.deg !== 2) continue;
+      if (this.rdeg(n) !== 2) continue;
       const inc = this.edgesAt(n.id);
       if (inc.length !== 2) continue;
       const A = armOf(n.id, inc[0], 0), B = armOf(n.id, inc[1], 0);
@@ -237,14 +252,18 @@ export class RoadsLayer {
     for (const e of this.edges.values()) {
       const pl = plOf(e);
       const len = pl.s[pl.s.length - 1];
-      const ra = trimAt(e.a), rb = trimAt(e.b);
+      if (e.tunnel && e.deck !== undefined) { this.tunnel(g, bg, e, pl, len); continue; }
+      const ra = e.deck !== undefined ? 0 : trimAt(e.a), rb = e.deck !== undefined ? 0 : trimAt(e.b);
       const s0 = Math.min(ra, len / 2), s1 = Math.max(len - rb, len / 2);
       const hw = edgeHalfWidth(e);
       const startV = g.count;
       const done = e.progress >= 1 || e.upgrading;
       const dirt = e.cls === RoadClass.Dirt;
       const surface = dirt ? COL.dirt : COL.asphalt;
-      if (!done) {
+      if (!done && e.deck !== undefined) {
+        // a structure grows span by span: deck slab only, no earthworks in mid-air
+        ribbon(bg, pl, s0, s0 + (s1 - s0) * e.progress, -hw - 0.8, hw + 0.8, 0, COL.concrete);
+      } else if (!done) {
         const sp = s0 + (s1 - s0) * e.progress;
         ribbon(g, pl, s0, sp, -hw, hw, 0.02, surface);
         ribbon(g, pl, sp, s1, -hw - 1, hw + 1, 0, COL.earth);
@@ -321,19 +340,20 @@ export class RoadsLayer {
       // bridge / elevated structure
       if (e.bridge || e.elevated) {
         ribbon(bg, pl, 0, len, -hw - 0.8, hw + 0.8, -1.0, COL.concrete);
-        // parapets
+        // parapets: real walls with a top, plus the deck fascia down to the slab underside
         for (const sd of [-1, 1]) {
           const o = (hw + 0.6) * sd;
           ribbon(bg, pl, 0, len, o - 0.2, o + 0.2, 1.0, COL.concrete);
-          ribbon(bg, pl, 0, len, sd > 0 ? o + 0.2 : o - 0.2, sd > 0 ? o + 0.2 : o - 0.2, 0, COL.concrete);
+          wall(bg, pl, 0, len, o + 0.2 * sd, -1.0, 1.0, COL.concrete);
+          wall(bg, pl, 0, len, o - 0.2 * sd, 0, 1.0, COL.concrete);
         }
-        const nPier = Math.floor(len / 32);
+        const nPier = Math.floor(len / (e.deck !== undefined ? 26 : 32));
         for (let i = 1; i <= nPier; i++) {
           const p = at(pl, (len * i) / (nPier + 1));
           if (!done && i / (nPier + 1) > e.progress + 0.15) continue; // piers appear span by span
-          const base = e.bridge ? -5 : p[1] - 7.2;
+          const base = e.bridge ? -5 : e.deck !== undefined ? Math.max(0, this.ground(p[0], p[2])) : p[1] - 7.2;
           const h = p[1] - 1 - base;
-          if (h < 0.5) continue;
+          if (h < (e.deck !== undefined ? 2.2 : 0.5)) continue;
           q.setFromAxisAngle(up, -Math.atan2(p[4], p[3]));
           m.compose(new THREE.Vector3(p[0], base, p[2]), q, new THREE.Vector3(hw * 1.2, h, 1.2));
           pillars.push(m.clone());
@@ -359,15 +379,16 @@ export class RoadsLayer {
     }
     // intersections
     for (const n of this.nodes.values()) {
-      if (n.deg < 2) {
-        if (n.deg === 1) { // cul-de-sac / end cap
+      const deg = this.rdeg(n);
+      if (deg < 2) {
+        if (deg === 1) { // cul-de-sac / end cap
           g.setTransform(n.x, n.y, n.z, 0);
           disc(g, 0, 0.005, 0, Math.max(3, n.radius * 0.9), 12, COL.asphalt);
           g.setTransform(0, 0, 0, 0);
         }
         continue;
       }
-      if (n.deg === 2) {
+      if (deg === 2) {
         // smooth joint between two segments
         const inc = this.edgesAt(n.id);
         const br = bendR.get(n.id);
@@ -481,6 +502,51 @@ export class RoadsLayer {
   }
 
   private edgesByNode = new Map<number, EdgeView[]>();
+  /**
+   * Tunnels: open stretches are ordinary road; where the road dips below the street (or hillside) a dark
+   * trench between retaining walls; deeper, nothing (underground) — with a concrete portal at the mouth.
+   */
+  private tunnel(g: GB, bg: GB, e: EdgeView, pl: PL, len: number) {
+    const hw = edgeHalfWidth(e);
+    const built = e.progress >= 1 ? len : len * e.progress;
+    const step = 2.5;
+    const depthAt = (s: number) => { const p = at(pl, s); return { p, d: Math.max(0.3, this.ground(p[0], p[2])) + 0.12 - p[1] }; };
+    const wall = COL.concrete, dark = COL.tunnel;
+    let prevD = depthAt(0).d;
+    for (let s = 0; s < built - 0.1; s += step) {
+      const s1 = Math.min(built, s + step);
+      const { p, d } = depthAt((s + s1) / 2);
+      if (d < 0.35) ribbon(g, pl, s, s1, -hw, hw, 0, COL.asphalt, step);
+      else if (d < 6) {
+        // trench: draw at street level so it is not hidden by the road/terrain above it
+        const top = Math.max(0.3, this.ground(p[0], p[2])) + 0.18 - p[1];
+        // the dark cut sits on the real surface at every corner (a tilted strip would sink into slopes)
+        const A = at(pl, s), B = at(pl, s1);
+        const C = (q: [number, number, number, number, number], o: number) => { const x = q[0] - q[4] * o, z = q[2] + q[3] * o; return [x, Math.max(0.3, this.ground(x, z)) + 0.19, z]; };
+        g.quad([C(A, hw), C(B, hw), C(B, -hw), C(A, -hw)], [0, 1, 0], dark);
+        bg.setTransform(p[0], p[1] + top, p[2], Math.atan2(p[4], p[3]));
+        for (const sd of [-1, 1]) bg.box(0, -0.35, sd * (hw + 0.25), s1 - s + 0.7, 1.2, 0.5, wall);
+        bg.setTransform(0, 0, 0, 0);
+      }
+      // portal where the road goes fully underground (either direction)
+      const dNext = depthAt(s1).d;
+      if ((prevD < 6) !== (dNext < 6) && s > 0) {
+        const q = at(pl, s1), ang = Math.atan2(q[4], q[3]);
+        const gy = Math.max(0.3, this.ground(q[0], q[2]));
+        bg.setTransform(q[0], q[1], q[2], ang);
+        bg.box(0, 0, -hw - 1.1, 1.4, Math.max(6, gy - q[1] + 1), 0.9, wall);
+        bg.box(0, 0, hw + 1.1, 1.4, Math.max(6, gy - q[1] + 1), 0.9, wall);
+        bg.box(0, 5.2, 0, 1.4, Math.max(1.2, gy - q[1] - 4.2), hw * 2 + 3, wall);
+        bg.box(dNext >= 6 ? 0.75 : -0.75, 0, 0, 0.1, 5.2, hw * 2 + 1.3, dark);
+        bg.setTransform(0, 0, 0, 0);
+      }
+      prevD = dNext;
+    }
+  }
+
+  /** decks/tunnels leave from the middle of a street: they don't make a node a junction visually */
+  private deckAt = new Map<number, number>();
+  private rdeg(n: NodeView) { return n.deg - (this.deckAt.get(n.id) ?? 0); }
   edgesAt(nid: number): EdgeView[] {
     const out = [...(this.edgesByNode.get(nid) ?? [])];
     out.sort((a, b) => a.id - b.id);

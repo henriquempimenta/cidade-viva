@@ -15,6 +15,8 @@ export interface RNode {
   control: number; // 0 none, 1 priority, 2 signal, 3 roundabout, 4 smart signal
   phase: number; phaseT: number; phases: number[][]; // groups of incoming edge ids
   interchange: boolean;
+  /** a joint of an elevated/tunnel structure: not part of the street network, nothing attaches to it */
+  deck?: boolean;
   inJunction: number; // vehicles currently crossing
   delay: number; // EMA of waiting seconds at node
   waitAcc: number;
@@ -22,12 +24,21 @@ export interface RNode {
   radius: number;
 }
 
+export const DECK_CLEAR = 7.5, DECK_DEPTH = 8;
+
 export interface REdge {
   id: number; a: number; b: number;
   cls: RoadClass;
   lanes: number;
   oneway: number;
   bridge: boolean; tunnel: boolean; elevated: boolean;
+  /**
+   * grade-separated bypass (elevado / túnel): ramp length in metres for a structure that leaves the street,
+   * passes over/under junctions or tracks and comes back; -1 = straight bore through a hill. Undefined = ordinary road.
+   */
+  deck?: number;
+  /** position of this piece along a multi-edge structure and the structure's total length (ramps span pieces) */
+  deckS0?: number; deckTot?: number;
   busLane: boolean;
   len: number;
   progress: number; // 1 = usable
@@ -126,7 +137,7 @@ export class RoadNetwork {
   nodesNear(x: number, z: number, r: number): RNode[] {
     const s = this.query(this.nodeHash, x, z, r, new Set());
     const res: RNode[] = [];
-    for (const id of s) { const n = this.nodes[id]; if (n.alive && Math.hypot(n.x - x, n.z - z) <= r) res.push(n); }
+    for (const id of s) { const n = this.nodes[id]; if (n.alive && !n.deck && Math.hypot(n.x - x, n.z - z) <= r) res.push(n); }
     return res;
   }
   edgesNear(x: number, z: number, r: number): REdge[] {
@@ -148,6 +159,7 @@ export class RoadNetwork {
   nearestEdgePoint(x: number, z: number, r: number, filter?: (e: REdge) => boolean): { edge: REdge; t: number; d: number; px: number; pz: number } | null {
     let best: { edge: REdge; t: number; d: number; px: number; pz: number } | null = null;
     for (const e of this.edgesNear(x, z, r)) {
+      if (e.deck !== undefined) continue; // nothing attaches to a viaduct deck or a tunnel
       if (filter && !filter(e)) continue;
       const a = this.nodes[e.a], b = this.nodes[e.b];
       const p = projSeg(x, z, a.x, a.z, b.x, b.z);
@@ -169,12 +181,12 @@ export class RoadNetwork {
     return n;
   }
 
-  addEdge(a: number, b: number, cls: RoadClass, opts: { progress?: number; bridge?: boolean; name?: string; day?: number; oneway?: number; lanes?: number; elevated?: boolean } = {}): REdge {
+  addEdge(a: number, b: number, cls: RoadClass, opts: { progress?: number; bridge?: boolean; name?: string; day?: number; oneway?: number; lanes?: number; elevated?: boolean; tunnel?: boolean; deck?: number; deckS0?: number; deckTot?: number } = {}): REdge {
     const na = this.nodes[a], nb = this.nodes[b];
     const len = Math.hypot(nb.x - na.x, nb.z - na.z);
     const e: REdge = {
       id: this.edges.length, a, b, cls, lanes: opts.lanes ?? ROAD_LANES[cls], oneway: opts.oneway ?? 0,
-      bridge: !!opts.bridge, tunnel: false, elevated: !!opts.elevated, busLane: false, len,
+      bridge: !!opts.bridge, tunnel: !!opts.tunnel, elevated: !!opts.elevated, deck: opts.deck, deckS0: opts.deckS0, deckTot: opts.deckTot, busLane: false, len,
       progress: opts.progress ?? 0, upgrading: false, workP: 1, name: opts.name ?? this.streetName(cls), pts: [],
       count: [0, 0], volume: [0, 0], peakVC: 0, vcHistory: [], congestedDays: 0, stopped: [0, 0], alive: true,
       builtDay: opts.day ?? 0, odLog: [], odPtr: 0,
@@ -201,6 +213,18 @@ export class RoadNetwork {
   rasterize(e: REdge) {
     const a = this.nodes[e.a], b = this.nodes[e.b];
     const hw = e.cls === RoadClass.Highway ? 14 : LOT_SETBACK - 1;
+    if (e.deck !== undefined) {
+      // a bypass rides over/under an existing street; a hill bore only claims its open approaches
+      if (e.deck >= 0) return;
+      const n = Math.max(1, Math.ceil(e.len / 10));
+      for (let i = 0; i < n; i++) {
+        const p0 = i * 3, p1 = (i + 1) * 3;
+        if (e.pts[p0 + 1] < this.terrain.heightAt(e.pts[p0], e.pts[p0 + 2]) - 1) continue;
+        const r = this.occ.segRect(e.pts[p0], e.pts[p0 + 2], e.pts[p1], e.pts[p1 + 2], hw);
+        this.occ.markRect(r.cx, r.cz, r.angle, r.w + 2, r.d, OCC_ROAD);
+      }
+      return;
+    }
     if (e.bridge) {
       // only mark the land parts
       const r = this.occ.segRect(a.x, a.z, b.x, b.z, hw);
@@ -219,7 +243,9 @@ export class RoadNetwork {
       const t = i / n;
       const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
       let y: number;
-      if (e.bridge || e.elevated) {
+      if (e.deck !== undefined) {
+        y = this.deckY(e, a, b, t, x, z);
+      } else if (e.bridge || e.elevated) {
         const base = a.y + (b.y - a.y) * t;
         const clearance = e.elevated ? 7 : 6.5;
         const ramp = Math.min(1, Math.min(t, 1 - t) * e.len / 40);
@@ -231,6 +257,21 @@ export class RoadNetwork {
       pts.push(x, y, z);
     }
     e.pts = pts;
+  }
+
+  /** height profile of a grade-separated structure */
+  deckY(e: REdge, a: RNode, b: RNode, t: number, x: number, z: number): number {
+    const ground = Math.max(this.terrain.heightAt(x, z), 0.3) + 0.12;
+    if (e.deck! < 0) return Math.max(a.y + (b.y - a.y) * t, 0.3); // straight bore: constant gentle grade
+    const tot = e.deckTot ?? e.len, s = (e.deckS0 ?? 0) + t * e.len, f0 = Math.min(1, Math.max(0, Math.min(s, tot - s)) / e.deck!);
+    const f = f0 * f0 * (3 - 2 * f0);
+    return e.tunnel ? ground - DECK_DEPTH * f + 0.02 * (1 - f) : ground + 0.06 + DECK_CLEAR * f;
+  }
+  /** height of the structure above (+) or below (−) the street at a point of the edge */
+  deckClearance(e: REdge, t: number): number {
+    const a = this.nodes[e.a], b = this.nodes[e.b];
+    const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+    return this.deckY(e, a, b, t, x, z) - (Math.max(this.terrain.heightAt(x, z), 0.3) + 0.12);
   }
 
   updateNodeGeom(n: RNode) {
@@ -307,6 +348,12 @@ export class RoadNetwork {
       if (from && (e.a === fromNode || e.b === fromNode)) continue;
       const na = this.nodes[e.a], nb = this.nodes[e.b];
       const hit = segInt(ax, az, bx, bz, na.x, na.z, nb.x, nb.z);
+      if (hit && e.deck !== undefined) {
+        // a new street may pass under a deck or over a tunnel, never meet it on a ramp
+        const c = this.deckClearance(e, hit.u);
+        if (c > 4.5 || c < -5) continue;
+        return fail(plan, e.tunnel ? 'rampa de túnel' : 'rampa de viaduto');
+      }
       if (hit && hit.t > 0.02 && (!best || hit.t < best.t)) best = { t: hit.t, edge: e, x: hit.x, z: hit.z };
     }
     if (best) {
@@ -385,6 +432,7 @@ export class RoadNetwork {
       const x = ax + (bx - ax) * t, z = az + (bz - az) * t;
       for (const e of this.edgesNear(x, z, 30)) {
         if (from && (e.a === fromNode || e.b === fromNode)) continue;
+        if (e.deck !== undefined) continue;
         if (plan.toNode >= 0 && (e.a === plan.toNode || e.b === plan.toNode)) continue;
         if (plan.split && e.id === plan.split.edge) continue;
         const na = this.nodes[e.a], nb = this.nodes[e.b];
@@ -418,7 +466,7 @@ export class RoadNetwork {
     return e.lanes * CAP_PER_LANE_HOUR * f * (e.busLane ? 0.8 : 1) * (e.oneway ? 1.3 : 1);
   }
   freeSpeed(e: REdge): number {
-    return ROAD_SPEED[e.cls] * (e.upgrading ? 0.6 : 1);
+    return ROAD_SPEED[e.cls] * (e.upgrading ? 0.6 : 1) * (e.deck !== undefined ? 1.15 : 1);
   }
   travelTime(e: REdge, dir: number): number {
     const t0 = e.len / this.freeSpeed(e);
@@ -597,7 +645,7 @@ export class RoadNetwork {
   edgeView(e: REdge): EdgeView {
     return {
       id: e.id, a: e.a, b: e.b, cls: e.cls, lanes: e.lanes, oneway: e.oneway, bridge: e.bridge, tunnel: e.tunnel,
-      elevated: e.elevated, busLane: e.busLane, progress: e.upgrading ? e.workP : e.progress, upgrading: e.upgrading, pts: e.pts, name: e.name,
+      elevated: e.elevated, deck: e.deck, busLane: e.busLane, progress: e.upgrading ? e.workP : e.progress, upgrading: e.upgrading, pts: e.pts, name: e.name,
     };
   }
 }

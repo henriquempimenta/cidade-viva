@@ -38,6 +38,8 @@ export interface EdgeView {
   bridge: boolean;
   tunnel: boolean;
   elevated: boolean;
+  /** grade-separated bypass: ramp length (−1 = hill bore) */
+  deck?: number;
   busLane: boolean;
   progress: number; // construction 0..1 (1 = done)
   upgrading: boolean;

@@ -12,7 +12,7 @@ import { KINDS } from '../shared/catalog';
 
 interface RLine { /** construction progress 0..1 (lines built during the game grow along their length) */ built?: number; id: number; kind: 'main' | 'metro' | 'spur'; x: number[]; y: number[]; z: number[]; cum: number[]; tracks: number; elevated: boolean; len: number; transit?: Line; stations: { s: number; b: number; name: string; stop: number }[] }
 interface Train { id: number; line: number; kind: 'pass' | 'freight' | 'metro'; s: number; dir: number; v: number; vmax: number; cars: number[]; dwell: number; served: Set<number>; gen: number }
-interface Crossing { edge: number; t: number; line: number; s: number; x: number; z: number; y: number; angle: number; separated: boolean; under?: boolean; closed: boolean; /** vehicle-seconds queued at the gates today */ wait: number; /** consecutive saturated days */ hot: number }
+interface Crossing { edge: number; t: number; line: number; s: number; x: number; z: number; y: number; angle: number; separated: boolean; under?: boolean; /** a road deck flies over this crossing: the track may not be lifted here */ bypassed?: boolean; closed: boolean; /** vehicle-seconds queued at the gates today */ wait: number; /** consecutive saturated days */ hot: number }
 
 const CAR_LEN = [17, 20, 17, 15, 16, 19];
 /** length of each ramp when the track is lifted over a road (gentle ~3% grade) */
@@ -72,7 +72,7 @@ export class Rail {
     for (const c of this.crossings) if (c.line === l.id && !c.separated && Math.abs(c.s - s) < CROSS_GAP) return true;
     const R = this.w.roads;
     for (const e of R.edgesNear(x, z, CROSS_GAP + 40)) {
-      if (!e.alive || e.progress >= 1 || e.bridge) continue; // finished ones are in this.crossings
+      if (!e.alive || e.progress >= 1 || e.bridge || e.deck !== undefined) continue; // finished ones are in this.crossings
       const a = R.nodes[e.a], b = R.nodes[e.b];
       for (let i = 0; i < l.x.length - 1; i++) {
         if (Math.abs(l.cum[i] - s) > CROSS_GAP + 25) continue;
@@ -330,12 +330,12 @@ export class Rail {
     const w = this.w, R = w.roads;
     this.crossVer = w.roads.topoVer;
     const old = new Map(this.crossings.map((c) => [`${c.edge}`, c.separated]));
-    const prevByS = this.crossings.map((c) => ({ line: c.line, s: c.s, wait: c.wait, hot: c.hot }));
+    const prevByS = this.crossings.map((c) => ({ line: c.line, s: c.s, wait: c.wait, hot: c.hot, bypassed: c.bypassed }));
     const out: Crossing[] = [];
     for (const l of this.lines) {
       if (l.elevated) continue;
       for (const e of R.edges) {
-        if (!e.alive || e.progress < 1 || e.bridge || e.elevated) continue;
+        if (!e.alive || e.progress < 1 || e.bridge || e.elevated || e.deck !== undefined) continue;
         const a = R.nodes[e.a], b = R.nodes[e.b];
         const minx = Math.min(a.x, b.x) - 5, maxx = Math.max(a.x, b.x) + 5, minz = Math.min(a.z, b.z) - 5, maxz = Math.max(a.z, b.z) + 5;
         for (let i = 0; i < l.x.length - 1; i++) {
@@ -350,7 +350,7 @@ export class Rail {
       }
     }
     for (const c of out) if (this.underpasses.some((u) => u.line === c.line && Math.abs(u.s - c.s) < 15)) { c.separated = true; c.under = true; }
-    for (const c of out) { const p = prevByS.find((q) => q.line === c.line && Math.abs(q.s - c.s) < 12); if (p) { c.wait = p.wait; c.hot = p.hot; } }
+    for (const c of out) { const p = prevByS.find((q) => q.line === c.line && Math.abs(q.s - c.s) < 12); if (p) { c.wait = p.wait; c.hot = p.hot; c.bypassed = p.bypassed; } }
     this.crossings = out;
     // arterials never get gates: their crossing is built grade-separated
     for (const c of out) {
@@ -464,7 +464,7 @@ export class Rail {
     }
     // grade separation of level crossings that stay jammed day after day (not a one-off peak)
     let worst: Crossing | null = null;
-    for (const c of this.crossings) if (!c.separated && c.hot >= 3 && (!worst || c.wait > worst.wait)) worst = c;
+    for (const c of this.crossings) if (!c.separated && !c.bypassed && c.hot >= 3 && (!worst || c.wait > worst.wait)) worst = c;
     if (worst && w.era >= 1) {
       const c = worst, e = w.roads.edges[c.edge], l = this.lines[c.line];
       if (e?.alive) {
@@ -472,7 +472,12 @@ export class Rail {
         const motive = `Cancelas da ${e.name} retêm ~${min} min de veículos por dia há ${c.hot} dias`;
         const benefit = 20 + min * 1.2 + c.hot * 2;
         // lifting the track needs long ramps clear of platforms and yards; otherwise the street dips under it
-        if (!this.canLift(c))
+        // a wide street goes over the tracks itself (the at-grade crossing stays for local traffic)
+        const plan = e.cls >= RoadClass.Collector && !c.bypassed ? w.structures?.planOverRail(e, c.t) : null;
+        if (plan) {
+          const cost = w.structures.cost(plan, 'fly');
+          out.push({ kind: 'road_viaduct', label: 'Viaduto rodoviário sobre a ferrovia', motive, benefit: benefit * 1.3, cost, run: () => { const k = w.structures.build(plan, 'fly', motive); if (k) c.bypassed = true; return !!k; } });
+        } else if (!this.canLift(c))
           out.push({ kind: 'rail_underpass', label: 'Passagem inferior (trincheira)', motive: motive + ' · a estação/pátio impede elevar os trilhos', benefit, cost: 2100, run: () => this.underpass(c) });
         else out.push({ kind: 'rail_viaduct', label: 'Viaduto ferroviário', motive, benefit, cost: 1400, run: () => this.separate(c) });
       }
@@ -514,6 +519,14 @@ export class Rail {
     const near = (s: number) => s > lo - RAIL_RAMP - 20 && s < hi + RAIL_RAMP + 20;
     if (l.stations.some((st) => near(st.s))) return false;
     if (l.kind === 'main' && this.terminal && near(this.terminalS)) return false;
+    if (this.crossings.some((k) => k.bypassed && k.line === c.line && near(k.s))) return false;
+    // a road viaduct above the line here: lifting the track would hit it
+    const R = this.w.roads;
+    for (const e of R.edges) {
+      if (!e.alive || !e.elevated || e.deck === undefined) continue;
+      const a = R.nodes[e.a], b = R.nodes[e.b];
+      for (let i = 0; i < l.x.length - 1; i++) if (near(l.cum[i]) && segInt(a.x, a.z, b.x, b.z, l.x[i], l.z[i], l.x[i + 1], l.z[i + 1])) return false;
+    }
     return lo >= RAIL_RAMP && hi <= l.len - RAIL_RAMP;
   }
 

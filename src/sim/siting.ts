@@ -31,7 +31,7 @@ export interface SiteContext {
 /** Sample candidate lots along usable roads (and optionally off the network). */
 export function sampleSites(ctx: SiteContext, w: number, d: number, n: number, opts: { offRoad?: boolean; nearX?: number; nearZ?: number; nearR?: number; maxSlope?: number; minCls?: number; allowHighway?: boolean; informal?: boolean } = {}): Candidate[] {
   const { roads, occ, terrain: T, rng } = ctx;
-  const edges = roads.edges.filter((e) => e.alive && e.progress >= 1 && !e.bridge && !e.elevated && (opts.allowHighway || e.cls !== RoadClass.Highway) && (opts.minCls === undefined || e.cls >= opts.minCls));
+  const edges = roads.edges.filter((e) => e.alive && e.progress >= 1 && !e.bridge && !e.elevated && e.deck === undefined && (opts.allowHighway || e.cls !== RoadClass.Highway) && (opts.minCls === undefined || e.cls >= opts.minCls));
   const near = opts.nearX !== undefined ? edges.filter((e) => {
     const a = roads.nodes[e.a];
     return Math.hypot(a.x - opts.nearX!, a.z - opts.nearZ!) < (opts.nearR ?? 400);

@@ -28,6 +28,8 @@ export function updateFields(w: World) {
   // --- roads ---
   for (const e of w.roads.edges) {
     if (!e.alive || e.progress < 1) continue;
+    const deckE = e.deck !== undefined;
+    if (deckE && e.tunnel) continue; // underground: no noise, no frontage
     const vol = e.volume[0] + e.volume[1];
     const n = Math.max(1, Math.round(e.len / 15));
     const p = e.pts;
@@ -36,10 +38,10 @@ export function updateFields(w: World) {
       const k = Math.min(p.length / 3 - 1, Math.round(t * (p.length / 3 - 1)));
       const x = p[k * 3], z = p[k * 3 + 2];
       const kk = F.idx(x, z);
-      roadProx[kk] = Math.max(roadProx[kk], e.cls === RoadClass.Highway ? 0.5 : 0.6 + e.cls * 0.1);
+      if (!deckE) roadProx[kk] = Math.max(roadProx[kk], e.cls === RoadClass.Highway ? 0.5 : 0.6 + e.cls * 0.1);
       noiseSrc[kk] += (0.04 + vol * 0.004) * (1 + e.cls * 0.4);
       airSrc[kk] += vol * 0.0006 * (1 - w.params.transitPriority * 0.3);
-      foot[kk] += vol * 0.02 * (e.cls >= RoadClass.Collector ? 1.5 : 1) + (e.cls >= RoadClass.Avenue ? 0.4 : 0);
+      if (!deckE) foot[kk] += vol * 0.02 * (e.cls >= RoadClass.Collector ? 1.5 : 1) + (e.cls >= RoadClass.Avenue ? 0.4 : 0);
     }
   }
   const cong = f.congestion;
@@ -55,6 +57,11 @@ export function updateFields(w: World) {
   }
   // --- rail ---
   if (w.rail) { w.rail.splatAccess(F, rail, transit); w.rail.splatNoise?.(F, noiseSrc); }
+  // shade and noise under elevated decks (the "Minhocão" effect): land along them loses value
+  const shade = buf('shade', N), shadeB = buf('shadeB', N);
+  w.structures?.splatShade(F, shade);
+  for (let k = 0; k < N; k++) noiseSrc[k] += shade[k] * 0.8;
+  F.blur(shade, shadeB, 2);
   if (w.transit) w.transit.splatCoverage(F, transit);
 
   // --- buildings ---
@@ -156,7 +163,8 @@ export function updateFields(w: World) {
       - 0.35 * f.soilPollution[k]
       - 0.3 * f.waterPollution[k]
       - 0.4 * garbage[k]
-      - 0.5 * abB[k];
+      - 0.5 * abB[k]
+      - 0.45 * Math.min(1, shadeB[k]);
     const inf = roadP > 0.05 ? 1 : 0.3;
     f.landValue[k] += (clamp(target, 0, 2) * inf - f.landValue[k]) * 0.25;
     f.complaint[k] = f.resDensity[k] * (0.4 + f.landValue[k]) * (0.6 + 0.4 * neighWealth);

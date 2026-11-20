@@ -36,7 +36,7 @@ export class RoadUpgrades {
     const w = this.w, R = w.roads;
     if (w.day === this.lastDay) return;
     this.lastDay = w.day;
-    const cands = R.edges.filter((e) => e.alive && e.progress >= 1 && !e.upgrading && !e.bridge && e.vcHistory.slice(-4).filter((v) => v > 0.85).length >= 3);
+    const cands = R.edges.filter((e) => e.alive && e.progress >= 1 && !e.upgrading && !e.bridge && e.deck === undefined && e.vcHistory.slice(-4).filter((v) => v > 0.85).length >= 3);
     cands.sort((a, b) => Math.max(...b.volume) / R.capacity(b) - Math.max(...a.volume) / R.capacity(a));
     let done = 0;
     for (const e of cands) {
@@ -49,15 +49,16 @@ export class RoadUpgrades {
     }
     // intersections with long delays even without congested links
     for (const n of R.nodes) {
-      if (!n.alive || n.edges.length < 3 || n.delay < 25 || n.control >= 2 && n.control !== 2) continue;
+      // roundabouts are left alone; signals (plain or smart) that stay jammed escalate to a grade separation
+      if (!n.alive || n.deck || n.edges.length < 3 || n.delay < 25 || n.control === 3 || w.structures.flown.has(n.id)) continue;
       const opt = this.junctionOptions(n);
       const best = opt.filter((o) => o.feasible).sort((a, b) => b.ratio - a.ratio)[0];
-      if (best && best.ratio > 0.4 && w.budget.money > best.cost) {
+      if (best && best.ratio > (best.cost > 1000 ? 0.08 : 0.4) && w.budget.money > best.cost) {
         best.apply!();
         w.budget.money -= best.cost;
         const dec: UpgradeDecision = { day: w.day, chosen: best.label, options: opt.map(strip), edge: n.edges[0] };
         for (const id of n.edges) this.decisions.set(id, dec);
-        w.events.emit('road_upgrade', n.x, n.z, 0.55, `${best.label} no cruzamento (espera média ${n.delay.toFixed(0)} s)`, { ref: n.id, headline: w.rng.chance(0.4) ? `Cruzamento congestionado ganha ${best.label.toLowerCase()}` : undefined, visual: 0.6 });
+        if (!/^(Elevado|Túnel)/.test(best.label)) w.events.emit('road_upgrade', n.x, n.z, 0.55, `${best.label} no cruzamento (espera média ${n.delay.toFixed(0)} s)`, { ref: n.id, headline: w.rng.chance(0.4) ? `Cruzamento congestionado ganha ${best.label.toLowerCase()}` : undefined, visual: 0.6 });
         break;
       }
     }
@@ -141,11 +142,35 @@ export class RoadUpgrades {
     if (n.control < 2) out.push({ label: 'Semáforo', benefit: delayMin * 0.5, cost: 60, ratio: (delayMin * 0.5) / 60, feasible: true, note: `espera média ${n.delay.toFixed(0)} s`, apply: () => this.setControl(n, 2) });
     if (n.control !== 3 && clsMax <= RoadClass.Collector && n.edges.length <= 4) out.push({ label: 'Rotatória', benefit: delayMin * 0.6, cost: 220, ratio: (delayMin * 0.6) / 220, feasible: this.roundaboutSpace(n), note: 'fluxo contínuo em vias locais', apply: () => this.setControl(n, 3) });
     if (n.control === 2 && w.era >= 2) out.push({ label: 'Semáforo inteligente', benefit: delayMin * 0.35, cost: 150, ratio: (delayMin * 0.35) / 150, feasible: true, note: 'tempos adaptados às filas', apply: () => this.setControl(n, 4) });
-    if (!n.interchange && clsMax >= RoadClass.Avenue && clsMin >= RoadClass.Local && w.era >= 1) {
-      const b = delayMin * 0.9;
-      out.push({ label: 'Viaduto (passagem em desnível)', benefit: b, cost: 1400, ratio: b / 1400, feasible: w.budget.money > 2500, note: 'a via principal passa sem parar', apply: () => this.interchange(n) });
+    // grade separation: only where a straight wide axis crosses the junction and only after signals failed
+    if ((n.control === 2 || n.control === 4) && w.era >= 1 && clsMax >= RoadClass.Collector) {
+      const axis = this.axis(n);
+      const plan = axis && w.structures.planJunction(n, axis[0], axis[1]);
+      if (axis && plan) {
+        // the main flow stops queueing and the signal is left to the cross street: most of the delay goes
+        const b = delayMin * 0.85;
+        const kind = w.structures.prefers(plan), cost = w.structures.cost(plan, kind);
+        const label = kind === 'fly' ? 'Elevado sobre o cruzamento' : 'Túnel sob o cruzamento';
+        out.push({ label, benefit: b, cost, ratio: b / cost, feasible: w.budget.money > cost * 1.2, note: kind === 'fly' ? `o fluxo da ${axis[0].name} passa por cima (${Math.round(plan.len)} m)` : `bairro valorizado recusa elevado: túnel de ${Math.round(plan.len)} m`,
+          apply: () => { w.structures.build(plan, kind, `espera média de ${n.delay.toFixed(0)} s no semáforo`); } });
+      } else if (axis && !plan) out.push({ label: 'Elevado sobre o cruzamento', benefit: 0, cost: 0, ratio: 0, feasible: false, note: w.structures.why || 'sem trecho para as rampas', apply: () => {} });
     }
     return out;
+  }
+
+  /** the straight through-axis of a junction: two opposite arms, the busiest pair of wide roads */
+  private axis(n: RNode): [REdge, REdge] | null {
+    const R = this.w.roads;
+    const inc = n.edges.map((id) => R.edges[id]).filter((e) => e.alive && e.progress >= 1 && e.deck === undefined);
+    let best: [REdge, REdge] | null = null, bv = 0;
+    for (let i = 0; i < inc.length; i++) for (let j = i + 1; j < inc.length; j++) {
+      const a = inc[i], b = inc[j];
+      if (Math.abs(angDiff(R.angleOf(a, n.id), R.angleOf(b, n.id)) - Math.PI) > 0.45) continue;
+      if (Math.min(a.cls, b.cls) < RoadClass.Collector) continue;
+      const v = Math.min(a.volume[0] + a.volume[1], b.volume[0] + b.volume[1]);
+      if (v > bv) { bv = v; best = [a, b]; }
+    }
+    return best;
   }
 
   private roundaboutSpace(n: RNode): boolean {

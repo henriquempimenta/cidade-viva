@@ -28,6 +28,7 @@ import { Services } from './services';
 import { CityHall } from './cityhall';
 import { RoadUpgrades } from './roadUpgrades';
 import { Rail } from './rail';
+import { Structures } from './structures';
 import { Transit } from './transit';
 import { Tourism } from './tourism';
 import { Happenings } from './happenings';
@@ -72,6 +73,7 @@ export class World {
   cityHall!: CityHall;
   integrity!: Integrity;
   upgrades!: RoadUpgrades;
+  structures!: Structures;
   rail2!: Rail;
   trainsSys!: Rail;
   trains!: Rail;
@@ -256,6 +258,7 @@ export class World {
     this.cityHall = new CityHall(this);
     this.integrity = new Integrity(this);
     this.upgrades = new RoadUpgrades(this);
+    this.structures = new Structures(this);
     this.lastUpgrade = this.upgrades.decisions;
     this.buildBypass = () => this.bypass();
     this.transitSys = new Transit(this);
@@ -487,7 +490,7 @@ export class World {
     if (this.era < 1 || this.siteScarcity < 0.4 || this.roadWorks.size > 4 || this.day - this.lastBridgeDay < 5) return null;
     if (this.roads.edges.some((e) => e.bridge && e.progress < 1)) return null;
     const T = this.terrain;
-    const cands = this.roads.nodes.filter((n) => n.alive && n.edges.length > 0 && n.edges.length < 4 && T.distToRiver(n.x, n.z) < 220 && Math.hypot(n.x - this.center.x, n.z - this.center.z) < this.cityRadius + 300);
+    const cands = this.roads.nodes.filter((n) => n.alive && !n.deck && n.edges.length > 0 && n.edges.length < 4 && T.distToRiver(n.x, n.z) < 220 && Math.hypot(n.x - this.center.x, n.z - this.center.z) < this.cityRadius + 300);
     for (let k = 0; k < 25 && cands.length; k++) {
       const n = cands[Math.floor(this.rng.next() * cands.length)];
       const ri = T.riverIndex(n.x, n.z);
@@ -720,6 +723,7 @@ export class World {
 
   onRoadStarted(e: REdge, motive: string) {
     this.roadWorks.set(e.id, { motive, speed: 0.45 + this.rng.next() * 0.2, kind: 'new' });
+    if (e.deck !== undefined && e.deckTot !== undefined) { this.roadWorks.get(e.id)!.speed = 0.55; return; } // structures announce themselves
     const a = this.roads.nodes[e.a], b = this.roads.nodes[e.b];
     this.events.emit('road_start', (a.x + b.x) / 2, (a.z + b.z) / 2, e.bridge ? 0.85 : 0.2, `${e.bridge ? 'Construção de ponte' : 'Abertura de via'}: ${e.name}`, {
       entity: { kind: 'edge', id: e.id }, ref: e.id, visual: e.bridge ? 0.95 : 0.5,
@@ -763,7 +767,7 @@ export class World {
     for (const [id, w] of this.roadWorks) {
       const e = this.roads.edges[id];
       if (!e.alive) { this.roadWorks.delete(id); continue; }
-      const rate = (w.speed * dt) / Math.max(30, e.len) * (e.bridge ? 0.35 : 1) * (w.kind === 'upgrade' ? 0.8 : 1);
+      const rate = (w.speed * dt) / Math.max(30, e.deckTot ?? e.len) * (e.bridge ? 0.35 : e.deck !== undefined ? (e.tunnel ? 0.12 : 0.22) : 1) * (w.kind === 'upgrade' ? 0.8 : 1);
       if (w.kind === 'upgrade') e.workP = Math.min(1, e.workP + rate); else e.progress = Math.min(1, e.progress + rate);
       this.roads.dirtyEdges.add(id);
       if ((w.kind === 'upgrade' ? e.workP : e.progress) >= 1) {
@@ -772,6 +776,8 @@ export class World {
         else {
           this.roads.topoVer++;
           const a = this.roads.nodes[e.a], b = this.roads.nodes[e.b];
+          if (e.deck !== undefined && (e.deckS0 ?? 0) > 0) continue; // a structure is announced once
+          if (e.deck !== undefined) { this.events.emit('road_done', (a.x + b.x) / 2, (a.z + b.z) / 2, 0.9, `Inaugurado o ${e.name}`, { ref: e.id, entity: { kind: 'edge', id: e.id }, headline: `${e.name} é aberto ao tráfego`, visual: 1 }); continue; }
           this.events.emit('road_done', (a.x + b.x) / 2, (a.z + b.z) / 2, e.bridge ? 0.9 : 0.15, `${e.bridge ? 'Ponte inaugurada' : 'Via aberta'}: ${e.name}`, { ref: e.id, entity: { kind: 'edge', id: e.id }, headline: e.bridge ? `Ponte da ${e.name} é inaugurada` : undefined, visual: e.bridge ? 1 : 0.4 });
         }
       }
@@ -831,6 +837,7 @@ export class World {
     this.integrity.daily();
     this.rail2.daily();
     if (this.era >= 1) this.upgrades.daily();
+    this.structures.hillTunnel();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
   }
 

@@ -54,6 +54,8 @@ export function swayMaterial(): THREE.MeshStandardMaterial {
   return m;
 }
 
+const TREE_CHUNK = 400;
+
 export class TreesView {
   meshes: THREE.InstancedMesh[] = [];
   private map: { mesh: number; idx: number }[] = [];
@@ -61,33 +63,46 @@ export class TreesView {
   constructor(trees: Float32Array) {
     const geos = treeGeometries();
     const mat = swayMaterial();
-    const counts = [0, 0, 0];
     const n = trees.length / 5;
-    for (let i = 0; i < n; i++) counts[trees[i * 5 + 4]]++;
-    this.meshes = geos.map((g, t) => {
-      const m = new THREE.InstancedMesh(g, mat, Math.max(1, counts[t]));
+    // partition trees into spatial chunks (400x400 m) per species so both the main camera
+    // and the directional shadow frustum cull out-of-view trees automatically
+    const buckets = new Map<string, { type: number; ids: number[] }>();
+    for (let i = 0; i < n; i++) {
+      const x = trees[i * 5], z = trees[i * 5 + 2], t = trees[i * 5 + 4];
+      const key = `${t}:${Math.floor(x / TREE_CHUNK)},${Math.floor(z / TREE_CHUNK)}`;
+      let b = buckets.get(key);
+      if (!b) buckets.set(key, (b = { type: t, ids: [] }));
+      b.ids.push(i);
+    }
+    this.map = new Array(n);
+    const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const tint = new THREE.Color();
+    for (const b of buckets.values()) {
+      const m = new THREE.InstancedMesh(geos[b.type], mat, b.ids.length);
       m.castShadow = true;
       m.receiveShadow = true;
-      m.count = 0;
-      return m;
-    });
-    const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
-    const tint = new THREE.Color();
-    for (let i = 0; i < n; i++) {
-      const t = trees[i * 5 + 4];
-      const m = this.meshes[t];
-      const sc = trees[i * 5 + 3];
-      p.set(trees[i * 5], trees[i * 5 + 1] - 0.2, trees[i * 5 + 2]);
-      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (i * 2.399) % 6.28);
-      s.set(sc, sc * (0.85 + ((i * 7) % 10) / 30), sc);
-      mtx.compose(p, q, s);
-      m.setMatrixAt(m.count, mtx);
-      tint.setHSL(0.15 + (((i * 13) % 17) / 17) * 0.15, 0.35, 0.78 + (((i * 5) % 11) / 11) * 0.2);
-      m.setColorAt(m.count, tint);
-      this.map.push({ mesh: t, idx: m.count });
-      m.count++;
+      const meshIdx = this.meshes.length;
+      this.meshes.push(m);
+      for (let k = 0; k < b.ids.length; k++) {
+        const i = b.ids[k];
+        const sc = trees[i * 5 + 3];
+        p.set(trees[i * 5], trees[i * 5 + 1] - 0.2, trees[i * 5 + 2]);
+        q.setFromAxisAngle(up, (i * 2.399) % 6.28);
+        s.set(sc, sc * (0.85 + ((i * 7) % 10) / 30), sc);
+        mtx.compose(p, q, s);
+        m.setMatrixAt(k, mtx);
+        tint.setHSL(0.15 + (((i * 13) % 17) / 17) * 0.15, 0.35, 0.78 + (((i * 5) % 11) / 11) * 0.2);
+        m.setColorAt(k, tint);
+        this.map[i] = { mesh: meshIdx, idx: k };
+      }
+      m.count = b.ids.length;
+      m.instanceMatrix.needsUpdate = true;
+      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      m.computeBoundingBox();
+      m.computeBoundingSphere();
+      this.group.add(m);
     }
-    for (const m of this.meshes) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; this.group.add(m); }
   }
   remove(ids: number[]) {
     const zero = new THREE.Matrix4().makeScale(0, 0, 0);

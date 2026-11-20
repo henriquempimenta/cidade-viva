@@ -135,7 +135,9 @@ export class Director {
   }
 
   private shotInvalid(s: Shot): boolean {
-    if (s.type === 'chase' || s.type === 'shoulder') return this.subjectPos(s) === null && s.t > 1.5;
+    if (s.type === 'chase' || s.type === 'shoulder') {
+      return (s.opts._lost ?? 0) > 0.6;
+    }
     return false;
   }
 
@@ -294,7 +296,13 @@ export class Director {
       case 'travelling': {
         const id = s.ev?.entity?.id ?? -1;
         const pts = this.w.edgePts(id);
-        if (!pts || pts.length < 6) { pos.set(f.x + 60, f.y + 40, f.z + 60); look.copy(f); break; }
+        if (!pts || pts.length < 6) {
+          // smooth fallback orbit so the camera never freezes when an edge is gone or short
+          const a = (s.opts.angle ?? 0) + dir * t * 0.14;
+          pos.set(f.x + Math.cos(a) * 80, f.y + 42, f.z + Math.sin(a) * 80);
+          look.copy(f);
+          break;
+        }
         const n = pts.length / 3;
         const prog = Math.min(1, this.w.edgeProgress(id));
         const k = Math.min(n - 1, Math.floor(prog * (n - 1)));
@@ -302,16 +310,21 @@ export class Director {
         const ax = pts[3] - pts[0], az = pts[5] - pts[2];
         const l = Math.hypot(ax, az) || 1;
         const nx = -az / l, nz = ax / l;
-        const back = 22 - t * 1.2;
+        const back = 22 - t * 1.6;
         pos.set(px + nx * 26 * dir - (ax / l) * back, py + 14, pz + nz * 26 * dir - (az / l) * back);
         look.set(px, py + 1, pz);
         break;
       }
       case 'flyover': {
         const path = this.pathCache[s.opts.path ?? -1];
-        if (!path || path.length < 2) { pos.set(f.x + 100, f.y + 90, f.z); look.copy(f); break; }
+        if (!path || path.length < 2) {
+          const a = (s.opts.angle ?? 0) + dir * t * 0.12;
+          pos.set(f.x + Math.cos(a) * 115, f.y + 85, f.z + Math.sin(a) * 115);
+          look.copy(f);
+          break;
+        }
         const total = path.length - 1;
-        const u = Math.min(total - 0.001, (t / s.dur) * total);
+        const u = Math.min(total - 0.001, (t / Math.max(0.1, s.dur)) * total);
         const i = Math.floor(u), fr = u - i;
         const p = path[i].clone().lerp(path[i + 1], fr);
         let j = i + 1, acc = 0;
@@ -325,16 +338,26 @@ export class Director {
       }
       case 'chase': case 'shoulder': {
         const sp = this.subjectPos(s);
-        if (!sp) { pos.copy(this.pose.pos); look.copy(this.pose.look); break; }
+        if (!sp) {
+          // target vanished: keep gliding smoothly around the last focus until shotInvalid cuts away
+          s.opts._lost = (s.opts._lost ?? 0) + dt;
+          const a = (s.opts.angle ?? 0) + dir * t * 0.22;
+          const R = s.type === 'shoulder' ? 18 : 42;
+          pos.set(f.x + Math.cos(a) * R, f.y + (s.type === 'shoulder' ? 10 : 22), f.z + Math.sin(a) * R);
+          look.copy(f);
+          break;
+        }
+        s.opts._lost = 0;
         const near = s.type === 'shoulder';
-        const back = near ? 7 : 22, up = near ? 3.2 : 11;
-        const swing = Math.sin(t * 0.2 + s.seed) * (near ? 0.6 : 0.8);
-        const hh = sp.h + Math.PI + swing;
+        const back = near ? 7.5 : 22, up = near ? 3.2 : 11;
+        // continuous gentle orbit around the subject keeps motion alive even when stopped at a red light
+        const orbit = dir * t * (near ? 0.22 : 0.16);
+        const hh = sp.h + Math.PI + orbit;
         const cx = sp.p.x + Math.cos(hh) * back, cz = sp.p.z + Math.sin(hh) * back;
         const desired = new THREE.Vector3(cx, sp.p.y + up, cz);
         // smooth following
         const prev = (s.opts as unknown as { _p?: THREE.Vector3 })._p as THREE.Vector3 | undefined;
-        const smoothed = prev ? prev.lerp(desired, Math.min(1, dt * 2.5)) : desired.clone();
+        const smoothed = prev ? prev.lerp(desired, Math.min(1, dt * 2.8)) : desired.clone();
         (s.opts as unknown as { _p: THREE.Vector3 })._p = smoothed;
         pos.copy(smoothed);
         look.set(sp.p.x + Math.cos(sp.h) * (near ? 4 : 10), sp.p.y + (near ? 1.4 : 1), sp.p.z + Math.sin(sp.h) * (near ? 4 : 10));

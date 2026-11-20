@@ -32,6 +32,7 @@ export class Peds {
   // tight path AABB for cheap spatial rejection (gates & snapshot culling)
   private minX = new Float32Array(0); private maxX = new Float32Array(0);
   private minZ = new Float32Array(0); private maxZ = new Float32Array(0);
+  private delayed = new Uint8Array(0);
   private free: number[] = [];
   private q = new MinHeap();
   count = 0;
@@ -52,6 +53,7 @@ export class Peds {
     this.x = g(this.x, Float32Array); this.z = g(this.z, Float32Array); this.h = g(this.h, Float32Array);
     this.minX = g(this.minX, Float32Array); this.maxX = g(this.maxX, Float32Array);
     this.minZ = g(this.minZ, Float32Array); this.maxZ = g(this.maxZ, Float32Array);
+    this.delayed = g(this.delayed, Uint8Array);
     for (let i = old; i < n; i++) { this.pts.push(null); this.cum.push(null); }
     for (let i = n - 1; i >= old; i--) this.free.push(i);
     this.max = n;
@@ -83,6 +85,7 @@ export class Peds {
     this.pts[i] = P; this.cum[i] = C;
     this.t0[i] = this.time;
     this.arrive[i] = this.time + C[n - 1] / v;
+    this.delayed[i] = 0;
     this.q.push(i, this.arrive[i]);
     this.x[i] = P[0]; this.z[i] = P[1]; this.h[i] = Math.atan2(P[3] - P[1], P[2] - P[0]);
     this.color[i] = color;
@@ -95,6 +98,7 @@ export class Peds {
   despawn(i: number) {
     if (!this.active[i]) return;
     this.active[i] = 0;
+    this.delayed[i] = 0;
     this.pts[i] = null; this.cum[i] = null;
     this.free.push(i);
     this.count--;
@@ -151,6 +155,7 @@ export class Peds {
             if (across <= halfW && Math.abs(along) >= 2.5 && Math.abs(along) <= 10.5 && approaching) {
               this.t0[i] += dt;
               this.arrive[i] += dt;
+              this.delayed[i] = 1;
               break;
             }
           } else {
@@ -158,6 +163,7 @@ export class Peds {
             if (d >= 2.5 && d <= halfW && ((-dx * hx - dz * hz) / d) > 0.2) {
               this.t0[i] += dt;
               this.arrive[i] += dt;
+              this.delayed[i] = 1;
               break;
             }
           }
@@ -169,8 +175,9 @@ export class Peds {
       const pri = q.peekPri();
       const i = q.pop();
       if (!this.active[i]) continue;
-      if (this.arrive[i] > this.time) {
+      if (this.delayed[i] && this.arrive[i] > this.time) {
         // delayed by a closed gate: re-enqueue once at the new arrival time
+        this.delayed[i] = 0;
         if (Number.isFinite(this.arrive[i])) q.push(i, this.arrive[i]);
         continue;
       }

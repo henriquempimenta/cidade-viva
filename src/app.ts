@@ -359,7 +359,8 @@ export class App {
     if (this.mode === 'free' && this.prevMode !== 'free' && now - this.lastInput > 7000) this.setMode(this.prevMode);
     const cam = this.rig.camera;
     const alpha = this.curSnap ? Math.min(1.2, (now - this.snapArrive) / Math.max(16, this.snapInterval)) : 0;
-    this.agents.update(dt, alpha);
+    // stage 1: interpolate agent poses so Director & Follow track up-to-date positions
+    this.agents.interpolate(alpha);
     const simDt = this.simT - this.lastSimT;
     this.lastSimT = this.simT;
     if ((this.mode === 'auto' || this.mode === 'cinematic') && !this.buildings.all().length) {
@@ -398,6 +399,8 @@ export class App {
     U.uSnow.value += ((this.stats?.snow ?? 0) - U.uSnow.value) * Math.min(1, dt);
     U.uWind.value = this.curSnap?.turbine ?? 0.6;
     this.rig.updateEnvironment(df, U.uRain.value, this.stats?.fog ?? 0, U.uSnow.value, look.clone(), dt);
+    // stage 2: cull & upload agent meshes using this frame's exact camera frustum and sun direction
+    this.agents.syncMeshes(dt);
     this.rig.tilt.uniforms.uAmount.value = this.tiltShift;
     this.roads.update(now, this.rig.night, U.uTime.value);
     this.rail.update(now, this.curSnap?.crossings ?? new Uint8Array(0));

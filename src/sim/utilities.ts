@@ -84,7 +84,6 @@ export class Utilities {
   hourly() {
     const w = this.w;
     let ps = 0, pd = 0, ws = 0, wd = 0, sc = 0, gc = 0;
-    const allPlants: Building[] = [];
     const activePlants: Building[] = [];
     const wsrc: Building[] = [];
     for (const b of w.buildings.list) {
@@ -92,7 +91,6 @@ export class Utilities {
       const d = b.def;
       const scale = d.public ? 1 : 1 + b.floors * 0.15;
       if (d.power < 0) {
-        allPlants.push(b);
         if (!this.lineBuilt.has(b.id) && d.cat === 'power') this.buildLine(b);
         const lid = this.lineBuilt.get(b.id);
         const lineReady = lid === undefined || lid < 0 || (this.powerLines[lid]?.progress ?? 0) >= 1;
@@ -178,7 +176,6 @@ export class Utilities {
     this.untreated = Math.max(0, this.sewage.prod - this.sewage.cap);
     if (this.outfall < 0) this.outfall = w.terrain.riverIndex(w.center.x, w.center.z);
     // ---- power lines from remote plants (advance construction) ----
-    void allPlants;
     for (const l of this.powerLines) if (l.progress < 1) { l.progress = Math.min(1, l.progress + 0.12); this.dirtyLines.add(l.id); }
     // ---- stagger garbage collection dispatches across the day (1–2 trucks/hour/facility) ----
     this.dispatchGarbageHourly();

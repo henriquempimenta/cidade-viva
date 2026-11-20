@@ -91,6 +91,11 @@ export class AgentsLayer {
   private sc = new THREE.Vector3(1, 1, 1);
   private up = new THREE.Vector3(0, 1, 0);
   private col = new THREE.Color();
+  private frustum = new THREE.Frustum();
+  private projScreen = new THREE.Matrix4();
+  private cullSphere = new THREE.Sphere(new THREE.Vector3(), 10);
+  private vCounts = new Int32Array(VTYPE_COUNT);
+  private tCounts = new Int32Array(6);
   private vPos = new Float32Array(MAX_VEHICLES * 4); // interpolated x,y,z,h (grows with the sim pools)
   private pPos = new Float32Array(MAX_PEDS * 4);
   private tPos = new Float32Array(MAX_TRAIN_CARS * 4);
@@ -215,17 +220,13 @@ export class AgentsLayer {
     }
   }
 
-  update(dt: number, alpha: number) {
-    this.t += dt;
+  /** stage 1 (before camera update): interpolate agent world positions so Director & Follow read current poses */
+  interpolate(alpha: number) {
     const cur = this.app.curSnap, prev = this.app.prevSnap;
     if (!cur) return;
     const a = Math.min(1, Math.max(0, alpha));
-    const night = U.uNight.value;
     // ---- vehicles ----
-    const counts = new Array(VTYPE_COUNT).fill(0);
-    let nl = 0, ns = 0;
     const cv = cur.veh, pv = prev?.veh;
-    const old = (this.app.stats?.era ?? 0) === 0;
     const NV = cv.length / VEH_STRIDE;
     if (this.vPos.length < NV * 4) this.vPos = new Float32Array(NV * 8);
     for (let i = 0; i < NV; i++) {
@@ -244,6 +245,84 @@ export class AgentsLayer {
         }
       }
       this.vPos[i * 4] = x; this.vPos[i * 4 + 1] = y; this.vPos[i * 4 + 2] = z; this.vPos[i * 4 + 3] = h;
+    }
+    // ---- pedestrians ----
+    const cp = cur.ped, pp = prev?.ped;
+    const NP = cp.length / PED_STRIDE;
+    if (this.pPos.length < NP * 4) this.pPos = new Float32Array(NP * 8);
+    for (let i = 0; i < NP; i++) {
+      const o = i * PED_STRIDE;
+      if (cp[o + 4] < 0) continue;
+      let x = cp[o], y = cp[o + 1], z = cp[o + 2], h = cp[o + 3];
+      if (pp && pp[o + 4] === cp[o + 4]) {
+        const d = Math.hypot(cp[o] - pp[o], cp[o + 2] - pp[o + 2]);
+        if (d < 30) {
+          x = pp[o] + (cp[o] - pp[o]) * a; y = pp[o + 1] + (cp[o + 1] - pp[o + 1]) * a; z = pp[o + 2] + (cp[o + 2] - pp[o + 2]) * a;
+          let dh = cp[o + 3] - pp[o + 3];
+          while (dh > Math.PI) dh -= Math.PI * 2;
+          while (dh < -Math.PI) dh += Math.PI * 2;
+          h = pp[o + 3] + dh * a;
+        }
+      }
+      this.pPos[i * 4] = x; this.pPos[i * 4 + 1] = y; this.pPos[i * 4 + 2] = z; this.pPos[i * 4 + 3] = h;
+    }
+    // ---- trains ----
+    const tc = cur.train, tp = prev?.train;
+    for (let i = 0; i < cur.trainCount; i++) {
+      const o = i * TRAIN_STRIDE;
+      let x = tc[o], y = tc[o + 1], z = tc[o + 2], h = tc[o + 3];
+      const type = tc[o + 4];
+      if (tp && prev && i < prev.trainCount && tp[o + 4] === type && tp[o + 5] === tc[o + 5]) {
+        const d = Math.hypot(tc[o] - tp[o], tc[o + 2] - tp[o + 2]);
+        if (d < 80) {
+          x = tp[o] + (tc[o] - tp[o]) * a; y = tp[o + 1] + (tc[o + 1] - tp[o + 1]) * a; z = tp[o + 2] + (tc[o + 2] - tp[o + 2]) * a;
+          let dh = tc[o + 3] - tp[o + 3];
+          while (dh > Math.PI) dh -= Math.PI * 2;
+          while (dh < -Math.PI) dh += Math.PI * 2;
+          h = tp[o + 3] + dh * a;
+        }
+      }
+      this.tPos[i * 4] = x; this.tPos[i * 4 + 1] = y; this.tPos[i * 4 + 2] = z; this.tPos[i * 4 + 3] = h;
+    }
+  }
+
+  /** stage 2 (after camera & environment update): cull against the exact rendered camera + projected sun shadows, and upload GPU instances */
+  syncMeshes(dt: number) {
+    this.t += dt;
+    const cur = this.app.curSnap;
+    if (!cur) return;
+    const night = U.uNight.value;
+    const cam = this.app.rig.camera;
+    cam.updateMatrixWorld();
+    this.projScreen.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    this.frustum.setFromProjectionMatrix(this.projScreen);
+    const camP = cam.position;
+    const farVeh = Math.max(1400, camP.y * 6);
+    const sphere = this.cullSphere;
+    // extend culling spheres along the sun-shadow projection during daytime so shadows cast from just outside the frustum never pop
+    const sunDir = U.uSunDir.value;
+    const castSun = night < 0.95 && sunDir.y > 0.02;
+    const sLenV = castSun ? Math.min(35, 3.5 / Math.max(0.1, sunDir.y)) : 0;
+    const sOffVX = -sunDir.x * sLenV * 0.5, sOffVZ = -sunDir.z * sLenV * 0.5, rVeh = 12 + sLenV * 0.5;
+    const sLenP = castSun ? Math.min(20, 1.9 / Math.max(0.1, sunDir.y)) : 0;
+    const sOffPX = -sunDir.x * sLenP * 0.5, sOffPZ = -sunDir.z * sLenP * 0.5, rPed = 4 + sLenP * 0.5;
+
+    // ---- vehicles ----
+    const counts = this.vCounts;
+    counts.fill(0);
+    let nl = 0, ns = 0;
+    const cv = cur.veh;
+    const old = (this.app.stats?.era ?? 0) === 0;
+    const NV = cv.length / VEH_STRIDE;
+    for (let i = 0; i < NV; i++) {
+      const o = i * VEH_STRIDE;
+      const type = cv[o + 4];
+      if (!type) continue;
+      const x = this.vPos[i * 4], y = this.vPos[i * 4 + 1], z = this.vPos[i * 4 + 2], h = this.vPos[i * 4 + 3];
+      if (Math.abs(x - camP.x) > farVeh || Math.abs(z - camP.z) > farVeh) continue;
+      sphere.center.set(x + sOffVX, y + 1.5, z + sOffVZ);
+      sphere.radius = rVeh;
+      if (!this.frustum.intersectsSphere(sphere)) continue;
       const im = this.veh[type];
       if (!im || counts[type] >= im.instanceMatrix.count) continue;
       this.q.setFromAxisAngle(this.up, -h);
@@ -278,40 +357,37 @@ export class AgentsLayer {
     }
     for (let t = 0; t < VTYPE_COUNT; t++) {
       const im = this.veh[t];
+      const prevC = im.count;
       im.count = counts[t];
-      im.instanceMatrix.needsUpdate = true;
-      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      if (counts[t] > 0 || prevC > 0) {
+        im.instanceMatrix.needsUpdate = true;
+        if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      }
     }
+    const prevNl = this.lights.count;
     this.lights.count = nl;
-    this.lights.instanceMatrix.needsUpdate = true;
+    if (nl > 0 || prevNl > 0) this.lights.instanceMatrix.needsUpdate = true;
     (this.lights.material as THREE.MeshBasicMaterial).color.setScalar(0.4 + 2.2 * night);
+    const prevNs = this.sirens.count;
     this.sirens.count = ns;
-    this.sirens.instanceMatrix.needsUpdate = true;
-    if (this.sirens.instanceColor) this.sirens.instanceColor.needsUpdate = true;
+    if (ns > 0 || prevNs > 0) {
+      this.sirens.instanceMatrix.needsUpdate = true;
+      if (this.sirens.instanceColor) this.sirens.instanceColor.needsUpdate = true;
+    }
 
     // ---- pedestrians ----
-    const cp = cur.ped, pp = prev?.ped;
+    const cp = cur.ped;
     let nb = 0, nu = 0, nbk = 0, nbag = 0;
-    const camP = this.app.rig.camera.position;
     const farCull = Math.max(450, camP.y * 4);
     const NP = cp.length / PED_STRIDE;
-    if (this.pPos.length < NP * 4) this.pPos = new Float32Array(NP * 8);
     for (let i = 0; i < NP; i++) {
       const o = i * PED_STRIDE;
       if (cp[o + 4] < 0) continue;
-      let x = cp[o], y = cp[o + 1], z = cp[o + 2], h = cp[o + 3];
-      if (pp && pp[o + 4] === cp[o + 4]) {
-        const d = Math.hypot(cp[o] - pp[o], cp[o + 2] - pp[o + 2]);
-        if (d < 30) {
-          x = pp[o] + (cp[o] - pp[o]) * a; y = pp[o + 1] + (cp[o + 1] - pp[o + 1]) * a; z = pp[o + 2] + (cp[o + 2] - pp[o + 2]) * a;
-          let dh = cp[o + 3] - pp[o + 3];
-          while (dh > Math.PI) dh -= Math.PI * 2;
-          while (dh < -Math.PI) dh += Math.PI * 2;
-          h = pp[o + 3] + dh * a;
-        }
-      }
-      this.pPos[i * 4] = x; this.pPos[i * 4 + 1] = y; this.pPos[i * 4 + 2] = z; this.pPos[i * 4 + 3] = h;
+      const x = this.pPos[i * 4], y = this.pPos[i * 4 + 1], z = this.pPos[i * 4 + 2], h = this.pPos[i * 4 + 3];
       if (nb >= RENDER_PED || Math.abs(x - camP.x) > farCull || Math.abs(z - camP.z) > farCull) continue;
+      sphere.center.set(x + sOffPX, y + 1, z + sOffPZ);
+      sphere.radius = rPed;
+      if (!this.frustum.intersectsSphere(sphere)) continue;
       const flags = cp[o + 5];
       const cid = cp[o + 6];
       const bike = (flags & PED_FLAG_BIKE) !== 0;
@@ -342,30 +418,23 @@ export class AgentsLayer {
       if ((flags & (PED_FLAG_LUGGAGE | PED_FLAG_TOURIST)) && nbag < 1500) { this.v.y = y; this.m.compose(this.v, this.q, this.sc); this.bags.setMatrixAt(nbag++, this.m); }
     }
     for (const [im, n] of [[this.bodies, nb], [this.heads, nb], [this.umbrellas, nu], [this.bikes, nbk], [this.bags, nbag]] as [THREE.InstancedMesh, number][]) {
+      const prevC = im.count;
       im.count = n;
-      im.instanceMatrix.needsUpdate = true;
-      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      if (n > 0 || prevC > 0) {
+        im.instanceMatrix.needsUpdate = true;
+        if (im.instanceColor) im.instanceColor.needsUpdate = true;
+      }
     }
 
     // ---- trains ----
     const tnight = U.uNight.value;
-    const tc = cur.train, tp = prev?.train;
-    const tcount = new Array(6).fill(0);
+    const tc = cur.train;
+    const tcount = this.tCounts;
+    tcount.fill(0);
     for (let i = 0; i < cur.trainCount; i++) {
       const o = i * TRAIN_STRIDE;
-      let x = tc[o], y = tc[o + 1], z = tc[o + 2], h = tc[o + 3];
+      const x = this.tPos[i * 4], y = this.tPos[i * 4 + 1], z = this.tPos[i * 4 + 2], h = this.tPos[i * 4 + 3];
       const type = tc[o + 4];
-      if (tp && prev && i < prev.trainCount && tp[o + 4] === type && tp[o + 5] === tc[o + 5]) {
-        const d = Math.hypot(tc[o] - tp[o], tc[o + 2] - tp[o + 2]);
-        if (d < 80) {
-          x = tp[o] + (tc[o] - tp[o]) * a; y = tp[o + 1] + (tc[o + 1] - tp[o + 1]) * a; z = tp[o + 2] + (tc[o + 2] - tp[o + 2]) * a;
-          let dh = tc[o + 3] - tp[o + 3];
-          while (dh > Math.PI) dh -= Math.PI * 2;
-          while (dh < -Math.PI) dh += Math.PI * 2;
-          h = tp[o + 3] + dh * a;
-        }
-      }
-      this.tPos[i * 4] = x; this.tPos[i * 4 + 1] = y; this.tPos[i * 4 + 2] = z; this.tPos[i * 4 + 3] = h;
       const im = this.trains[type];
       if (!im) continue;
       this.q.setFromAxisAngle(this.up, -h);
@@ -375,9 +444,24 @@ export class AgentsLayer {
       if (glow && tnight > 0.08) glow.setMatrixAt(tcount[type], this.m);
       im.setMatrixAt(tcount[type]++, this.m);
     }
-    this.trains.forEach((im, k) => { im.count = tcount[k]; im.instanceMatrix.needsUpdate = true; });
+    this.trains.forEach((im, k) => {
+      const prevC = im.count;
+      im.count = tcount[k];
+      if (tcount[k] > 0 || prevC > 0) im.instanceMatrix.needsUpdate = true;
+    });
     this.trainGlowMat.color.setScalar(0.3 + 1.9 * tnight);
-    this.trainGlow.forEach((gm, k) => { if (!gm) return; gm.count = tnight > 0.08 ? tcount[k] : 0; gm.instanceMatrix.needsUpdate = true; });
+    this.trainGlow.forEach((gm, k) => {
+      if (!gm) return;
+      const prevC = gm.count;
+      const nc = tnight > 0.08 ? tcount[k] : 0;
+      gm.count = nc;
+      if (nc > 0 || prevC > 0) gm.instanceMatrix.needsUpdate = true;
+    });
+  }
+
+  update(dt: number, alpha: number) {
+    this.interpolate(alpha);
+    this.syncMeshes(dt);
   }
 
   vehiclePos(slot: number, gen: number): { p: THREE.Vector3; h: number } | null {

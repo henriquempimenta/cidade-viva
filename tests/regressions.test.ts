@@ -1,6 +1,8 @@
 // Cada teste reproduz um achado do parecer técnico e verifica a invariante correspondente.
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import { World } from '../src/sim/world';
+import { Director, type DirectorWorld } from '../src/director/director';
 import { DEFAULT_PARAMS, MAX_WARMUP_DAYS, sanitizeParams, sanitizeWarmup } from '../src/shared/params';
 import { VEH_FLAG_SIREN, VType, RoadClass } from '../src/shared/constants';
 import { P_CITIZEN, P_GARBAGE, P_SERVICE } from '../src/sim/traffic';
@@ -553,5 +555,46 @@ describe('metrô terminal e velocidade no inspetor do cidadão', () => {
     w.citizens.slot[cid] = pslot;
     const info = w.citizens.inspect(cid)!;
     expect(info.speedKmh).toBeCloseTo(w.peds.speed[pslot] * 3.6, 2);
+  });
+});
+
+describe('auto-diretor: movimento contínuo sem pausas > 2 s', () => {
+  it('mantém a câmera em movimento contínuo mesmo com alvo desaparecendo, parado ou sem geometria de trajetória', () => {
+    let targetAlive = true;
+    const dw: DirectorWorld = {
+      groundClear: () => 20,
+      mapSize: 2400,
+      center: () => new THREE.Vector3(1200, 20, 1200),
+      cityRadius: () => 500,
+      buildingTop: () => 40,
+      buildingProgress: () => 0.5,
+      buildingPos: () => new THREE.Vector3(1200, 20, 1200),
+      edgePts: () => null, // force travelling fallback
+      edgeProgress: () => 0.5,
+      vehiclePos: () => (targetAlive ? { p: new THREE.Vector3(1250, 21, 1250), h: 0 } : null), // stationary car that vanishes
+      pedPos: () => null,
+      trainPos: () => null,
+      citizenPos: () => null,
+      flyPaths: () => [], // force flyover fallback
+      dateLabel: () => 'Ano 1',
+    };
+    const dir = new Director(dw);
+    // inject chase, travelling and flyover-triggering events
+    dir.feature({ id: 1, type: 'police_chase', t: 0, day: 1, x: 1250, z: 1250, mag: 1, text: 'Perseguição', entity: { kind: 'vehicle', id: 1, gen: 0 } });
+    let lastPos = dir.pose.pos.clone();
+    let still = 0, maxStill = 0, minClear = Infinity;
+    for (let k = 0; k < 1200; k++) { // 40 seconds at 30 fps
+      if (k === 180) targetAlive = false; // target disappears mid-chase
+      if (k === 300) dir.feature({ id: 2, type: 'road_upgrade', t: 10, day: 1, x: 1100, z: 1100, mag: 1, text: 'Obra', entity: { kind: 'edge', id: 99 } });
+      if (k === 600) dir.feature({ id: 3, type: 'power_line', t: 20, day: 1, x: 1300, z: 1300, mag: 1, text: 'Linha' });
+      dir.update(1 / 30);
+      const p = dir.pose.pos;
+      if (p.distanceTo(lastPos) < 0.02) { still += 1 / 30; maxStill = Math.max(maxStill, still); }
+      else still = 0;
+      lastPos.copy(p);
+      minClear = Math.min(minClear, p.y - dw.groundClear(p.x, p.z));
+    }
+    expect(maxStill).toBeLessThan(1.0); // strict margin well under the 2 s acceptance limit
+    expect(minClear).toBeGreaterThanOrEqual(1.5);
   });
 });

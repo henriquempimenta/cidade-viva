@@ -41,6 +41,8 @@ type Side = { pts: P2[]; end: End; through: number[]; edges: REdge[] };
 export class Structures {
   /** nodes already passed over/under by a structure (no second one on top) */
   flown = new Set<number>();
+  /** structures under construction and the street segments they will replace */
+  private swaps: { deck: number[]; pairs: [number, number][]; passed: number[]; name: string; kind: 'fly' | 'tunnel'; over: string }[] = [];
   /** why the last plan failed (shown in the junction decision) */
   why = '';
   private lastHill = -10;
@@ -165,7 +167,7 @@ export class Structures {
     // every street node passed (and the obstacle itself) becomes a joint of the structure, at the same place
     const seq = [...s1.through].reverse().concat(passed, s2.through);
     const wide = [...s1.edges, ...s2.edges].every((q) => q.cls >= RoadClass.Avenue && q.lanes >= 2 && !q.oneway);
-    return { ends: [s1.end, s2.end], joints: path.slice(1, -1), seq, wide, over, len, cls: Math.max(cls, RoadClass.Collector), lanes: Math.max(1, Math.min(2, lanes)), name: street.replace(/^(Rua|Avenida|Alameda|Travessa|Estrada|Rodovia) /, ''), value: this.corridorValue(path), passed: all };
+    return { ends: [s1.end, s2.end], joints: path.slice(1, -1), seq, wide, over, len, cls: Math.max(cls, RoadClass.Collector), lanes: Math.max(1, Math.min(3, lanes)), name: street.replace(/^(Rua|Avenida|Alameda|Travessa|Estrada|Rodovia) /, ''), value: this.corridorValue(path), passed: all };
   }
 
   /**
@@ -179,12 +181,12 @@ export class Structures {
   /** daily upkeep factor relative to a street of the same length (inspections, lighting, ventilation, pumps) */
   static UPKEEP = { fly: 6, tunnel: 15 };
   /** what the neighbourhood will accept: high land value or dense housing refuses a deck; a central trench
-   *  needs a wide avenue so that surface lanes remain on both sides */
+   */
   prefers(p: BypassPlan): 'fly' | 'tunnel' {
     const w = this.w;
     const rich = p.value > 0.62;
     const affordable = w.era >= 2 && w.budget.money > this.cost(p, 'tunnel') * 1.4;
-    return rich && affordable && p.wide ? 'tunnel' : 'fly';
+    return rich && affordable ? 'tunnel' : 'fly';
   }
   /** one big structure at a time: they take a long time and tie up the city's engineering */
   busy(): boolean { return this.w.roads.edges.some((e) => e.alive && e.deck !== undefined && e.progress < 1); }
@@ -220,32 +222,72 @@ export class Structures {
       n.y = kind === 'fly' ? ground + 0.06 + DECK_CLEAR * f : ground - 8 * f;
     }
     let first: REdge | null = null;
+    const pieces: number[] = [];
     s0 = 0;
     for (let i = 1; i < ids.length; i++) {
       const e = R.addEdge(ids[i - 1], ids[i], p.cls, { progress: 0, elevated: kind === 'fly', tunnel: kind === 'tunnel', deck: DECK_RAMP, deckS0: s0, deckTot: tot, lanes: p.lanes, name, day: w.day });
       s0 += seg[i - 1];
       first ??= e;
+      pieces.push(e.id);
       w.onRoadStarted(e, motive);
     }
     for (const nid of p.passed) this.flown.add(nid);
-    if (kind === 'tunnel') {
-      // the central lanes go down: the avenue keeps one lane per direction on each side of the trench
-      const street = [a, ...p.seq, b];
-      for (let i = 1; i < street.length; i++) {
-        const q = R.edgeBetween(street[i - 1], street[i]);
-        if (!q || q.deck !== undefined || q.viewLanes !== undefined) continue;
-        q.viewLanes = q.lanes;
-        q.lanes = Math.max(1, q.lanes - 1);
-        q.lat = (q.viewLanes - q.lanes) * 3.3;
-        R.dirtyEdges.add(q.id);
-      }
-      R.topoVer++;
+    // the street between the ramps stays open during the works (locked: nothing attaches to it);
+    // when the structure opens, that street segment is removed: the road itself now runs over/under
+    const street = [a, ...p.seq, b];
+    const pairs: [number, number][] = [];
+    for (let i = 1; i < street.length; i++) {
+      const q = R.edgeBetween(street[i - 1], street[i]);
+      if (q && q.deck === undefined) { q.locked = true; pairs.push([street[i - 1], street[i]]); }
     }
+    this.swaps.push({ deck: pieces, pairs, passed: p.passed.slice(), name, kind, over: p.over });
     const A = R.nodes[a], B = R.nodes[b];
     w.events.emit('road_upgrade', (A.x + B.x) / 2, (A.z + B.z) / 2, 0.85,
       kind === 'fly' ? `Começa o ${name} sobre ${p.over} (${Math.round(tot)} m) — ${motive}` : `Começa o ${name} sob ${p.over}: a vizinhança recusou um elevado — ${motive}`,
       { entity: { kind: 'edge', id: first!.id }, ref: first!.id, visual: 0.95, headline: kind === 'fly' ? `${name} vai passar por cima de ${p.over}` : `Moradores barram elevado; ${p.over} ganhará um túnel` });
     return first;
+  }
+
+  /** hourly: a finished structure takes over — the old street segment between its ramps disappears */
+  hourly() {
+    const w = this.w, R = w.roads;
+    this.swaps = this.swaps.filter((sw) => {
+      if (sw.deck.some((id) => R.edges[id].progress < 1)) return true;
+      if (sw.deck.some((id) => !R.edges[id].alive)) { for (const [x, y] of sw.pairs) { const q = R.edgeBetween(x, y); if (q) q.locked = false; } return false; }
+      for (const [x, y] of sw.pairs) { const q = R.edgeBetween(x, y); if (q) R.removeEdge(q.id); }
+      for (const nid of sw.passed) {
+        const n = R.nodes[nid];
+        // the cross street now passes under (or over) without meeting the road: no junction, no signal
+        n.control = 0; n.phases = []; n.interchange = false;
+        if (!n.edges.length) n.alive = false;
+        R.updateNodeGeom(n);
+      }
+      R.topoVer++; // signal lists and routing refresh
+      const e = R.edges[sw.deck[0]], A = R.nodes[e.a];
+      w.events.emit('road_upgrade', A.x, A.z, 0.7, sw.kind === 'fly' ? `${sw.name} entra em operação: o trecho no chão foi desativado e a via agora passa por cima de ${sw.over}` : `${sw.name} entra em operação: a via agora passa por baixo de ${sw.over}`, { entity: { kind: 'edge', id: e.id }, ref: e.id, visual: 0.6 });
+      return false;
+    });
+  }
+
+  /**
+   * Injected event: a state/federal grant pays for one structure at the city's worst bottleneck (that is how
+   * most of them get built in real life). The city still chooses where and which kind; it just doesn't pay.
+   */
+  grant() {
+    const w = this.w, R = w.roads;
+    if (this.busy()) { w.events.emit('road_upgrade', w.center.x, w.center.z, 0.4, 'Verba federal adiada: já há uma grande obra viária em andamento', {}); return; }
+    const up = w.upgrades as unknown as { axis(n: RNode): [REdge, REdge] | null };
+    const nodes = R.nodes.filter((n) => n.alive && !n.deck && n.edges.length >= 3 && !this.flown.has(n.id)).sort((a, b) => b.delay - a.delay);
+    for (const n of nodes.slice(0, 30)) {
+      const axis = up.axis(n);
+      const plan = axis && this.planJunction(n, axis[0], axis[1]);
+      if (!plan) continue;
+      const kind = plan.value > 0.62 && w.era >= 2 ? 'tunnel' : 'fly';
+      const cost = this.cost(plan, kind);
+      const e = this.build(plan, kind, `verba federal de $${cost.toLocaleString('pt-BR')} para o pior gargalo (espera de ${n.delay.toFixed(0)} s)`);
+      if (e) { w.events.emit('road_upgrade', n.x, n.z, 1, `Governo federal libera $${cost.toLocaleString('pt-BR')} para obra viária na cidade`, { headline: 'Verba federal vai financiar grande obra viária', visual: 0.6 }); return; }
+    }
+    w.events.emit('road_upgrade', w.center.x, w.center.z, 0.4, 'Verba federal devolvida: não há eixo largo e contínuo onde caiba um elevado ou túnel', {});
   }
 
   // ------------------------------------------------------------------ tunnels through hills

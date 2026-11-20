@@ -148,6 +148,9 @@ export class Happenings {
   inject(ev: string) {
     const w = this.w;
     switch (ev) {
+      case 'roadgrant':
+        w.structures.grant();
+        break;
       case 'immigration':
         w.economy.boomQueue += 250 + w.population * 0.1;
         w.events.emit('immigration', w.center.x, w.center.z, 1, 'Onda de imigração: centenas de famílias a caminho', { headline: 'Onda de imigração: famílias chegam em massa pela rodovia', visual: 0.8 });

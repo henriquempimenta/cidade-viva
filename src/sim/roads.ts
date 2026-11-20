@@ -41,6 +41,8 @@ export interface REdge {
   deckS0?: number; deckTot?: number;
   /** street above a central trench: lanes drawn (the full avenue) vs. lanes in use, and the lateral shift of traffic */
   viewLanes?: number; lat?: number;
+  /** a street segment about to be replaced by a structure: nothing may attach to it meanwhile */
+  locked?: boolean;
   busLane: boolean;
   len: number;
   progress: number; // 1 = usable
@@ -356,6 +358,7 @@ export class RoadNetwork {
         if (c > 4.5 || c < -5) continue;
         return fail(plan, e.tunnel ? 'rampa de túnel' : 'rampa de viaduto');
       }
+      if (hit && e.locked) return fail(plan, 'trecho em obra de elevado/túnel');
       if (hit && hit.t > 0.02 && (!best || hit.t < best.t)) best = { t: hit.t, edge: e, x: hit.x, z: hit.z };
     }
     if (best) {
@@ -383,7 +386,7 @@ export class RoadNetwork {
           const na = this.nodes[pe.edge.a], nb = this.nodes[pe.edge.b];
           const da = Math.hypot(na.x - pe.px, na.z - pe.pz), db = Math.hypot(nb.x - pe.px, nb.z - pe.pz);
           if (da < 20 || db < 20) { const n = da < db ? na : nb; plan.toNode = n.id; bx = n.x; bz = n.z; }
-          else { plan.split = { edge: pe.edge.id, t: pe.t }; bx = pe.px; bz = pe.pz; if (pe.edge.bridge) return fail(plan, 'ponte'); }
+          else { plan.split = { edge: pe.edge.id, t: pe.t }; bx = pe.px; bz = pe.pz; if (pe.edge.bridge) return fail(plan, 'ponte'); if (pe.edge.locked) return fail(plan, 'trecho em obra de elevado/túnel'); }
         }
       }
     }

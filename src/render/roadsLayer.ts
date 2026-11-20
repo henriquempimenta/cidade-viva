@@ -225,7 +225,7 @@ export class RoadsLayer {
     this.edgesByNode.clear();
     this.deckAt.clear();
     for (const e of this.edges.values()) {
-      if (e.deck !== undefined) { for (const nid of [e.a, e.b]) this.deckAt.set(nid, (this.deckAt.get(nid) ?? 0) + 1); continue; }
+      if (e.deck !== undefined && (e.tunnel || e.progress < 1)) { for (const nid of [e.a, e.b]) this.deckAt.set(nid, (this.deckAt.get(nid) ?? 0) + 1); continue; }
       if (e.progress < 1) continue;
       for (const nid of [e.a, e.b]) { let a = this.edgesByNode.get(nid); if (!a) this.edgesByNode.set(nid, (a = [])); a.push(e); }
     }
@@ -278,7 +278,7 @@ export class RoadsLayer {
       const pl = plOf(e);
       const len = pl.s[pl.s.length - 1];
       if (e.tunnel && e.deck !== undefined) { this.tunnel(g, bg, e, pl, len); continue; }
-      const ra = e.deck !== undefined ? 0 : trimAt(e.a), rb = e.deck !== undefined ? 0 : trimAt(e.b);
+      const ra = e.deck !== undefined && e.progress < 1 ? 0 : trimAt(e.a), rb = e.deck !== undefined && e.progress < 1 ? 0 : trimAt(e.b);
       const s0 = Math.min(ra, len / 2), s1 = Math.max(len - rb, len / 2);
       const hw = edgeHalfWidth(e);
       const startV = g.count;

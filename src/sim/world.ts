@@ -767,7 +767,7 @@ export class World {
     for (const [id, w] of this.roadWorks) {
       const e = this.roads.edges[id];
       if (!e.alive) { this.roadWorks.delete(id); continue; }
-      const rate = (w.speed * dt) / Math.max(30, e.deckTot ?? e.len) * (e.bridge ? 0.35 : e.deck !== undefined ? (e.tunnel ? 0.12 : 0.22) : 1) * (w.kind === 'upgrade' ? 0.8 : 1);
+      const rate = (w.speed * dt) / Math.max(30, e.deckTot ?? e.len) * (e.bridge ? 0.35 : e.deck !== undefined ? (e.tunnel ? 0.018 : 0.035) : 1) * (w.kind === 'upgrade' ? 0.8 : 1);
       if (w.kind === 'upgrade') e.workP = Math.min(1, e.workP + rate); else e.progress = Math.min(1, e.progress + rate);
       this.roads.dirtyEdges.add(id);
       if ((w.kind === 'upgrade' ? e.workP : e.progress) >= 1) {
@@ -806,6 +806,7 @@ export class World {
   }
 
   hourly() {
+    this.structures.hourly();
     this.roads.hourTick();
     updateFields(this);
     this.economy.hourly();

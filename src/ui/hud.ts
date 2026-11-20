@@ -229,7 +229,7 @@ export class Hud {
       <span>Arraste para orbitar <b>·</b> role para aproximar <b>·</b> clique num prédio, rua ou pessoa para inspecionar <b>·</b> espaço pausa</span>
       <button class="text-button" id="btn-inject">${icon('spark', 14)} Injetar evento</button>`;
     this.dialog = document.createElement('dialog');
-    const evs: [string, string, string][] = [['immigration', 'people', 'Onda de imigração'], ['megafactory', 'crane', 'Mega-fábrica'], ['crisis', 'chart', 'Crise econômica'], ['sports', 'flag', 'Grande evento esportivo'], ['storm', 'cloud', 'Tempestade'], ['fire', 'fire', 'Incêndio'], ['epidemic', 'heart', 'Epidemia leve'], ['festival', 'spark', 'Festival'], ['blackout', 'bolt', 'Apagão']];
+    const evs: [string, string, string][] = [['immigration', 'people', 'Onda de imigração'], ['megafactory', 'crane', 'Mega-fábrica'], ['crisis', 'chart', 'Crise econômica'], ['sports', 'flag', 'Grande evento esportivo'], ['storm', 'cloud', 'Tempestade'], ['fire', 'fire', 'Incêndio'], ['epidemic', 'heart', 'Epidemia leve'], ['festival', 'spark', 'Festival'], ['blackout', 'bolt', 'Apagão'], ['roadgrant', 'road', 'Verba federal para obra viária']];
     this.dialog.innerHTML = `<div class="dialog-top"><div><h2>Injetar evento</h2><p>Observe como a cidade reage a uma mudança repentina.</p></div><button class="icon-button" aria-label="Fechar">${icon('close')}</button></div>
       <div class="inject-grid">${evs.map(([k, ic, l]) => `<button class="button" data-ev="${k}">${icon(ic, 18)}${l}</button>`).join('')}</div>`;
     document.body.appendChild(this.dialog);

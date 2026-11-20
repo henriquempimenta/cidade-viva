@@ -79,14 +79,16 @@ Outra ideia adaptada da v14: lá, a ferrovia é traçada respeitando a cidade. A
 
 ## Elevados e túneis emergentes
 
-Nenhuma estrutura é desenhada por decreto: um elevado ou túnel é uma aresta real do grafo viário, que sai da rua antes de um obstáculo e volta depois dele. O roteamento decide sozinho se vale a pena usá-la: o tráfego de passagem sobe ou desce, e quem vai virar fica na superfície.
+Nenhuma estrutura é desenhada por decreto, e ela não disputa espaço com a rua: o próprio trecho da via vira elevado ou túnel. Durante a obra a rua continua aberta e "travada" (nada novo se conecta a ela). Na inauguração, o trecho no chão entre as rampas é desativado e a via passa a seguir pela estrutura. As ruas transversais continuam no chão e cruzam por baixo (ou por cima, no túnel), sem semáforo. Os lotes que davam para o trecho desativado se religam à rua mais próxima. Quem precisava virar ali encontra outro caminho, e o roteamento se reorganiza sozinho.
+
+O evento injetável **"Verba federal para obra viária"** banca uma estrutura no pior gargalo, que é como a maioria delas sai na vida real. A cidade escolhe onde e que tipo; só não paga.
 
 - **Quando surge:** num cruzamento que continua travado mesmo depois do semáforo e do semáforo inteligente, atravessado por um eixo largo e contínuo. Também numa passagem de nível de uma via larga cujas cancelas seguem saturadas, caso em que a via passa por cima dos trilhos.
 - **Custos realistas, por isso raros:** uma faixa nova de superfície custa ~4,5 $/m e uma ponte ~20–25 $/m. Um elevado custa 45 $/m (×1,4 com duas faixas por sentido), um túnel em vala coberta 130 $/m e um túnel escavado em rocha 160 $/m. A manutenção diária vale 6× (elevado) e 15× (túnel) a de uma rua do mesmo comprimento. Obras grandes precisam se pagar: os minutos de veículo poupados, valorizados a ~0,5 $/min, têm de cobrir a obra em ~10 anos (120 dias de jogo). O caixa ainda precisa de folga de 30%, e só uma estrutura fica em obra por vez. Numa cidade de poucos milhares de habitantes isso quase nunca fecha, como na vida real. Elevados e túneis aparecem quando o congestionamento é grande de verdade.
 - **Forma do elevado:** rampas de cerca de 125 m, vão a 7,5 m, curvas suaves da via acompanhadas, e extensão sobre cruzamentos travados em sequência, como um "Minhocão". Sob ele o terreno perde valor por sombra e ruído.
-- **Elevado ou túnel:** corredores valorizados ou densos recusam o elevado e, com caixa, ganham um túnel em vala no centro da avenida. Isso só é possível em avenidas largas: a superfície mantém uma faixa por sentido de cada lado do rebaixo, e o tráfego da superfície é deslocado para ela.
+- **Elevado ou túnel:** corredores valorizados ou densos recusam o elevado e, com caixa, a via desce num túnel em vala coberta.
 - **Túnel sob o morro:** quando bairros separados por um morro de verdade só se ligam por um desvio de mais de 2,2 vezes a linha reta, a prefeitura fura um túnel reto.
-- **Escavação real no desenho:** as células do terreno cruzadas por um corte são substituídas por um remendo de malha fina. Ele segue exatamente os planos do terreno nas bordas (sem frestas) e afunda até o piso da via dentro do corte. A pista desce na altura real entre muros de arrimo contínuos e entra num emboque de concreto encostado no terreno. Na avenida, só o centro se abre, entre as faixas laterais.
+- **Escavação real no desenho:** as células do terreno cruzadas por um corte são substituídas por um remendo de malha fina. Ele segue exatamente os planos do terreno nas bordas (sem frestas) e afunda até o piso da via dentro do corte. A pista desce na altura real entre muros de arrimo contínuos e entra num emboque de concreto encostado no terreno.
 - **Regras:** nada se conecta a um tabuleiro ou túnel. Ruas novas passam por baixo do vão ou por cima do túnel, nunca numa rampa. Os trilhos não sobem onde um viaduto rodoviário passa por cima.
 
 ## Tempo

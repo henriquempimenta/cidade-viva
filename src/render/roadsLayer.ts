@@ -64,6 +64,20 @@ function wall(g: GB, pl: PL, s0: number, s1: number, o: number, dy0: number, dy1
     prev = cur;
   }
 }
+/** parts of [s0,s1] outside the given holes */
+function spans(s0: number, s1: number, holes: { s0: number; s1: number }[]): [number, number][] {
+  let out: [number, number][] = [[s0, s1]];
+  for (const h of holes) {
+    const next: [number, number][] = [];
+    for (const [a, b] of out) {
+      if (h.s1 <= a || h.s0 >= b) { next.push([a, b]); continue; }
+      if (h.s0 > a) next.push([a, h.s0]);
+      if (h.s1 < b) next.push([h.s1, b]);
+    }
+    out = next;
+  }
+  return out.filter(([a, b]) => b - a > 0.3);
+}
 function dashes(g: GB, pl: PL, s0: number, s1: number, off: number, w: number, dash: number, gap: number, dy: number, c: THREE.Color) {
   for (let s = s0; s + dash <= s1; s += dash + gap) ribbon(g, pl, s, s + dash, off - w / 2, off + w / 2, dy, c, dash);
 }
@@ -126,7 +140,7 @@ export class RoadsLayer {
   upsertEdge(e: EdgeView) {
     const prev = this.edges.get(e.id);
     this.edges.set(e.id, e);
-    if (!prev || prev.progress < 1 !== e.progress < 1 || prev.cls !== e.cls || prev.lanes !== e.lanes || prev.busLane !== e.busLane || prev.oneway !== e.oneway || prev.upgrading !== e.upgrading || prev.elevated !== e.elevated) this.dirty = true;
+    if (!prev || prev.progress < 1 !== e.progress < 1 || prev.cls !== e.cls || prev.lanes !== e.lanes || prev.busLane !== e.busLane || prev.oneway !== e.oneway || prev.upgrading !== e.upgrading || prev.elevated !== e.elevated || prev.hole !== e.hole || prev.deck !== e.deck) this.dirty = true;
     this.updateWork(e);
   }
   removeEdge(id: number) { this.edges.delete(id); this.dirty = true; const w = this.works.get(id); if (w) { this.group.remove(w); this.works.delete(id); } }
@@ -249,6 +263,17 @@ export class RoadsLayer {
       bendR.set(n.id, Math.min(hw * (1 + turn) + 3, lenA * 0.35, lenB * 0.35));
     }
     const trimAt = (nid: number) => this.nodeR(nid) * 0.92 || (bendR.get(nid) ?? 0);
+    // tunnel cuts first: streets above need to know where the openings are
+    this.cuts = [];
+    for (const e of this.edges.values()) {
+      if (!e.tunnel || e.deck === undefined) continue;
+      const pl = plOf(e), len = pl.s[pl.s.length - 1], hwT = edgeHalfWidth(e) + 0.4;
+      for (const r of this.cutRuns(e, pl, len)) {
+        const pts: number[] = [];
+        for (let s = r.s0; s <= r.s1 + 0.01; s += 2) { const q = at(pl, Math.min(s, r.s1)); pts.push(q[0], q[1], q[2]); }
+        if (pts.length >= 6) this.cuts.push({ pts, hw: hwT });
+      }
+    }
     for (const e of this.edges.values()) {
       const pl = plOf(e);
       const len = pl.s[pl.s.length - 1];
@@ -272,7 +297,17 @@ export class RoadsLayer {
           for (const side of [-1, 1]) { m.makeTranslation(p[0] - p[4] * (hw + 0.6) * side, p[1], p[2] + p[3] * (hw + 0.6) * side); cones.push(m.clone()); }
         }
       } else {
-        ribbon(g, pl, s0, s1, -hw, hw, 0, surface);
+        // a street over a central trench: full surface outside the openings, side lanes only along them
+        const holes = e.hole ? this.holesOn(e, pl) : [];
+        for (const [a0, a1] of spans(s0, s1, holes)) ribbon(g, pl, a0, a1, -hw, hw, 0, surface);
+        for (const h of holes) {
+          const h0 = Math.max(s0, h.s0), h1 = Math.min(s1, h.s1), inner = h.hw + 0.55;
+          if (h1 - h0 < 0.5 || inner >= hw - 1) continue;
+          ribbon(g, pl, h0, h1, inner, hw, 0, surface);
+          ribbon(g, pl, h0, h1, -hw, -inner, 0, surface);
+          dashes(g, pl, h0, h1, inner + 0.25, 0.15, 3, 4, 0.03, COL.white);
+          dashes(g, pl, h0, h1, -inner - 0.25, 0.15, 3, 4, 0.03, COL.white);
+        }
         if (e.upgrading) for (let s = s0; s < s1; s += 7) { const p = at(pl, s); m.makeTranslation(p[0] - p[4] * (hw - 0.6), p[1], p[2] + p[3] * (hw - 0.6)); cones.push(m.clone()); }
         if (!dirt) {
           // sidewalks + curbs
@@ -282,25 +317,27 @@ export class RoadsLayer {
             ribbon(g, pl, s0, s1, hw, hw + 0.25, 0.14, COL.curb);
             ribbon(g, pl, s0, s1, -hw - 0.25, -hw, 0.14, COL.curb);
           }
-          // markings
+          // markings (not over a trench opening)
           const dy = 0.03;
-          if (e.oneway) {
-            for (let l = 1; l < e.lanes; l++) dashes(g, pl, s0 + 2, s1 - 2, -hw + 0.4 + l * LANE_WIDTH, 0.15, 3, 4, dy, COL.white);
-          } else {
-            if (e.cls >= RoadClass.Avenue) {
-              ribbon(g, pl, s0 + 3, s1 - 3, -0.8, 0.8, 0.18, COL.median);
+          for (const [m0, m1] of spans(s0, s1, holes)) {
+            if (e.oneway) {
+              for (let l = 1; l < e.lanes; l++) dashes(g, pl, m0 + 2, m1 - 2, -hw + 0.4 + l * LANE_WIDTH, 0.15, 3, 4, dy, COL.white);
             } else {
-              ribbon(g, pl, s0 + 2, s1 - 2, -0.2, -0.06, dy, COL.yellow);
-              ribbon(g, pl, s0 + 2, s1 - 2, 0.06, 0.2, dy, COL.yellow);
-            }
-            const med = e.cls >= RoadClass.Avenue ? 0.8 : 0;
-            for (let l = 1; l < e.lanes; l++) {
-              dashes(g, pl, s0 + 2, s1 - 2, med + l * LANE_WIDTH, 0.15, 3, 4, dy, COL.white);
-              dashes(g, pl, s0 + 2, s1 - 2, -med - l * LANE_WIDTH, 0.15, 3, 4, dy, COL.white);
-            }
-            if (e.busLane) {
-              ribbon(g, pl, s0 + 1, s1 - 1, med + (e.lanes - 1) * LANE_WIDTH, med + e.lanes * LANE_WIDTH, dy * 0.6, COL.bus);
-              ribbon(g, pl, s0 + 1, s1 - 1, -med - e.lanes * LANE_WIDTH, -med - (e.lanes - 1) * LANE_WIDTH, dy * 0.6, COL.bus);
+              if (e.cls >= RoadClass.Avenue) {
+                ribbon(g, pl, m0 + 3, m1 - 3, -0.8, 0.8, 0.18, COL.median);
+              } else {
+                ribbon(g, pl, m0 + 2, m1 - 2, -0.2, -0.06, dy, COL.yellow);
+                ribbon(g, pl, m0 + 2, m1 - 2, 0.06, 0.2, dy, COL.yellow);
+              }
+              const med = e.cls >= RoadClass.Avenue ? 0.8 : 0;
+              for (let l = 1; l < e.lanes; l++) {
+                dashes(g, pl, m0 + 2, m1 - 2, med + l * LANE_WIDTH, 0.15, 3, 4, dy, COL.white);
+                dashes(g, pl, m0 + 2, m1 - 2, -med - l * LANE_WIDTH, 0.15, 3, 4, dy, COL.white);
+              }
+              if (e.busLane) {
+                ribbon(g, pl, m0 + 1, m1 - 1, med + (e.lanes - 1) * LANE_WIDTH, med + e.lanes * LANE_WIDTH, dy * 0.6, COL.bus);
+                ribbon(g, pl, m0 + 1, m1 - 1, -med - e.lanes * LANE_WIDTH, -med - (e.lanes - 1) * LANE_WIDTH, dy * 0.6, COL.bus);
+              }
             }
           }
           // crosswalks at ends (urban roads)
@@ -465,6 +502,7 @@ export class RoadsLayer {
         });
       }
     }
+    this.onCuts?.(this.cuts);
     if (this.mesh) { this.group.remove(this.mesh); this.mesh.geometry.dispose(); }
     this.mesh = new THREE.Mesh(g.toGeometry(false), this.mat);
     this.mesh.receiveShadow = true;
@@ -502,45 +540,90 @@ export class RoadsLayer {
   }
 
   private edgesByNode = new Map<number, EdgeView[]>();
+  /** open cuts of all tunnels (centre line with road height, half width); sent to the terrain to be carved */
+  cuts: { pts: number[]; hw: number }[] = [];
+  onCuts: ((c: { pts: number[]; hw: number }[]) => void) | null = null;
+  private static PORTAL_D = 6.5;
+
+  /** depth of a tunnel road below the surface at arc length s */
+  private depthAt(pl: PL, s: number) { const p = at(pl, s); return { p, d: Math.max(0.3, this.ground(p[0], p[2])) + 0.12 - p[1] }; }
+
+  /** the stretches of a tunnel that run in an open cut (between the surface and the portal) */
+  private cutRuns(e: EdgeView, pl: PL, len: number): { s0: number; s1: number }[] {
+    const built = e.progress >= 1 ? len : len * e.progress;
+    const runs: { s0: number; s1: number }[] = [];
+    let cur: { s0: number; s1: number } | null = null;
+    for (let s = 0; s <= built; s += 2) {
+      const { d } = this.depthAt(pl, s);
+      const open = d > 0.3 && d < RoadsLayer.PORTAL_D;
+      if (open) { if (!cur) runs.push(cur = { s0: Math.max(0, s - 2), s1: s }); cur.s1 = Math.min(built, s + 2); } else cur = null;
+    }
+    return runs;
+  }
+
+  /** where a street above has trench openings (in its own arc length), with the trench half width */
+  private holesOn(e: EdgeView, pl: PL): { s0: number; s1: number; hw: number }[] {
+    const out: { s0: number; s1: number; hw: number }[] = [];
+    const ax = pl.x[0], az = pl.z[0], bx = pl.x[pl.x.length - 1], bz = pl.z[pl.z.length - 1];
+    const L = Math.hypot(bx - ax, bz - az) || 1, ux = (bx - ax) / L, uz = (bz - az) / L;
+    for (const c of this.cuts) {
+      let lo = Infinity, hi = -Infinity;
+      for (let k = 0; k < c.pts.length; k += 3) {
+        const rx = c.pts[k] - ax, rz = c.pts[k + 2] - az;
+        const t = rx * ux + rz * uz, d = Math.abs(rx * uz - rz * ux);
+        if (d < 2.5 && t > -2 && t < L + 2) { lo = Math.min(lo, t); hi = Math.max(hi, t); }
+      }
+      if (hi > lo) out.push({ s0: lo - 1, s1: hi + 1, hw: c.hw });
+    }
+    return out;
+  }
+
   /**
-   * Tunnels: open stretches are ordinary road; where the road dips below the street (or hillside) a dark
-   * trench between retaining walls; deeper, nothing (underground) — with a concrete portal at the mouth.
+   * Tunnels: open stretches are ordinary road; in the cut the road runs at its true depth between retaining
+   * walls (the terrain is carved around it); deeper it is underground — with a concrete portal at the mouth.
    */
   private tunnel(g: GB, bg: GB, e: EdgeView, pl: PL, len: number) {
     const hw = edgeHalfWidth(e);
     const built = e.progress >= 1 ? len : len * e.progress;
-    const step = 2.5;
-    const depthAt = (s: number) => { const p = at(pl, s); return { p, d: Math.max(0.3, this.ground(p[0], p[2])) + 0.12 - p[1] }; };
-    const wall = COL.concrete, dark = COL.tunnel;
-    let prevD = depthAt(0).d;
-    for (let s = 0; s < built - 0.1; s += step) {
-      const s1 = Math.min(built, s + step);
-      const { p, d } = depthAt((s + s1) / 2);
-      if (d < 0.35) ribbon(g, pl, s, s1, -hw, hw, 0, COL.asphalt, step);
-      else if (d < 6) {
-        // trench: draw at street level so it is not hidden by the road/terrain above it
-        const top = Math.max(0.3, this.ground(p[0], p[2])) + 0.18 - p[1];
-        // the dark cut sits on the real surface at every corner (a tilted strip would sink into slopes)
-        const A = at(pl, s), B = at(pl, s1);
-        const C = (q: [number, number, number, number, number], o: number) => { const x = q[0] - q[4] * o, z = q[2] + q[3] * o; return [x, Math.max(0.3, this.ground(x, z)) + 0.19, z]; };
-        g.quad([C(A, hw), C(B, hw), C(B, -hw), C(A, -hw)], [0, 1, 0], dark);
-        bg.setTransform(p[0], p[1] + top, p[2], Math.atan2(p[4], p[3]));
-        for (const sd of [-1, 1]) bg.box(0, -0.35, sd * (hw + 0.25), s1 - s + 0.7, 1.2, 0.5, wall);
-        bg.setTransform(0, 0, 0, 0);
+    const wallC = COL.concrete, dark = COL.tunnel;
+    const runs = this.cutRuns(e, pl, len);
+    const inRun = (s: number) => runs.some((r) => s >= r.s0 && s <= r.s1);
+    const step = 2;
+    for (let s = 0; s < built - 0.05; s += step) {
+      const s1 = Math.min(built, s + step), mid = (s + s1) / 2;
+      const { d } = this.depthAt(pl, mid);
+      if (d >= RoadsLayer.PORTAL_D) continue; // underground
+      ribbon(g, pl, s, s1, -hw, hw, 0, COL.asphalt, step);
+      if (!inRun(mid) || d < 0.3) continue;
+      ribbon(g, pl, s, s1, -0.08, 0.08, 0.03, COL.yellow, step);
+      // retaining walls from the road up to just above the surface, continuous along the cut
+      const A = at(pl, s), B = at(pl, s1);
+      for (const sd of [-1, 1]) {
+        const o = (hw + 0.3) * sd;
+        const P = (q: [number, number, number, number, number], top: boolean) => {
+          const x = q[0] - q[4] * o, z = q[2] + q[3] * o;
+          return [x, top ? Math.max(0.3, this.ground(x, z)) + 0.9 : q[1] - 0.3, z];
+        };
+        bg.quad([P(A, false), P(B, false), P(B, true), P(A, true)], [-A[4] * sd, 0, A[3] * sd], wallC);
+        // coping on top of the wall
+        const Q = (q: [number, number, number, number, number], oo: number) => { const x = q[0] - q[4] * oo, z = q[2] + q[3] * oo; return [x, Math.max(0.3, this.ground(q[0] - q[4] * o, q[2] + q[3] * o)) + 0.9, z]; };
+        bg.quad([Q(A, o - 0.25), Q(B, o - 0.25), Q(B, o + 0.25), Q(A, o + 0.25)], [0, 1, 0], wallC);
       }
-      // portal where the road goes fully underground (either direction)
-      const dNext = depthAt(s1).d;
-      if ((prevD < 6) !== (dNext < 6) && s > 0) {
-        const q = at(pl, s1), ang = Math.atan2(q[4], q[3]);
-        const gy = Math.max(0.3, this.ground(q[0], q[2]));
-        bg.setTransform(q[0], q[1], q[2], ang);
-        bg.box(0, 0, -hw - 1.1, 1.4, Math.max(6, gy - q[1] + 1), 0.9, wall);
-        bg.box(0, 0, hw + 1.1, 1.4, Math.max(6, gy - q[1] + 1), 0.9, wall);
-        bg.box(0, 5.2, 0, 1.4, Math.max(1.2, gy - q[1] - 4.2), hw * 2 + 3, wall);
-        bg.box(dNext >= 6 ? 0.75 : -0.75, 0, 0, 0.1, 5.2, hw * 2 + 1.3, dark);
-        bg.setTransform(0, 0, 0, 0);
-      }
-      prevD = dNext;
+    }
+    // portals: where the cut meets the underground part
+    for (const r of runs) for (const [sp, inward] of [[r.s0, -1], [r.s1, 1]] as [number, number][]) {
+      if (sp <= 0.5 || sp >= built - 0.5) continue;
+      const q = at(pl, sp), ang = Math.atan2(q[4], q[3]);
+      if (this.depthAt(pl, sp + inward * 3).d < RoadsLayer.PORTAL_D - 0.5) continue; // not going underground here
+      const gy = Math.max(0.3, this.ground(q[0], q[2])) + 1.2;
+      const H = Math.max(6.2, gy - q[1]);
+      bg.setTransform(q[0], q[1], q[2], ang);
+      // headwall facing the cut: two jambs, a lintel up to the surface, and the dark mouth behind
+      bg.box(0, -0.3, -hw - 1.0, 1.2, H + 0.3, 1.6, wallC);
+      bg.box(0, -0.3, hw + 1.0, 1.2, H + 0.3, 1.6, wallC);
+      bg.box(0, 5.4, 0, 1.2, H - 5.4, hw * 2 + 3.6, wallC);
+      bg.box(inward * 0.9, -0.1, 0, 0.6, 5.6, hw * 2 + 0.4, dark);
+      bg.setTransform(0, 0, 0, 0);
     }
   }
 

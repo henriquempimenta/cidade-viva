@@ -119,6 +119,7 @@ export class App {
     scene.add(this.trees.group);
     this.roads = new RoadsLayer();
     this.roads.ground = (x, z) => this.terrain.heightAt(x, z);
+    this.roads.onCuts = (c) => this.terrain.setCuts(c);
     scene.add(this.roads.group);
     this.rail = new RailLayer();
     this.rail.ground = (x, z) => this.terrain.heightAt(x, z);

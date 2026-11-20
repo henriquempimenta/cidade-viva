@@ -46,7 +46,7 @@ export class CityHall {
     for (const b of w.buildings.list) if (b.def.public && b.state === 'done') maint += b.def.maint * 6;
     const upkeep = maint;
     let roadKm = 0;
-    for (const e of w.roads.edges) if (e.alive && e.progress >= 1) roadKm += e.len / 1000;
+    for (const e of w.roads.edges) if (e.alive && e.progress >= 1) roadKm += (e.len / 1000) * (e.deck === undefined ? 1 : e.tunnel ? 15 : 6); // structures cost far more to keep
     const roads = roadKm * (10 + w.era * 6), staff = w.population * (0.9 + w.era * 0.45), transit = (w.transitCost?.() ?? 0);
     maint += roads + staff + transit;
     const tariffs = w.population * 0.35 * w.economy.priceIndex; // water/power/garbage fees

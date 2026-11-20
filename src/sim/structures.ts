@@ -15,6 +15,10 @@ export interface BypassPlan {
   /** intermediate joints (positions of the street nodes passed over) */
   joints: P2[];
   passed: number[];
+  /** street nodes along the corridor between the two ends, in order (to find the street under the structure) */
+  seq: number[];
+  /** the street is a wide avenue all along: room for a central trench with surface lanes on both sides */
+  wide: boolean;
   cls: RoadClass;
   lanes: number;
   name: string;
@@ -22,6 +26,7 @@ export interface BypassPlan {
   value: number;
 }
 type End = { node: number } | { x: number; z: number };
+type Side = { pts: P2[]; end: End; through: number[]; edges: REdge[] };
 
 /**
  * Grade-separated structures as an emergent property of the network.
@@ -47,11 +52,12 @@ export class Structures {
    * `need` returns more, so one structure can span several jammed junctions in a row).
    * Returns the polyline and the end (existing node or split point).
    */
-  private walk(start: number, edge: REdge, need: (acc: number, node: RNode) => number, px?: number, pz?: number): { pts: P2[]; end: End; through: number[] } | null {
+  private walk(start: number, edge: REdge, need: (acc: number, node: RNode) => number, px?: number, pz?: number): { pts: P2[]; end: End; through: number[]; edges: REdge[] } | null {
     const R = this.w.roads;
     let cur = start, e = edge, acc = 0;
     const pts: P2[] = [];
     const through: number[] = [];
+    const edges: REdge[] = [];
     let fx = px ?? R.nodes[start].x, fz = pz ?? R.nodes[start].z;
     let goal = need(0, R.nodes[start]);
     for (let k = 0; k < 14; k++) {
@@ -59,12 +65,13 @@ export class Structures {
       const other = e.a === cur ? e.b : e.a;
       const on = R.nodes[other];
       const segLen = Math.hypot(on.x - fx, on.z - fz);
+      edges.push(e);
       if (acc + segLen >= goal) {
         const rem = goal - acc;
-        if (segLen - rem < 22) { pts.push({ x: on.x, z: on.z }); return { pts, end: { node: other }, through }; }
+        if (segLen - rem < 22) { pts.push({ x: on.x, z: on.z }); return { pts, end: { node: other }, through, edges }; }
         const x = fx + (on.x - fx) * (rem / segLen), z = fz + (on.z - fz) * (rem / segLen);
         pts.push({ x, z });
-        return { pts, end: { x, z }, through };
+        return { pts, end: { x, z }, through, edges };
       }
       acc += segLen; pts.push({ x: on.x, z: on.z }); through.push(other);
       goal = Math.max(goal, need(acc, on));
@@ -132,7 +139,7 @@ export class Structures {
     return o?.name ?? 'a transversal';
   }
 
-  private finish(s1: { pts: P2[]; end: End; through: number[] }, s2: { pts: P2[]; end: End; through: number[] }, passed: number[], mid: P2, over: string, cls: RoadClass, lanes: number, street: string): BypassPlan | null {
+  private finish(s1: Side, s2: Side, passed: number[], mid: P2, over: string, cls: RoadClass, lanes: number, street: string): BypassPlan | null {
     // path from end 1 through the obstacle to end 2
     const path: P2[] = [...s1.pts].reverse();
     path.push(mid, ...s2.pts);
@@ -156,18 +163,31 @@ export class Structures {
       }
     }
     // every street node passed (and the obstacle itself) becomes a joint of the structure, at the same place
-    return { ends: [s1.end, s2.end], joints: path.slice(1, -1), over, len, cls: Math.max(cls, RoadClass.Collector), lanes: Math.max(1, Math.min(2, lanes)), name: street.replace(/^(Rua|Avenida|Alameda|Travessa|Estrada|Rodovia) /, ''), value: this.corridorValue(path), passed: all };
+    const seq = [...s1.through].reverse().concat(passed, s2.through);
+    const wide = [...s1.edges, ...s2.edges].every((q) => q.cls >= RoadClass.Avenue && q.lanes >= 2 && !q.oneway);
+    return { ends: [s1.end, s2.end], joints: path.slice(1, -1), seq, wide, over, len, cls: Math.max(cls, RoadClass.Collector), lanes: Math.max(1, Math.min(2, lanes)), name: street.replace(/^(Rua|Avenida|Alameda|Travessa|Estrada|Rodovia) /, ''), value: this.corridorValue(path), passed: all };
   }
 
-  /** cost of each kind: an elevated deck is cheap; a cut-and-cover tunnel three times dearer */
-  cost(p: BypassPlan, kind: 'fly' | 'tunnel') { return Math.round(p.len * (kind === 'fly' ? 4 : 11) * (p.lanes >= 2 ? 1.4 : 1)); }
-  /** what the neighbourhood will accept: high land value or dense housing refuses a deck */
+  /**
+   * Cost per metre, calibrated against the rest of the city: adding a surface lane costs ~4.5/m and an
+   * ordinary bridge ~20–25/m. A viaduct is roughly two bridges per metre (~10× a surface lane), a
+   * cut-and-cover tunnel three times a viaduct, a bored tunnel through rock more still — which is why
+   * cities build them rarely, only where congestion or geography leave no cheaper way out.
+   */
+  static PER_M = { fly: 45, tunnel: 130, bore: 160 };
+  cost(p: BypassPlan, kind: 'fly' | 'tunnel') { return Math.round(p.len * Structures.PER_M[kind] * (p.lanes >= 2 ? 1.4 : 1)); }
+  /** daily upkeep factor relative to a street of the same length (inspections, lighting, ventilation, pumps) */
+  static UPKEEP = { fly: 6, tunnel: 15 };
+  /** what the neighbourhood will accept: high land value or dense housing refuses a deck; a central trench
+   *  needs a wide avenue so that surface lanes remain on both sides */
   prefers(p: BypassPlan): 'fly' | 'tunnel' {
     const w = this.w;
     const rich = p.value > 0.62;
     const affordable = w.era >= 2 && w.budget.money > this.cost(p, 'tunnel') * 1.4;
-    return rich && affordable ? 'tunnel' : 'fly';
+    return rich && affordable && p.wide ? 'tunnel' : 'fly';
   }
+  /** one big structure at a time: they take a long time and tie up the city's engineering */
+  busy(): boolean { return this.w.roads.edges.some((e) => e.alive && e.deck !== undefined && e.progress < 1); }
 
   // ------------------------------------------------------------------ building
   build(p: BypassPlan, kind: 'fly' | 'tunnel', motive: string): REdge | null {
@@ -208,6 +228,19 @@ export class Structures {
       w.onRoadStarted(e, motive);
     }
     for (const nid of p.passed) this.flown.add(nid);
+    if (kind === 'tunnel') {
+      // the central lanes go down: the avenue keeps one lane per direction on each side of the trench
+      const street = [a, ...p.seq, b];
+      for (let i = 1; i < street.length; i++) {
+        const q = R.edgeBetween(street[i - 1], street[i]);
+        if (!q || q.deck !== undefined || q.viewLanes !== undefined) continue;
+        q.viewLanes = q.lanes;
+        q.lanes = Math.max(1, q.lanes - 1);
+        q.lat = (q.viewLanes - q.lanes) * 3.3;
+        R.dirtyEdges.add(q.id);
+      }
+      R.topoVer++;
+    }
     const A = R.nodes[a], B = R.nodes[b];
     w.events.emit('road_upgrade', (A.x + B.x) / 2, (A.z + B.z) / 2, 0.85,
       kind === 'fly' ? `Começa o ${name} sobre ${p.over} (${Math.round(tot)} m) — ${motive}` : `Começa o ${name} sob ${p.over}: a vizinhança recusou um elevado — ${motive}`,
@@ -222,7 +255,7 @@ export class Structures {
    */
   hillTunnel(): void {
     const w = this.w, R = w.roads;
-    if (w.era < 2 || w.day - this.lastHill < 4 || w.budget.money < 9000) return;
+    if (w.era < 2 || w.day - this.lastHill < 4 || w.budget.money < 40000 || this.busy()) return;
     this.lastHill = w.day;
     const nodes = R.nodes.filter((n) => n.alive && n.edges.some((id) => { const e = R.edges[id]; return e.alive && e.progress >= 1 && e.deck === undefined && e.cls >= RoadClass.Local && e.cls < RoadClass.Highway; }));
     if (nodes.length < 20) return;
@@ -246,11 +279,12 @@ export class Structures {
       if (users > 15 && (!best || gain > best.gain)) best = { a, b, gain, len };
     }
     if (!best) return;
-    const cost = Math.round(best.len * 30);
+    const cost = Math.round(best.len * Structures.PER_M.bore);
     if (w.budget.money < cost * 1.3) return;
     const name = `Túnel do Morro (${w.districtName((best.a.x + best.b.x) / 2, (best.a.z + best.b.z) / 2)})`;
     const e = R.addEdge(best.a.id, best.b.id, RoadClass.Collector, { progress: 0, tunnel: true, deck: -1, lanes: 1, name, day: w.day });
     w.budget.money -= cost;
+    w.clearTreesAlong([{ x: best.a.x, z: best.a.z }, { x: best.b.x, z: best.b.z }], 10);
     w.cityHall.book(name, -cost);
     w.onRoadStarted(e, 'Morro obriga um desvio longo');
     w.events.emit('road_upgrade', (best.a.x + best.b.x) / 2, (best.a.z + best.b.z) / 2, 0.9,

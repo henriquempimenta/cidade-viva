@@ -10,7 +10,7 @@ const IDM_INV2SQRT = 1 / (2 * Math.sqrt(IDM_A * IDM_B));
 export function laneOffset(e: REdge, lane: number): number {
   if (e.oneway) return (lane + 0.5) * LANE_WIDTH - (e.lanes * LANE_WIDTH) / 2;
   const med = e.cls >= RoadClass.Avenue ? 0.8 : 0.08;
-  return med + (lane + 0.5) * LANE_WIDTH;
+  return med + (lane + 0.5) * LANE_WIDTH + (e.lat ?? 0);
 }
 
 /** Vehicles on the road graph, car-following by the Intelligent Driver Model. */

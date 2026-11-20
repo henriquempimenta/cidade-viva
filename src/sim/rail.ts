@@ -473,7 +473,7 @@ export class Rail {
         const benefit = 20 + min * 1.2 + c.hot * 2;
         // lifting the track needs long ramps clear of platforms and yards; otherwise the street dips under it
         // a wide street goes over the tracks itself (the at-grade crossing stays for local traffic)
-        const plan = e.cls >= RoadClass.Collector && !c.bypassed ? w.structures?.planOverRail(e, c.t) : null;
+        const plan = e.cls >= RoadClass.Collector && !c.bypassed && !w.structures?.busy() ? w.structures?.planOverRail(e, c.t) : null;
         if (plan) {
           const cost = w.structures.cost(plan, 'fly');
           out.push({ kind: 'road_viaduct', label: 'Viaduto rodoviário sobre a ferrovia', motive, benefit: benefit * 1.3, cost, run: () => { const k = w.structures.build(plan, 'fly', motive); if (k) c.bypassed = true; return !!k; } });

@@ -36,7 +36,7 @@ export class RoadUpgrades {
     const w = this.w, R = w.roads;
     if (w.day === this.lastDay) return;
     this.lastDay = w.day;
-    const cands = R.edges.filter((e) => e.alive && e.progress >= 1 && !e.upgrading && !e.bridge && e.deck === undefined && e.vcHistory.slice(-4).filter((v) => v > 0.85).length >= 3);
+    const cands = R.edges.filter((e) => e.alive && e.progress >= 1 && !e.upgrading && !e.bridge && e.deck === undefined && e.lat === undefined && e.vcHistory.slice(-4).filter((v) => v > 0.85).length >= 3);
     cands.sort((a, b) => Math.max(...b.volume) / R.capacity(b) - Math.max(...a.volume) / R.capacity(a));
     let done = 0;
     for (const e of cands) {
@@ -53,7 +53,10 @@ export class RoadUpgrades {
       if (!n.alive || n.deck || n.edges.length < 3 || n.delay < 25 || n.control === 3 || w.structures.flown.has(n.id)) continue;
       const opt = this.junctionOptions(n);
       const best = opt.filter((o) => o.feasible).sort((a, b) => b.ratio - a.ratio)[0];
-      if (best && best.ratio > (best.cost > 1000 ? 0.08 : 0.4) && w.budget.money > best.cost) {
+      // big works are judged by payback: vehicle-minutes saved valued at ~0.5/min must repay the work in ~10 years
+      // (120 days) and the treasury must keep a margin
+      const big = !!best && best.cost > 3000;
+      if (best && (big ? best.ratio > 1 / 60 && w.budget.money > best.cost * 1.3 && !w.structures.busy() : best.ratio > 0.4 && w.budget.money > best.cost)) {
         best.apply!();
         w.budget.money -= best.cost;
         const dec: UpgradeDecision = { day: w.day, chosen: best.label, options: opt.map(strip), edge: n.edges[0] };
@@ -151,7 +154,7 @@ export class RoadUpgrades {
         const b = delayMin * 0.85;
         const kind = w.structures.prefers(plan), cost = w.structures.cost(plan, kind);
         const label = kind === 'fly' ? 'Elevado sobre o cruzamento' : 'Túnel sob o cruzamento';
-        out.push({ label, benefit: b, cost, ratio: b / cost, feasible: w.budget.money > cost * 1.2, note: kind === 'fly' ? `o fluxo da ${axis[0].name} passa por cima (${Math.round(plan.len)} m)` : `bairro valorizado recusa elevado: túnel de ${Math.round(plan.len)} m`,
+        out.push({ label, benefit: b, cost, ratio: b / cost, feasible: w.budget.money > cost * 1.3, note: kind === 'fly' ? `o fluxo da ${axis[0].name} passa por cima (${Math.round(plan.len)} m)` : `bairro valorizado recusa elevado: túnel de ${Math.round(plan.len)} m`,
           apply: () => { w.structures.build(plan, kind, `espera média de ${n.delay.toFixed(0)} s no semáforo`); } });
       } else if (axis && !plan) out.push({ label: 'Elevado sobre o cruzamento', benefit: 0, cost: 0, ratio: 0, feasible: false, note: w.structures.why || 'sem trecho para as rampas', apply: () => {} });
     }

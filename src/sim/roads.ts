@@ -39,6 +39,8 @@ export interface REdge {
   deck?: number;
   /** position of this piece along a multi-edge structure and the structure's total length (ramps span pieces) */
   deckS0?: number; deckTot?: number;
+  /** street above a central trench: lanes drawn (the full avenue) vs. lanes in use, and the lateral shift of traffic */
+  viewLanes?: number; lat?: number;
   busLane: boolean;
   len: number;
   progress: number; // 1 = usable
@@ -219,7 +221,7 @@ export class RoadNetwork {
       const n = Math.max(1, Math.ceil(e.len / 10));
       for (let i = 0; i < n; i++) {
         const p0 = i * 3, p1 = (i + 1) * 3;
-        if (e.pts[p0 + 1] < this.terrain.heightAt(e.pts[p0], e.pts[p0 + 2]) - 1) continue;
+        if (e.pts[p0 + 1] < this.terrain.heightAt(e.pts[p0], e.pts[p0 + 2]) - 7) continue; // deep underground: the hill above stays
         const r = this.occ.segRect(e.pts[p0], e.pts[p0 + 2], e.pts[p1], e.pts[p1 + 2], hw);
         this.occ.markRect(r.cx, r.cz, r.angle, r.w + 2, r.d, OCC_ROAD);
       }
@@ -644,7 +646,7 @@ export class RoadNetwork {
   }
   edgeView(e: REdge): EdgeView {
     return {
-      id: e.id, a: e.a, b: e.b, cls: e.cls, lanes: e.lanes, oneway: e.oneway, bridge: e.bridge, tunnel: e.tunnel,
+      id: e.id, a: e.a, b: e.b, cls: e.cls, lanes: e.viewLanes ?? e.lanes, oneway: e.oneway, hole: e.lat !== undefined ? 1 : undefined, bridge: e.bridge, tunnel: e.tunnel,
       elevated: e.elevated, deck: e.deck, busLane: e.busLane, progress: e.upgrading ? e.workP : e.progress, upgrading: e.upgrading, pts: e.pts, name: e.name,
     };
   }

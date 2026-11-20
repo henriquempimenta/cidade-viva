@@ -40,6 +40,8 @@ export interface EdgeView {
   elevated: boolean;
   /** grade-separated bypass: ramp length (−1 = hill bore) */
   deck?: number;
+  /** street with a central trench under it (draw surface lanes on the sides only) */
+  hole?: number;
   busLane: boolean;
   progress: number; // construction 0..1 (1 = done)
   upgrading: boolean;

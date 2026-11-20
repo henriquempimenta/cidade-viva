@@ -83,6 +83,8 @@ export class AgentsLayer {
   private bikes: THREE.InstancedMesh;
   private bags: THREE.InstancedMesh;
   private trains: THREE.InstancedMesh[] = [];
+  private trainGlow: (THREE.InstancedMesh | null)[] = [];
+  private trainGlowMat!: THREE.MeshBasicMaterial;
   private m = new THREE.Matrix4();
   private q = new THREE.Quaternion();
   private v = new THREE.Vector3();
@@ -131,21 +133,85 @@ export class AgentsLayer {
     this.bags = new THREE.InstancedMesh(new THREE.BoxGeometry(0.3, 0.45, 0.2).translate(-0.35, 0.22, 0.3), new THREE.MeshStandardMaterial({ color: 0x8a3fb0 }), 1500);
     this.bags.count = 0; this.bags.frustumCulled = false;
     this.group.add(this.lights, this.sirens, this.bodies, this.heads, this.umbrellas, this.bikes, this.bags);
-    // trains: 0 loco, 1 passenger coach, 2 container, 3 hopper, 4 tank, 5 metro
-    const tcols = [0xc03a2a, 0xd8dde2, 0x3a6ea5, 0x7a5a3a, 0x30343a, 0xe8e8ee];
+    // trains: 0 loco, 1 passenger coach, 2 container flat, 3 hopper, 4 tank, 5 metro
+    // (rolling stock with bogies and wheels, after the v14 build; lit windows/headlamps live in a glow twin)
+    const C = (h: number) => new THREE.Color(h);
+    const frame = C(0x2c3234), steelC = C(0x8a8f8a), roofC = C(0x6f7a77), glassC = C(0x2f474c);
+    const bogies = (g: GB, half: number) => {
+      for (const bx of [-half, half]) {
+        g.box(bx, 0.32, 0, 2.9, 0.42, 2.25, frame);
+        for (const ax of [-0.85, 0.85]) for (const z of [-1.2, 1.2]) { g.box(bx + ax, 0.0, z, 0.78, 0.78, 0.14, TIRE); g.box(bx + ax, 0.27, z * 1.1, 0.26, 0.26, 0.06, steelC); }
+      }
+    };
+    const glowCol = C(0xffd9a0), lampCol = C(0xfff4d6);
+    const geos: [GB, GB | null][] = [];
     for (let k = 0; k < 6; k++) {
       const g = new GB();
-      const c = new THREE.Color(tcols[k]);
-      if (k === 0) { g.box(0, 0.8, 0, 16, 3.2, 2.9, c); g.box(6.5, 4, 0, 3, 0.8, 2.6, DARK); g.box(7.9, 1.6, 0, 0.1, 1.2, 2.4, GLASS); }
-      else if (k === 1 || k === 5) { g.box(0, 0.8, 0, 19, 3.3, 2.9, c); g.box(0, 2.2, 1.46, 17, 1.1, 0.02, GLASS); g.box(0, 2.2, -1.46, 17, 1.1, 0.02, GLASS); if (k === 5) g.box(0, 1.2, 1.47, 18, 0.3, 0.02, new THREE.Color(0xd92b2b)); }
-      else if (k === 2) { g.box(0, 0.6, 0, 17, 0.4, 2.6, DARK); g.box(-4.2, 1.0, 0, 8, 2.6, 2.5, c); g.box(4.2, 1.0, 0, 8, 2.6, 2.5, new THREE.Color(0xc94a3a)); }
-      else if (k === 3) { g.box(0, 0.6, 0, 14, 0.4, 2.6, DARK); g.box(0, 1.0, 0, 13, 2.8, 2.8, c); }
-      else { g.box(0, 0.6, 0, 15, 0.4, 2.6, DARK); g.cylinder(0, 1, 0, 1.4, 1.4, 0.1, 10, c); g.setTransform(0, 2.4, 0, 0); g.box(0, -1.4, 0, 14, 2.8, 2.6, c); }
-      for (const x of [-5, 5]) g.box(x, 0, 0, 2.4, 0.7, 2.2, TIRE);
+      let glow: GB | null = null;
+      if (k === 0) {
+        const red = C(0xb8432f), band = C(0xe3b23c);
+        bogies(g, 5.3);
+        g.box(0, 0.78, 0, 16.2, 0.4, 2.9, frame);
+        g.box(-1.6, 1.18, 0, 12.4, 2.4, 2.5, red, 0, { top: roofC });
+        g.box(5.4, 1.18, 0, 4.4, 2.95, 3.0, red, 0, { top: roofC });
+        g.box(0, 1.5, 0, 16.0, 0.22, 3.04, band);
+        g.box(7.62, 2.55, 0, 0.06, 0.95, 2.4, glassC);
+        for (const z of [-1.51, 1.51]) g.box(5.6, 2.6, z, 1.8, 0.8, 0.04, glassC);
+        g.box(-3, 3.55, 0, 2.2, 0.35, 1.2, frame);
+        glow = new GB();
+        for (const z of [-0.9, 0.9]) glow.box(7.66, 1.55, z, 0.08, 0.3, 0.42, lampCol);
+        glow.box(7.66, 3.45, 0, 0.08, 0.28, 0.5, lampCol);
+      } else if (k === 1 || k === 5) {
+        const metro = k === 5;
+        const len = metro ? 18.2 : 19.2, body = metro ? C(0xe9ecef) : C(0xc9cfd2), stripe = metro ? C(0x2e8a62) : C(0x2f6a9a);
+        bogies(g, len / 2 - 3);
+        g.box(0, 0.78, 0, len, 0.35, 2.9, frame);
+        g.box(0, 1.1, 0, len, 2.95, 3.0, body, 0, { top: roofC });
+        g.box(0, 1.35, 0, len + 0.02, 0.3, 3.04, stripe);
+        for (const z of [-1.51, 1.51]) {
+          for (let x = -len / 2 + 2.4; x < len / 2 - 1.5; x += 2.6) g.box(x, 2.25, z, 1.9, 1.0, 0.04, glassC);
+          for (const x of metro ? [-len / 4, len / 4] : [-len / 2 + 1.1, len / 2 - 1.1]) g.box(x, 1.2, z * 1.005, 1.25, 2.55, 0.04, stripe);
+        }
+        g.box(0, 4.05, 0, len - 2, 0.25, 2.2, roofC);
+        glow = new GB();
+        for (const z of [-1.53, 1.53]) for (let x = -len / 2 + 2.4; x < len / 2 - 1.5; x += 2.6) glow.box(x, 2.3, z, 1.75, 0.85, 0.03, glowCol);
+      } else if (k === 2) {
+        bogies(g, 5.4);
+        g.box(0, 0.78, 0, 16.2, 0.35, 2.7, frame);
+        g.box(-4.05, 1.13, 0, 7.8, 2.55, 2.45, C(0x3b6f9e));
+        g.box(4.05, 1.13, 0, 7.8, 2.55, 2.45, C(0xb4533e));
+        for (const x of [-7.9, -0.2, 0.2, 7.9]) g.box(x, 1.13, 0, 0.08, 2.55, 2.5, C(0x5a5a52));
+      } else if (k === 3) {
+        bogies(g, 4.6);
+        g.box(0, 0.78, 0, 14.2, 0.35, 2.7, frame);
+        g.box(0, 1.15, 0, 12.6, 1.0, 2.2, C(0x6a5440));
+        g.box(0, 2.1, 0, 13.6, 1.6, 3.0, C(0x7f6447), 0, { top: C(0x3a3027) });
+        for (const z of [-1.52, 1.52]) for (let x = -6; x <= 6; x += 2) g.box(x, 2.1, z, 0.16, 1.6, 0.06, C(0x5c4733));
+      } else {
+        const tank = C(0x9fa79c), ring = C(0x6e7a74);
+        bogies(g, 4.9);
+        g.box(0, 0.78, 0, 15.2, 0.35, 2.7, frame);
+        // rounded tank from overlapping prisms (reads as a cylinder at city scale)
+        g.box(0, 1.35, 0, 14.4, 2.3, 2.1, tank);
+        g.box(0, 1.6, 0, 14.4, 1.8, 2.85, tank);
+        g.box(0, 1.15, 0, 14.4, 2.75, 1.25, tank, 0, { top: tank });
+        for (const x of [-4.2, 4.2]) g.box(x, 1.12, 0, 0.18, 2.83, 2.95, ring);
+        g.box(0, 3.88, 0, 1.0, 0.4, 1.0, ring);
+      }
+      geos.push([g, glow]);
+    }
+    const glowMat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
+    this.trainGlowMat = glowMat;
+    for (const [g, glow] of geos) {
       const im = new THREE.InstancedMesh(g.toGeometry(false), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0.2 }), 300);
       im.count = 0; im.castShadow = true; im.frustumCulled = false;
       this.trains.push(im);
       this.group.add(im);
+      if (glow) {
+        const gm = new THREE.InstancedMesh(glow.toGeometry(false), glowMat, 300);
+        gm.count = 0; gm.frustumCulled = false;
+        this.trainGlow.push(gm); this.group.add(gm);
+      } else this.trainGlow.push(null);
     }
   }
 
@@ -282,6 +348,7 @@ export class AgentsLayer {
     }
 
     // ---- trains ----
+    const tnight = U.uNight.value;
     const tc = cur.train, tp = prev?.train;
     const tcount = new Array(6).fill(0);
     for (let i = 0; i < cur.trainCount; i++) {
@@ -304,9 +371,13 @@ export class AgentsLayer {
       this.q.setFromAxisAngle(this.up, -h);
       this.v.set(x, y + 0.3, z);
       this.m.compose(this.v, this.q, this.sc);
+      const glow = this.trainGlow[type];
+      if (glow && tnight > 0.08) glow.setMatrixAt(tcount[type], this.m);
       im.setMatrixAt(tcount[type]++, this.m);
     }
     this.trains.forEach((im, k) => { im.count = tcount[k]; im.instanceMatrix.needsUpdate = true; });
+    this.trainGlowMat.color.setScalar(0.3 + 1.9 * tnight);
+    this.trainGlow.forEach((gm, k) => { if (!gm) return; gm.count = tnight > 0.08 ? tcount[k] : 0; gm.instanceMatrix.needsUpdate = true; });
   }
 
   vehiclePos(slot: number, gen: number): { p: THREE.Vector3; h: number } | null {

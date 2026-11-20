@@ -146,6 +146,7 @@ export function inspect(w: World, kind: string, id: number): unknown {
         return { light: m[0], moto: m[1], heavy: m[2], power, index: Math.min(1, Math.log1p((power / bins) * 0.93) * 0.37), speed: m[4] > 0.02 ? m[3] / m[4] : 0, samples: m[4] };
       })(),
       mid: (() => { const p = e.pts, k = Math.floor(p.length / 6) * 3; return { x: p[k], y: p[k + 1], z: p[k + 2], hx: p[Math.min(p.length - 3, k + 3)] - p[k], hz: p[Math.min(p.length - 1, k + 5)] - p[k + 2] }; })(),
+      gate: w.rail2?.gateInfo(e.id) ?? null,
       upgrade: (w as unknown as { lastUpgrade?: Map<number, unknown> }).lastUpgrade?.get(e.id) ?? null,
     };
   }

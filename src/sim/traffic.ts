@@ -53,6 +53,8 @@ export class Traffic {
   rain = 0;
   /** level crossings closed: edge id -> position t along edge */
   closedCrossings = new Map<number, number[]>();
+  /** vehicle-seconds spent stopped at closed level crossings, per edge (read and reset by the railway) */
+  crossWait = new Map<number, number>();
 
   constructor(private R: RoadNetwork) { this.grow(MAX_VEHICLES); }
 
@@ -230,6 +232,7 @@ export class Traffic {
             const cs = dir === 0 ? ct * e.len : (1 - ct) * e.len;
             const g2 = cs - 7 - this.s[i];
             if (g2 > -2 && g2 < gap) { gap = Math.max(0.1, g2); vl = 0; }
+            if (g2 > -2 && g2 < 140 && this.v[i] < 1.5) this.crossWait.set(eid, (this.crossWait.get(eid) ?? 0) + dt);
           }
         }
         const v = this.v[i];

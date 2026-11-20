@@ -87,8 +87,8 @@ export class RoadNetwork {
   removedEdges: number[] = [];
   private trees = new Map<number, Tree>();
   time = 0;
-  /** external hook to test a road segment against the railway (level crossings) */
-  railCross?: (ax: number, az: number, bx: number, bz: number) => { x: number; z: number; angle: number }[];
+  /** external hook: the railway vetoes segments that would cross it badly (returns the reason) */
+  railCheck?: (ax: number, az: number, bx: number, bz: number, cls: RoadClass) => string | null;
 
   constructor(public terrain: Terrain, public occ: Occupancy, private rng: RNG) {}
 
@@ -392,7 +392,9 @@ export class RoadNetwork {
         if (p.d < 26) return fail(plan, 'muito próxima de outra via');
       }
     }
-    // 5. corridor free of buildings
+    // 5. the railway is a barrier: few, square, well-spaced crossings
+    if (this.railCheck) { const why = this.railCheck(ax, az, bx, bz, cls); if (why) return fail(plan, why); }
+    // 6. corridor free of buildings
     const fr = this.occ.segFree(ax, az, bx, bz, ROAD_HALF_WIDTH[cls] + 1.5, 10);
     if (!fr.ok) return fail(plan, 'edificações no caminho');
     plan.ok = true;

@@ -36,7 +36,7 @@ import { PED_FLAG_WORKER, PED_FLAG_FUNERAL, VType, VEH_FLAG_SIREN } from '../sha
 export interface District { id: number; name: string; x: number; z: number; founded: number }
 
 // Optional subsystems (attached in later stages)
-export interface RailLike { splatAccess(F: Fields, rail: Float32Array, transit: Float32Array): void }
+export interface RailLike { splatAccess(F: Fields, rail: Float32Array, transit: Float32Array): void; splatNoise?(F: Fields, noise: Float32Array): void }
 export interface TransitLike { splatCoverage(F: Fields, transit: Float32Array): void }
 export interface UtilitiesLike { riverInput(arr: Float32Array): void }
 export interface TourismLike { pressure: number }
@@ -829,6 +829,7 @@ export class World {
     this.cityHall.daily();
     this.statsEdu = this.computeEdu();
     this.integrity.daily();
+    this.rail2.daily();
     if (this.era >= 1) this.upgrades.daily();
     if (this.day % 2 === 0) this.growth.closeLoops(2);
   }

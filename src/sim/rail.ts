@@ -1,4 +1,4 @@
-import { HOUR_SECONDS, MAX_TRAIN_CARS, RoadClass, TRAIN_STRIDE, VType } from '../shared/constants';
+import { HOUR_SECONDS, MAX_TRAIN_CARS, ROAD_HALF_WIDTH, RoadClass, TRAIN_STRIDE, VType } from '../shared/constants';
 import type { CrossingView, RailEdgeView, RailStationView } from '../shared/protocol';
 import type { Building, Candidate } from './buildings';
 import { OCC_RAIL } from './occupancy';
@@ -10,17 +10,24 @@ import { P_CARGO } from './traffic';
 import type { World } from './world';
 import { KINDS } from '../shared/catalog';
 
-interface RLine { id: number; kind: 'main' | 'metro' | 'spur'; x: number[]; y: number[]; z: number[]; cum: number[]; tracks: number; elevated: boolean; len: number; transit?: Line; stations: { s: number; b: number; name: string; stop: number }[] }
+interface RLine { /** construction progress 0..1 (lines built during the game grow along their length) */ built?: number; id: number; kind: 'main' | 'metro' | 'spur'; x: number[]; y: number[]; z: number[]; cum: number[]; tracks: number; elevated: boolean; len: number; transit?: Line; stations: { s: number; b: number; name: string; stop: number }[] }
 interface Train { id: number; line: number; kind: 'pass' | 'freight' | 'metro'; s: number; dir: number; v: number; vmax: number; cars: number[]; dwell: number; served: Set<number>; gen: number }
-interface Crossing { edge: number; t: number; line: number; s: number; x: number; z: number; y: number; angle: number; separated: boolean; closed: boolean }
+interface Crossing { edge: number; t: number; line: number; s: number; x: number; z: number; y: number; angle: number; separated: boolean; under?: boolean; closed: boolean; /** vehicle-seconds queued at the gates today */ wait: number; /** consecutive saturated days */ hot: number }
 
 const CAR_LEN = [17, 20, 17, 15, 16, 19];
+/** length of each ramp when the track is lifted over a road (gentle ~3% grade) */
+export const RAIL_RAMP = 220;
+const LIFT = 7.5;
+/** minimum spacing between two level crossings on the same line */
+const CROSS_GAP = 150;
 
 /** Railways: regional line (freight + passengers), stations, freight terminal, level crossings, duplication, metro. */
 export class Rail {
   lines: RLine[] = [];
   trains: Train[] = [];
   crossings: Crossing[] = [];
+  /** road underpasses dug where the track can't be lifted (next to stations and the freight yard) */
+  private underpasses: { line: number; s: number }[] = [];
   private nextTrain = 1;
   private crossVer = -1;
   dirtyViews = true;
@@ -34,6 +41,9 @@ export class Rail {
   private lastPass = -1e9;
   private lastMetro = -1e9;
   freightToday = 0;
+  /** trains run per kind, today and yesterday (noise, chronicle) */
+  private runs = { freight: 0, pass: 0, metro: 0 };
+  private runsYday = { freight: 0, pass: 0, metro: 0 };
 
   constructor(private w: World) {
     const T = w.terrain;
@@ -41,8 +51,90 @@ export class Rail {
     const ys = path.map((p) => Math.max(T.heightAt(p.x, p.z), 0));
     for (let it = 0; it < 6; it++) for (let i = 1; i < ys.length - 1; i++) ys[i] = (ys[i - 1] + ys[i] * 2 + ys[i + 1]) / 4;
     const wet = path.map((p) => T.heightAt(p.x, p.z) < T.seaLevel + 0.5);
+    // never buried: smoothing would sink the track into hillsides where nothing is drawn (no cuts in the terrain mesh)
+    const gr = path.map((p) => Math.max(T.heightAt(p.x, p.z), 0) + 0.05);
+    for (let it = 0; it < 3; it++) { for (let i = 0; i < ys.length; i++) ys[i] = Math.max(ys[i], gr[i]); for (let i = 1; i < ys.length - 1; i++) ys[i] = Math.max(gr[i], (ys[i - 1] + ys[i] * 2 + ys[i + 1]) / 4); }
     const y = ys.map((v, i) => (wet[Math.max(0, i - 1)] || wet[i] || wet[Math.min(ys.length - 1, i + 1)] ? Math.max(v, 6) : v) + 0.4);
     this.addLine('main', path, y, 1, false);
+    w.roads.railCheck = (ax, az, bx, bz, cls) => this.roadCheck(ax, az, bx, bz, cls);
+  }
+
+  // ------------------------------------------------------------------ the railway as an urban barrier
+  /** height of the track above the ground at arc length s */
+  private clearance(l: RLine, i: number, u: number, x: number, z: number) {
+    return l.y[i] + (l.y[i + 1] - l.y[i]) * u - Math.max(0, this.w.terrain.heightAt(x, z));
+  }
+  private segBoxHit(l: RLine, i: number, minx: number, maxx: number, minz: number, maxz: number) {
+    return !(Math.max(l.x[i], l.x[i + 1]) < minx || Math.min(l.x[i], l.x[i + 1]) > maxx || Math.max(l.z[i], l.z[i + 1]) < minz || Math.min(l.z[i], l.z[i + 1]) > maxz);
+  }
+  /** is there another level crossing on line l within CROSS_GAP of arc length s (built or under construction)? */
+  private levelNear(l: RLine, s: number, x: number, z: number): boolean {
+    for (const c of this.crossings) if (c.line === l.id && !c.separated && Math.abs(c.s - s) < CROSS_GAP) return true;
+    const R = this.w.roads;
+    for (const e of R.edgesNear(x, z, CROSS_GAP + 40)) {
+      if (!e.alive || e.progress >= 1 || e.bridge) continue; // finished ones are in this.crossings
+      const a = R.nodes[e.a], b = R.nodes[e.b];
+      for (let i = 0; i < l.x.length - 1; i++) {
+        if (Math.abs(l.cum[i] - s) > CROSS_GAP + 25) continue;
+        const h = segInt(a.x, a.z, b.x, b.z, l.x[i], l.z[i], l.x[i + 1], l.z[i + 1]);
+        if (h && Math.abs(l.cum[i] + (l.cum[i + 1] - l.cum[i]) * h.u - s) < CROSS_GAP && this.clearance(l, i, h.u, h.x, h.z) < 4.5) return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Veto for a proposed road segment (idea from the v14 build: the rail is planned against the city and
+   * the city respects the rail). Crossings must be nearly square, away from corners, stations and the
+   * freight yard, and level crossings must be spaced — so the tracks split the town into "sides" linked
+   * by a few gated streets, which later congest and earn viaducts. Arterials cross grade-separated.
+   */
+  roadCheck(ax: number, az: number, bx: number, bz: number, cls: RoadClass): string | null {
+    const hw = ROAD_HALF_WIDTH[cls];
+    const L = Math.hypot(bx - ax, bz - az) || 1, dx = bx - ax, dz = bz - az;
+    const pad = hw + 12;
+    const minx = Math.min(ax, bx) - pad, maxx = Math.max(ax, bx) + pad, minz = Math.min(az, bz) - pad, maxz = Math.max(az, bz) + pad;
+    const hits: { x: number; z: number }[] = [];
+    for (const l of this.lines) {
+      if (l.elevated) continue;
+      for (let i = 0; i < l.x.length - 1; i++) {
+        if (!this.segBoxHit(l, i, minx, maxx, minz, maxz)) continue;
+        const h = segInt(ax, az, bx, bz, l.x[i], l.z[i], l.x[i + 1], l.z[i + 1]);
+        if (!h) continue;
+        hits.push(h);
+        const clr = this.clearance(l, i, h.u, h.x, h.z);
+        if (clr > 4.5) continue; // passes under a raised track or a rail bridge
+        if (clr > 1.2) return 'trilhos em aterro/rampa: sem altura para passar';
+        if (l.kind === 'spur') return 'pátio ferroviário no caminho';
+        const rx = l.x[i + 1] - l.x[i], rz = l.z[i + 1] - l.z[i], rl = Math.hypot(rx, rz) || 1;
+        if (Math.abs(dx * rz - dz * rx) / (L * rl) < 0.72) return 'cruzamento oblíquo com a ferrovia';
+        if (h.t * L < 22 || (1 - h.t) * L < 22) return 'esquina colada aos trilhos';
+        const s = l.cum[i] + rl * h.u;
+        if (l.stations.some((st) => Math.abs(st.s - s) < 45)) return 'atravessaria a estação';
+        if (this.terminal && l.kind === 'main' && Math.abs(this.terminalS - s) < 75) return 'atravessaria o pátio de cargas';
+        if (cls >= RoadClass.Avenue) {
+          // arterials never get gates: the track is lifted over them, which a station cannot sit on
+          if (l.stations.some((st) => Math.abs(st.s - s) < RAIL_RAMP + 30)) return 'viaduto ferroviário cairia sobre a estação';
+          continue;
+        }
+        if (this.levelNear(l, s, h.x, h.z)) return 'passagem de nível próxima demais de outra';
+      }
+    }
+    // don't run hugging the tracks
+    for (const t of [0.25, 0.5, 0.75]) {
+      const x = ax + dx * t, z = az + dz * t;
+      if (hits.some((h) => Math.hypot(h.x - x, h.z - z) < 30)) continue;
+      for (const l of this.lines) {
+        if (l.elevated) continue;
+        for (let i = 0; i < l.x.length - 1; i++) {
+          if (!this.segBoxHit(l, i, x - pad, x + pad, z - pad, z + pad)) continue;
+          const sx = l.x[i + 1] - l.x[i], sz = l.z[i + 1] - l.z[i], L2 = sx * sx + sz * sz || 1;
+          const u = Math.max(0, Math.min(1, ((x - l.x[i]) * sx + (z - l.z[i]) * sz) / L2));
+          const px = l.x[i] + sx * u, pz = l.z[i] + sz * u;
+          if (Math.hypot(px - x, pz - z) < hw + 7 && this.clearance(l, i, u, px, pz) < 4.5) return 'colada aos trilhos';
+        }
+      }
+    }
+    return null;
   }
 
   private addLine(kind: RLine['kind'], path: P2[], y: number[], tracks: number, elevated: boolean): RLine {
@@ -82,7 +174,8 @@ export class Rail {
     const freightGap = HOUR_SECONDS * (this.terminal ? 2 : 3.5);
     if (w.t - this.lastFreight > freightGap) { if (this.dispatch(main, 'freight')) this.lastFreight = w.t; }
     if (main.stations.length && w.t - this.lastPass > HOUR_SECONDS * (w.era >= 2 ? 1.2 : 2)) { if (this.dispatch(main, 'pass')) this.lastPass = w.t; }
-    for (const l of this.lines) if (l.kind === 'metro' && w.t - this.lastMetro > HOUR_SECONDS * 0.5) { this.dispatch(l, 'metro'); this.lastMetro = w.t; }
+    // metro trains shuttle end to end and are never retired: dispatch only up to the line's fleet (one per ~700 m)
+    for (const l of this.lines) if (l.kind === 'metro' && (l.built ?? 1) >= 1 && w.t - this.lastMetro > HOUR_SECONDS * 0.5 && this.trains.filter((t) => t.line === l.id).length < Math.max(2, Math.round(l.len / 700))) { this.dispatch(l, 'metro'); this.lastMetro = w.t; }
     // move
     for (const tr of this.trains) {
       const l = this.lines[tr.line];
@@ -159,6 +252,7 @@ export class Rail {
     const tr: Train = { id: this.nextTrain++, line: l.id, kind, s: dir > 0 ? -5 : l.len + 5, dir, v: kind === 'freight' ? 12 : 18, vmax: kind === 'freight' ? 15 : kind === 'metro' ? 19 : 24, cars, dwell: 0, served: new Set(), gen: 0 };
     void tail;
     this.trains.push(tr);
+    this.runs[kind]++;
     if (kind !== 'metro' && w.rng.chance(0.35)) {
       const p = this.at(l, l.len / 2);
       w.events.emit('train', p[0], p[2], kind === 'freight' ? 0.5 : 0.6, kind === 'freight' ? `Trem de carga com ${cars.length - 2} vagões cruza a cidade` : `Trem de passageiros chega à cidade`, { entity: { kind: 'train', id: tr.id }, visual: 0.8 });
@@ -204,10 +298,39 @@ export class Rail {
   }
 
   // ------------------------------------------------------------------ crossings
+  /** daily: fold the queues measured at the gates into a persistent "pressure" per crossing */
+  daily() {
+    this.runsYday = this.runs; this.runs = { freight: 0, pass: 0, metro: 0 };
+    for (const l of this.lines) {
+      if ((l.built ?? 1) >= 1) continue;
+      // track laid along the corridor a stretch per day (stalled while the works are stalled by corruption)
+      const stall = this.w.integrity && this.w.rng.chance(this.w.integrity.index * 0.5);
+      if (!stall) l.built = Math.min(1, (l.built ?? 0) + 1 / 14);
+      this.dirtyViews = true;
+      if (l.built! >= 1) this.openLine(l);
+    }
+    const W = this.w.traffic.crossWait;
+    for (const c of this.crossings) {
+      if (c.separated) { c.hot = 0; continue; }
+      const e = this.w.roads.edges[c.edge];
+      const vol = e ? e.volume[0] + e.volume[1] : 0;
+      c.wait = W.get(c.edge) ?? 0;
+      // ~8 minutes of stopped vehicles a day, or a busy street, counts as a saturated day
+      if (c.wait > 480 || vol > 60) c.hot++; else c.hot = Math.max(0, c.hot - 1);
+    }
+    W.clear();
+  }
+  /** for "Por que congestionado?": queue at the gates of this edge, if any */
+  gateInfo(edge: number): { wait: number; hot: number; separated: boolean } | null {
+    const c = this.crossings.find((k) => k.edge === edge);
+    return c ? { wait: c.wait, hot: c.hot, separated: c.separated } : null;
+  }
+
   computeCrossings() {
     const w = this.w, R = w.roads;
     this.crossVer = w.roads.topoVer;
     const old = new Map(this.crossings.map((c) => [`${c.edge}`, c.separated]));
+    const prevByS = this.crossings.map((c) => ({ line: c.line, s: c.s, wait: c.wait, hot: c.hot }));
     const out: Crossing[] = [];
     for (const l of this.lines) {
       if (l.elevated) continue;
@@ -220,14 +343,48 @@ export class Rail {
           const hit = segInt(a.x, a.z, b.x, b.z, l.x[i], l.z[i], l.x[i + 1], l.z[i + 1]);
           if (!hit) continue;
           const s = l.cum[i] + Math.hypot(l.x[i + 1] - l.x[i], l.z[i + 1] - l.z[i]) * hit.u;
-          out.push({ edge: e.id, t: hit.t, line: l.id, s, x: hit.x, z: hit.z, y: Math.max(0, w.terrain.heightAt(hit.x, hit.z)) + 0.2, angle: Math.atan2(b.z - a.z, b.x - a.x), separated: old.get(`${e.id}`) ?? false, closed: false });
+          // a track already lifted here (earlier viaduct, rail bridge) needs no gates, whatever the edge id now is
+          const raised = this.clearance(l, i, hit.u, hit.x, hit.z) > 4.5;
+          out.push({ edge: e.id, t: hit.t, line: l.id, s, x: hit.x, z: hit.z, y: Math.max(0, w.terrain.heightAt(hit.x, hit.z)) + 0.2, angle: Math.atan2(b.z - a.z, b.x - a.x), separated: raised || (old.get(`${e.id}`) ?? false), closed: false, wait: 0, hot: 0 });
         }
       }
     }
+    for (const c of out) if (this.underpasses.some((u) => u.line === c.line && Math.abs(u.s - c.s) < 15)) { c.separated = true; c.under = true; }
+    for (const c of out) { const p = prevByS.find((q) => q.line === c.line && Math.abs(q.s - c.s) < 12); if (p) { c.wait = p.wait; c.hot = p.hot; } }
     this.crossings = out;
+    // arterials never get gates: their crossing is built grade-separated
+    for (const c of out) {
+      const e = R.edges[c.edge];
+      if (!c.separated && e.cls < RoadClass.Avenue) this.seat(c);
+      if (!c.separated && e.cls >= RoadClass.Avenue && this.canLift(c)) this.separate(c, true);
+    }
     this.crossingsDirty = true;
   }
-  crossingViews(): CrossingView[] { return this.crossings.map((c) => ({ x: c.x, z: c.z, y: c.y, angle: c.angle, closed: c.closed, separated: c.separated })); }
+  /** a level crossing needs the rails flush with the street: ease the track down to road level around it */
+  private seat(c: Crossing) {
+    const l = this.lines[c.line], T = this.w.terrain, R0 = 60;
+    let moved = false;
+    for (let i = 0; i < l.x.length; i++) {
+      const d = Math.abs(l.cum[i] - c.s);
+      if (d >= R0) continue;
+      const f = 1 - d / R0, wgt = f * f * (3 - 2 * f);
+      const target = Math.max(Math.max(0, T.heightAt(l.x[i], l.z[i])) + 0.05, c.y + 0.12);
+      const ny = l.y[i] + (target - l.y[i]) * wgt;
+      if (Math.abs(ny - l.y[i]) > 0.02) { l.y[i] = ny; moved = true; }
+    }
+    if (moved) this.dirtyViews = true;
+  }
+  /** track off the ground around s (a ramp, a viaduct or a bridge) */
+  private raisedAt(l: RLine, s: number) {
+    for (const ds of [-60, -20, 20, 60]) { const p = this.at(l, s + ds); if (p[1] - Math.max(0, this.w.terrain.heightAt(p[0], p[2])) > 1.6) return true; }
+    return false;
+  }
+  crossingViews(): CrossingView[] {
+    return this.crossings.map((c) => {
+      const l = this.lines[c.line], e = this.w.roads.edges[c.edge];
+      return { x: c.x, z: c.z, y: c.y, angle: c.angle, closed: c.closed, separated: c.separated, under: c.under, hw: e ? ROAD_HALF_WIDTH[e.cls] : 4, rail: this.at(l, c.s)[3], ry: this.at(l, c.s)[1] };
+    });
+  }
   crossingsSnapshot = (): Uint8Array => { const a = new Uint8Array(this.crossings.length); this.crossings.forEach((c, i) => (a[i] = c.closed ? 1 : 0)); return a; };
 
   // ------------------------------------------------------------------ views
@@ -243,10 +400,22 @@ export class Rail {
           pts.push(l.x[k], l.y[k], l.z[k]);
           if (this.w.terrain.heightAt(l.x[k], l.z[k]) < 0.5 || l.y[k] > Math.max(0, this.w.terrain.heightAt(l.x[k], l.z[k])) + 3) bridge = true;
         }
-        out.push({ id: id++, pts, tracks: l.tracks, progress: 1, bridge: bridge && l.kind !== 'metro', elevated: l.elevated || (bridge && l.kind === 'main' && pts[1] > 3), metro: l.kind === 'metro', spur: l.kind === 'spur' });
+        const s0 = l.cum[i], s1 = l.cum[Math.min(l.x.length - 1, i + seg)], bl = (l.built ?? 1) * l.len;
+        const progress = Math.max(0, Math.min(1, (bl - s0) / Math.max(1, s1 - s0)));
+        out.push({ id: id++, pts, tracks: l.tracks, progress, bridge: bridge && l.kind !== 'metro', elevated: l.elevated || (bridge && l.kind === 'main' && pts[1] > 3), metro: l.kind === 'metro', spur: l.kind === 'spur' });
       }
     }
     return out;
+  }
+
+  /** train noise along the tracks: freight is loud, metro on its viaduct much less; rises with traffic */
+  splatNoise(F: World['fields'], noise: Float32Array) {
+    const r = this.runsYday;
+    for (const l of this.lines) {
+      const per = l.kind === 'metro' ? 0.05 + r.metro * 0.012 : l.kind === 'spur' ? 0.1 + r.freight * 0.03 : 0.12 + r.freight * 0.07 + r.pass * 0.035;
+      if ((l.built ?? 1) < 1) continue;
+      for (let i = 0; i < l.x.length; i++) noise[F.idx(l.x[i], l.z[i])] += per * (l.cum[Math.min(i + 1, l.cum.length - 1)] - l.cum[i] || 20) / 15;
+    }
   }
 
   splatAccess(F: World['fields'], rail: Float32Array, _transit: Float32Array) {
@@ -267,6 +436,7 @@ export class Rail {
       for (let s = 200; s < main.len - 200; s += 60) {
         if (main.stations.some((st) => Math.abs(st.s - s) < 900)) continue;
         const p = this.at(main, s);
+        if (this.raisedAt(main, s)) continue; // platforms can't sit on a viaduct ramp
         const pop = F.sum('resDensity', p[0], p[2], 700) + F.sum('jobDensity', p[0], p[2], 700) * 0.5;
         if (pop > bs) { bs = pop; best = s; }
       }
@@ -280,6 +450,7 @@ export class Rail {
         let best = -1, bs = 0;
         for (let s = 150; s < main.len - 150; s += 50) {
           const p = this.at(main, s);
+          if (this.raisedAt(main, s)) continue;
           let sc = 0;
           for (const b of ind) { const d = Math.hypot(b.x - p[0], b.z - p[2]); if (d < 900) sc += b.workers.length * (1 - d / 900); }
           if (sc > bs) { bs = sc; best = s; }
@@ -291,15 +462,19 @@ export class Rail {
     if (!this.duplicated && this.waitingSingle > 40 && w.era >= 1) {
       out.push({ kind: 'rail_dup', label: 'Duplicação da ferrovia', motive: `Trens esperando em via singela (${this.waitingSingle} esperas)`, benefit: 30, cost: 2500, run: () => { main.tracks = 2; this.duplicated = true; this.dirtyViews = true; const p = this.at(main, main.len / 2); w.events.emit('rail_build', p[0], p[2], 0.85, 'Ferrovia é duplicada: trens passam a cruzar sem esperar', { headline: 'Linha férrea ganha segunda via', visual: 0.8 }); return true; } });
     }
-    // grade separation of busy level crossings
-    for (const c of this.crossings) {
-      if (c.separated) continue;
-      const e = w.roads.edges[c.edge];
-      if (!e?.alive) continue;
-      const vol = e.volume[0] + e.volume[1];
-      if (vol > 45 && w.era >= 1) {
-        out.push({ kind: 'rail_viaduct', label: 'Viaduto sobre a ferrovia', motive: `Passagem de nível com ${vol.toFixed(0)} veículos/h na ${e.name}`, benefit: vol / 2, cost: 1100, run: () => this.separate(c) });
-        break;
+    // grade separation of level crossings that stay jammed day after day (not a one-off peak)
+    let worst: Crossing | null = null;
+    for (const c of this.crossings) if (!c.separated && c.hot >= 3 && (!worst || c.wait > worst.wait)) worst = c;
+    if (worst && w.era >= 1) {
+      const c = worst, e = w.roads.edges[c.edge], l = this.lines[c.line];
+      if (e?.alive) {
+        const min = Math.round(c.wait / 60);
+        const motive = `Cancelas da ${e.name} retêm ~${min} min de veículos por dia há ${c.hot} dias`;
+        const benefit = 20 + min * 1.2 + c.hot * 2;
+        // lifting the track needs long ramps clear of platforms and yards; otherwise the street dips under it
+        if (!this.canLift(c))
+          out.push({ kind: 'rail_underpass', label: 'Passagem inferior (trincheira)', motive: motive + ' · a estação/pátio impede elevar os trilhos', benefit, cost: 2100, run: () => this.underpass(c) });
+        else out.push({ kind: 'rail_viaduct', label: 'Viaduto ferroviário', motive, benefit, cost: 1400, run: () => this.separate(c) });
       }
     }
     // metro in the metropolis
@@ -307,18 +482,68 @@ export class Rail {
     return out;
   }
 
-  private separate(c: Crossing): boolean {
+  private pendingStops = new Map<number, Stop[]>();
+  /** a line under construction is finished: trains start and citizens can ride it */
+  private openLine(l: RLine) {
+    const w = this.w;
+    const stops = this.pendingStops.get(l.id);
+    if (stops && l.kind === 'metro') {
+      l.transit = w.transitSys.addRailLine('metro', 'Metrô Linha 1', stops, l.x.flatMap((x, i) => [x, l.y[i], l.z[i]]), HOUR_SECONDS * 0.5);
+      this.pendingStops.delete(l.id);
+    }
+    const p = this.at(l, l.len / 2);
+    w.events.emit('line_opened', p[0], p[2], 1, `${l.kind === 'metro' ? 'Metrô Linha 1' : 'Nova linha férrea'} começa a operar`, { headline: l.kind === 'metro' ? 'Metrô inaugurado: primeira composição parte lotada' : undefined, visual: 1 });
+  }
+
+  /** level crossings that would sit on the ramps join the same elevated stretch (one "elevado", not a roller coaster) */
+  private stretch(c: Crossing) {
+    const group = [c];
+    for (let grew = true; grew;) {
+      grew = false;
+      const lo = Math.min(...group.map((g) => g.s)), hi = Math.max(...group.map((g) => g.s));
+      for (const k of this.crossings) {
+        if (group.includes(k) || k.line !== c.line || k.under) continue;
+        if (k.s > lo - RAIL_RAMP - 10 && k.s < hi + RAIL_RAMP + 10 && hi - lo < 900) { group.push(k); grew = true; }
+      }
+    }
+    return { group, lo: Math.min(...group.map((g) => g.s)), hi: Math.max(...group.map((g) => g.s)) };
+  }
+  /** can the track be lifted over c? (the whole stretch plus ramps must stay clear of platforms, the yard and line ends) */
+  private canLift(c: Crossing) {
+    const l = this.lines[c.line], { lo, hi } = this.stretch(c);
+    const near = (s: number) => s > lo - RAIL_RAMP - 20 && s < hi + RAIL_RAMP + 20;
+    if (l.stations.some((st) => near(st.s))) return false;
+    if (l.kind === 'main' && this.terminal && near(this.terminalS)) return false;
+    return lo >= RAIL_RAMP && hi <= l.len - RAIL_RAMP;
+  }
+
+  private underpass(c: Crossing): boolean {
+    c.separated = true; c.under = true;
+    this.underpasses.push({ line: c.line, s: c.s });
+    this.crossingsDirty = true;
+    const e = this.w.roads.edges[c.edge];
+    this.w.events.emit('road_upgrade', c.x, c.z, 0.75, `${e?.name ?? 'A rua'} ganha passagem inferior sob a ferrovia`, { headline: 'Trincheira acaba com a espera nas cancelas', visual: 0.85 });
+    return true;
+  }
+
+  private separate(c: Crossing, quiet = false): boolean {
     const w = this.w;
     const l = this.lines[c.line];
-    c.separated = true;
-    // lift the rail over the road with smooth ramps
+    const { group, lo, hi } = this.stretch(c);
+    const base = Math.max(...group.map((g) => g.y));
+    for (const g of group) g.separated = true;
+    // lift the rail with long smoothstep ramps (freight trains can't climb steep grades)
     for (let i = 0; i < l.x.length; i++) {
-      const d = Math.abs(l.cum[i] - c.s);
-      if (d < 160) l.y[i] = Math.max(l.y[i], c.y + 7.5 * Math.cos((d / 160) * Math.PI / 2) ** 0.6);
+      const s = l.cum[i], d = s < lo ? lo - s : s > hi ? s - hi : 0;
+      if (d >= RAIL_RAMP) continue;
+      const f = 1 - d / RAIL_RAMP;
+      l.y[i] = Math.max(l.y[i], base + LIFT * f * f * (3 - 2 * f));
     }
     this.dirtyViews = true;
     this.crossingsDirty = true;
-    w.events.emit('road_upgrade', c.x, c.z, 0.8, 'Passagem de nível vira viaduto ferroviário', { headline: 'Fim das cancelas: ferrovia passa por cima da avenida', visual: 0.9 });
+    const e = w.roads.edges[c.edge];
+    if (quiet) w.events.emit('road_upgrade', c.x, c.z, 0.35, `${e?.name ?? 'A via'} passa sob a ferrovia, sem cancelas`, { visual: 0.4 });
+    else w.events.emit('road_upgrade', c.x, c.z, 0.8, `Passagem de nível da ${e?.name ?? 'via'} vira viaduto ferroviário`, { headline: 'Fim das cancelas: ferrovia passa por cima da avenida', visual: 0.9 });
     return true;
   }
 
@@ -409,7 +634,8 @@ export class Rail {
       l.stations.push({ s, b: b?.id ?? -1, name: 'Metrô ' + w.districtName(p[0], p[2]), stop: stops.length });
       stops.push({ x: p[0], z: p[2], node: -1, s, name: 'Metrô ' + w.districtName(p[0], p[2]) });
     }
-    l.transit = w.transitSys.addRailLine('metro', 'Metrô Linha 1', stops, l.x.flatMap((x, i) => [x, l.y[i], l.z[i]]), HOUR_SECONDS * 0.5);
+    l.built = 0;
+    this.pendingStops.set(l.id, stops);
     w.events.emit('line_opened', ax, az, 1, `Metrô Linha 1 em construção entre ${w.districtName(ax, az)} e ${w.districtName(bx, bz)}`, { headline: 'Metrópole ganha sua primeira linha de metrô', visual: 1 });
     return true;
   }

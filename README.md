@@ -67,6 +67,16 @@ A corrupção não é uma regra do tipo "ponha X aqui". É um índice que enfraq
 
 A ideia veio da versão alternativa (v14) e foi adaptada ao nosso estilo. Cada cruzamento é um polígono cujos meios-fios são curvas de Bézier entre as bocas das vias vizinhas. Calçadas e meios-fios acompanham essas curvas na esquina. Dobras de via (nós de grau 2) ganham um trecho curvo contínuo. A superfície segue o relevo para nunca afundar sob o terreno.
 
+## A ferrovia como barreira urbana
+
+Outra ideia adaptada da v14: lá, a ferrovia é traçada respeitando a cidade. Aqui fizemos o contrário: é a cidade que respeita a ferrovia que chegou primeiro.
+
+- **Cruzar os trilhos tem regras.** Uma rua nova só cruza quase em ângulo reto, longe de esquinas, fora das plataformas e do pátio de cargas, sem correr colada aos trilhos e a pelo menos 150 m de outra passagem de nível. Avenidas e vias expressas nunca ganham cancelas: os trilhos sobem sobre elas. O resultado é o "outro lado da linha", com poucas ruas de ligação que concentram o tráfego.
+- **Pressão, não pico.** As cancelas medem quantos minutos de veículos ficam parados a cada dia. Só depois de vários dias saturados a prefeitura considera uma obra, e o motivo aparece em "Por que congestionado?".
+- **Viaduto ou trincheira.** Se há espaço para rampas longas (cerca de 3%), os trilhos sobem. Passagens de nível vizinhas entram no mesmo elevado, em vez de virar uma montanha-russa. Perto de estações e do pátio, onde não dá para elevar, a rua desce numa passagem inferior.
+- **Visual.** Painel de borracha na travessia, faixas de retenção, postes com cruz de Santo André e luzes vermelhas alternadas, cancelas que baixam sobre a faixa de quem chega, aterros com taludes, e trilhos nivelados com a rua na travessia. O material rodante tem truques e rodas, vagões-tanque com cintas, hoppers com nervuras, contêineres, e janelas e faróis acesos à noite.
+- **Obra e ruído.** O metrô é construído trecho a trecho ao longo de cerca de 14 dias, e mais devagar quando há corrupção. Só opera depois de pronto, com frota proporcional ao comprimento da linha. O barulho dos trens entra no campo de ruído, proporcional aos trens de carga e passageiros do dia.
+
 ## Tempo
 
 Os agentes andam em velocidade real (m/s), mas o calendário é comprimido: 1 dia de jogo dura 2.400 s de movimento, 1 ano tem 12 dias e 4 estações. As velocidades são 1×, 10×, 100× e time‑lapse (400×), além de um modo automático controlado pelo diretor.

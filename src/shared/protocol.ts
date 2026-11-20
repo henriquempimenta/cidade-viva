@@ -49,7 +49,7 @@ export interface RailEdgeView { id: number; pts: number[]; tracks: number; progr
 export interface RailStationView { id: number; x: number; z: number; y: number; angle: number; len: number; kind: 'pass' | 'freight' | 'metro'; name: string }
 export interface TransitLineView { id: number; kind: 'bus' | 'brt' | 'rail' | 'metro' | 'freight'; color: string; name: string; pts: number[]; stops: number[]; riders: number; vehicles: number }
 export interface PowerLineView { id: number; pts: number[]; progress: number }
-export interface CrossingView { x: number; z: number; y: number; angle: number; closed: boolean; separated: boolean }
+export interface CrossingView { x: number; z: number; y: number; angle: number; closed: boolean; separated: boolean; /** road dips under the track (trincheira) */ under?: boolean; /** road half width, rail heading, rail top height */ hw?: number; rail?: number; ry?: number }
 
 export interface WorldInit {
   size: number;

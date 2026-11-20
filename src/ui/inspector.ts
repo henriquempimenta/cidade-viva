@@ -23,6 +23,7 @@ interface EdgeInfo {
   congestedDays: number; busLane: boolean; upgrading: boolean; od: [string, number][]; pairs: { ox: number; oz: number; dx: number; dz: number }[];
   noise: null | { light: number; moto: number; heavy: number; power: number; index: number; speed: number; samples: number };
   mid: { x: number; y: number; z: number; hx: number; hz: number };
+  gate: null | { wait: number; hot: number; separated: boolean };
   upgrade: null | { day: number; chosen: string; options: { label: string; benefit: number; cost: number; ratio: number; feasible: boolean; note: string }[] };
 }
 
@@ -178,6 +179,11 @@ export class Inspector {
       <div class="kv"><span>Comprimento</span><span>${d.len.toFixed(0)} m</span><span>Volume (veíc./h)</span><span>${d.volume.map((v) => v.toFixed(0)).join(' / ')}</span>
       <span>Capacidade</span><span>${d.capacity.toFixed(0)}</span><span>Volume/capacidade</span><span style="color:${d.vc > 0.85 ? 'var(--bad)' : 'inherit'}">${d.vc.toFixed(2)}</span>
       <span>Dias congestionado</span><span>${d.congestedDays}</span><span>Picos (7 dias)</span><span>${d.history.map((h) => h.toFixed(2)).join(' ')}</span></div>`;
+    if (d.gate) {
+      const g = d.gate;
+      html += g.separated ? `<div class="alt">🚆 Cruza a ferrovia em desnível: sem cancelas.</div>`
+        : `<h4>Passagem de nível</h4><div class="alt">🚧 As cancelas retiveram ~${Math.round(g.wait / 60)} min de veículos parados ontem${g.hot ? `; ${g.hot} dia(s) seguidos saturada` : ''}.${g.hot >= 3 ? ' A prefeitura já considera um viaduto ferroviário.' : ''}</div>`;
+    }
     html += `<h4>Por que congestionado? (origem → destino)</h4>`;
     if (!d.od.length) html += '<div style="color:var(--mut)">Sem viagens registradas ainda.</div>';
     const max = Math.max(1, ...d.od.map((o) => o[1]));

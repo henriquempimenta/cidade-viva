@@ -54,7 +54,7 @@ export function updateFields(w: World) {
     if (n.edges.some((id) => w.roads.edges[id].cls === RoadClass.Highway && w.roads.edges[id].progress >= 1)) F.splat(hw, n.x, n.z, 1, 25);
   }
   // --- rail ---
-  if (w.rail) w.rail.splatAccess(F, rail, transit);
+  if (w.rail) { w.rail.splatAccess(F, rail, transit); w.rail.splatNoise?.(F, noiseSrc); }
   if (w.transit) w.transit.splatCoverage(F, transit);
 
   // --- buildings ---

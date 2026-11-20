@@ -121,6 +121,7 @@ export class App {
     this.roads.ground = (x, z) => this.terrain.heightAt(x, z);
     scene.add(this.roads.group);
     this.rail = new RailLayer();
+    this.rail.ground = (x, z) => this.terrain.heightAt(x, z);
     scene.add(this.rail.group);
     this.smoke = new Particles(6000, false);
     this.glow = new Particles(5000, true);

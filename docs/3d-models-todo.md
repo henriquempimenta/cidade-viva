@@ -31,7 +31,7 @@ Este arquivo registra ressalvas aprovadas para iteração futura e o backlog de 
 
 ---
 
-## Próximas Frentes 3D (mesmo fluxo: agente dedicado + bancada + avaliador com notas ≥ 7)
+## Próximas Frentes 3D *(agendadas para a entrega depois da próxima — cada frente em um loop distinto: agente dedicado + bancada + avaliador independente com notas ≥ 7)*
 - [ ] **Frente 2 — Material Rodante Ferroviário e Metrô** (`src/render/railGeom.ts`): locomotiva, carros de passageiros, metrô, contêiner, hopper e vagão-tanque cilíndrico real + truques/pantógrafos + janelas emissivas.
 - [ ] **Frente 3 — Árvores e Vegetação** (`src/render/trees.ts`): gerador paramétrico de troncos, galhos e copas em camadas compatível com `swayMaterial()` e chunks 400×400 m.
 - [ ] **Frente 4 — Pedestres, Ciclistas e Mobiliário Urbano**: corpos proporcionais, bicicletas com quadro/guidão, postes, semáforos de 3 lentes, cancelas listradas e máquinas de obra.

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "capture": "node scripts/capture-workbench.mjs"
+    "capture": "node scripts/capture-workbench.mjs",
+    "capture:field": "node scripts/capture-field.mjs"
   },
   "dependencies": {
     "three": "^0.170.0"

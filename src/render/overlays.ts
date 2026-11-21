@@ -176,7 +176,9 @@ export class Overlays {
 
   upsertLine(l: TransitLineView) {
     this.lines.set(l.id, l);
-    this.app.agents.lineColors.set(l.id, new THREE.Color(l.color));
+    const col = new THREE.Color(l.color);
+    this.app.agents.lineColors.set(l.id, col);
+    if (l.kind === 'metro') this.app.agents.metroLineColor = col;
     this.rebuildLines();
   }
   removeLine(id: number) { this.lines.delete(id); this.rebuildLines(); }

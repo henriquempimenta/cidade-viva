@@ -22,9 +22,18 @@ import {
 } from '../shared/constants';
 /** render budgets (instances drawn per frame); the simulation itself has no such cap */
 const RENDER_PED = 6000;
-import { GB } from './geomBuilder';
 import { createAssetMaterial, createGlowMaterial, type AssetDetail } from './meshKit';
 import { buildVehicle, VEHICLE_PRESETS, type VehicleId } from './vehicleGeom';
+import {
+  RAIL_CONTAINER_PALETTE,
+  RAIL_HOPPER_PALETTE,
+  RAIL_LOCO_PALETTE,
+  RAIL_METRO_PALETTE,
+  RAIL_PASSENGER_PALETTE,
+  RAIL_PRESETS,
+  RAIL_TANK_PALETTE,
+  buildRailCar,
+} from './railGeom';
 import { pickVehiclePreset } from '../shared/vehiclePresets';
 import {
   BIKE_COLORS,
@@ -53,7 +62,6 @@ import {
 import { U } from './uniforms';
 
 const PED_FLAG_BIKE = 256;
-const TIRE = new THREE.Color(0x1a1a1a);
 
 const PRESET_INDEX: Record<VehicleId, number> = Object.fromEntries(
   VEHICLE_PRESETS.map((p, idx) => [p.id, idx]),
@@ -73,6 +81,9 @@ const LOD_LEVELS: AssetDetail[] = ['high', 'med', 'low'];
 /** Real-time distance thresholds (meters) for 3-tier pedestrian/bike/accessory LOD. */
 const LOD_HIGH_DIST_SQ = 42 * 42;
 const LOD_MED_DIST_SQ = 115 * 115;
+/** Real-time distance thresholds (meters) for 3-tier rolling-stock LOD. */
+const RAIL_LOD_HIGH_DIST_SQ = 90 * 90;
+const RAIL_LOD_MED_DIST_SQ = 220 * 220;
 
 const CAR_COLORS = [0xf2f2f2, 0x262a30, 0x8f969c, 0xb5b9bd, 0xb83832, 0x2b558c, 0x2f6b4a, 0xd4c08a, 0x6d2b45, 0x3c6fb0, 0xd99b2a, 0x4a525c];
 const OLD_COLORS = [0x5ca09b, 0xd9cba0, 0x9c3d41, 0x3f6b54, 0x6b849c, 0xc8a45a, 0x9e5a38, 0xe6decb];
@@ -122,8 +133,8 @@ export class AgentsLayer {
   private umbWorldM = new THREE.Matrix4();
   private lugLocalM = new THREE.Matrix4();
 
-  private trains: THREE.InstancedMesh[] = [];
-  private trainGlow: (THREE.InstancedMesh | null)[] = [];
+  private trains: THREE.InstancedMesh[][] = []; // [carType 0..5][lod 0..2]
+  private trainGlow: (THREE.InstancedMesh | null)[][] = [];
   private trainGlowMat!: THREE.MeshBasicMaterial;
   private m = new THREE.Matrix4();
   private q = new THREE.Quaternion();
@@ -139,13 +150,15 @@ export class AgentsLayer {
   private cullSphere = new THREE.Sphere(new THREE.Vector3(), 10);
   private vCounts = new Int32Array(VEHICLE_PRESETS.length);
   private vGlowCounts = new Int32Array(VEHICLE_PRESETS.length);
-  private tCounts = new Int32Array(6);
+  private tCounts = new Int32Array(RAIL_PRESETS.length * 3);
+  private tGlowCounts = new Int32Array(RAIL_PRESETS.length * 3);
   private vPos = new Float32Array(MAX_VEHICLES * 4); // interpolated x,y,z,h (grows with the sim pools)
   private pPos = new Float32Array(MAX_PEDS * 4);
   private tPos = new Float32Array(MAX_TRAIN_CARS * 4);
   private t = 0;
   private pedAnimT = 0;
   lineColors = new Map<number, THREE.Color>();
+  metroLineColor: THREE.Color | null = null;
 
   constructor(private app: App) {
     const vehMat = createAssetMaterial();
@@ -233,85 +246,36 @@ export class AgentsLayer {
 
     this.group.add(this.sirens, this.hazards, this.blinkers);
 
-    // trains: 0 loco, 1 passenger coach, 2 container flat, 3 hopper, 4 tank, 5 metro
-    // (rolling stock with bogies and wheels, after the v14 build; lit windows/headlamps live in a glow twin)
-    const C = (h: number) => new THREE.Color(h);
-    const frame = C(0x2c3234), steelC = C(0x8a8f8a), roofC = C(0x6f7a77), glassC = C(0x2f474c);
-    const bogies = (g: GB, half: number) => {
-      for (const bx of [-half, half]) {
-        g.box(bx, 0.32, 0, 2.9, 0.42, 2.25, frame);
-        for (const ax of [-0.85, 0.85]) for (const z of [-1.2, 1.2]) { g.box(bx + ax, 0.0, z, 0.78, 0.78, 0.14, TIRE); g.box(bx + ax, 0.27, z * 1.1, 0.26, 0.26, 0.06, steelC); }
-      }
-    };
-    const glowCol = C(0xffd9a0), lampCol = C(0xfff4d6);
-    const geos: [GB, GB | null][] = [];
-    for (let k = 0; k < 6; k++) {
-      const g = new GB();
-      let glow: GB | null = null;
-      if (k === 0) {
-        const red = C(0xb8432f), band = C(0xe3b23c);
-        bogies(g, 5.3);
-        g.box(0, 0.78, 0, 16.2, 0.4, 2.9, frame);
-        g.box(-1.6, 1.18, 0, 12.4, 2.4, 2.5, red, 0, { top: roofC });
-        g.box(5.4, 1.18, 0, 4.4, 2.95, 3.0, red, 0, { top: roofC });
-        g.box(0, 1.5, 0, 16.0, 0.22, 3.04, band);
-        g.box(7.62, 2.55, 0, 0.06, 0.95, 2.4, glassC);
-        for (const z of [-1.51, 1.51]) g.box(5.6, 2.6, z, 1.8, 0.8, 0.04, glassC);
-        g.box(-3, 3.55, 0, 2.2, 0.35, 1.2, frame);
-        glow = new GB();
-        for (const z of [-0.9, 0.9]) glow.box(7.66, 1.55, z, 0.08, 0.3, 0.42, lampCol);
-        glow.box(7.66, 3.45, 0, 0.08, 0.28, 0.5, lampCol);
-      } else if (k === 1 || k === 5) {
-        const metro = k === 5;
-        const len = metro ? 18.2 : 19.2, body = metro ? C(0xe9ecef) : C(0xc9cfd2), stripe = metro ? C(0x2e8a62) : C(0x2f6a9a);
-        bogies(g, len / 2 - 3);
-        g.box(0, 0.78, 0, len, 0.35, 2.9, frame);
-        g.box(0, 1.1, 0, len, 2.95, 3.0, body, 0, { top: roofC });
-        g.box(0, 1.35, 0, len + 0.02, 0.3, 3.04, stripe);
-        for (const z of [-1.51, 1.51]) {
-          for (let x = -len / 2 + 2.4; x < len / 2 - 1.5; x += 2.6) g.box(x, 2.25, z, 1.9, 1.0, 0.04, glassC);
-          for (const x of metro ? [-len / 4, len / 4] : [-len / 2 + 1.1, len / 2 - 1.1]) g.box(x, 1.2, z * 1.005, 1.25, 2.55, 0.04, stripe);
+    // ---- Parametric Railway Rolling Stock & Metro with 3-tier Real-Time LOD ----
+    // Indices 0..5 match src/sim/rail.ts: 0 loco, 1 passenger, 2 container, 3 hopper, 4 tank, 5 metro
+    const railMat = createAssetMaterial();
+    this.trainGlowMat = createGlowMaterial();
+    const railCaps = [120, 200, 300];
+    for (const preset of RAIL_PRESETS) {
+      const lodMeshes: THREE.InstancedMesh[] = [];
+      const lodGlows: (THREE.InstancedMesh | null)[] = [];
+      for (let l = 0; l < 3; l++) {
+        const built = buildRailCar(preset.id, LOD_LEVELS[l]);
+        const cap = railCaps[l];
+        const im = new THREE.InstancedMesh(built.body, railMat, cap);
+        im.count = 0;
+        im.castShadow = l < 2;
+        im.receiveShadow = l < 2;
+        im.frustumCulled = false;
+        lodMeshes.push(im);
+        this.group.add(im);
+        if (built.glow) {
+          const gm = new THREE.InstancedMesh(built.glow, this.trainGlowMat, cap);
+          gm.count = 0;
+          gm.frustumCulled = false;
+          lodGlows.push(gm);
+          this.group.add(gm);
+        } else {
+          lodGlows.push(null);
         }
-        g.box(0, 4.05, 0, len - 2, 0.25, 2.2, roofC);
-        glow = new GB();
-        for (const z of [-1.53, 1.53]) for (let x = -len / 2 + 2.4; x < len / 2 - 1.5; x += 2.6) glow.box(x, 2.3, z, 1.75, 0.85, 0.03, glowCol);
-      } else if (k === 2) {
-        bogies(g, 5.4);
-        g.box(0, 0.78, 0, 16.2, 0.35, 2.7, frame);
-        g.box(-4.05, 1.13, 0, 7.8, 2.55, 2.45, C(0x3b6f9e));
-        g.box(4.05, 1.13, 0, 7.8, 2.55, 2.45, C(0xb4533e));
-        for (const x of [-7.9, -0.2, 0.2, 7.9]) g.box(x, 1.13, 0, 0.08, 2.55, 2.5, C(0x5a5a52));
-      } else if (k === 3) {
-        bogies(g, 4.6);
-        g.box(0, 0.78, 0, 14.2, 0.35, 2.7, frame);
-        g.box(0, 1.15, 0, 12.6, 1.0, 2.2, C(0x6a5440));
-        g.box(0, 2.1, 0, 13.6, 1.6, 3.0, C(0x7f6447), 0, { top: C(0x3a3027) });
-        for (const z of [-1.52, 1.52]) for (let x = -6; x <= 6; x += 2) g.box(x, 2.1, z, 0.16, 1.6, 0.06, C(0x5c4733));
-      } else {
-        const tank = C(0x9fa79c), ring = C(0x6e7a74);
-        bogies(g, 4.9);
-        g.box(0, 0.78, 0, 15.2, 0.35, 2.7, frame);
-        // rounded tank from overlapping prisms (reads as a cylinder at city scale)
-        g.box(0, 1.35, 0, 14.4, 2.3, 2.1, tank);
-        g.box(0, 1.6, 0, 14.4, 1.8, 2.85, tank);
-        g.box(0, 1.15, 0, 14.4, 2.75, 1.25, tank, 0, { top: tank });
-        for (const x of [-4.2, 4.2]) g.box(x, 1.12, 0, 0.18, 2.83, 2.95, ring);
-        g.box(0, 3.88, 0, 1.0, 0.4, 1.0, ring);
       }
-      geos.push([g, glow]);
-    }
-    const glowMat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
-    this.trainGlowMat = glowMat;
-    for (const [g, glow] of geos) {
-      const im = new THREE.InstancedMesh(g.toGeometry(false), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0.2 }), 300);
-      im.count = 0; im.castShadow = true; im.frustumCulled = false;
-      this.trains.push(im);
-      this.group.add(im);
-      if (glow) {
-        const gm = new THREE.InstancedMesh(glow.toGeometry(false), glowMat, 300);
-        gm.count = 0; gm.frustumCulled = false;
-        this.trainGlow.push(gm); this.group.add(gm);
-      } else this.trainGlow.push(null);
+      this.trains.push(lodMeshes);
+      this.trainGlow.push(lodGlows);
     }
   }
 
@@ -705,37 +669,90 @@ export class AgentsLayer {
       if (gm.count > 0 || prevG > 0) gm.instanceMatrix.needsUpdate = true;
     }
 
-    // ---- trains ----
+    // ---- trains (3-tier real-time distance LOD, exact railhead seating & per-car livery colors) ----
     const tnight = U.uNight.value;
     const tc = cur.train;
     const tcount = this.tCounts;
+    const tgcount = this.tGlowCounts;
     tcount.fill(0);
+    tgcount.fill(0);
+    const terrain = this.app.terrain;
     for (let i = 0; i < cur.trainCount; i++) {
       const o = i * TRAIN_STRIDE;
       const x = this.tPos[i * 4], y = this.tPos[i * 4 + 1], z = this.tPos[i * 4 + 2], h = this.tPos[i * 4 + 3];
       const type = tc[o + 4];
-      const im = this.trains[type];
-      if (!im) continue;
+      const lodRow = this.trains[type];
+      if (!lodRow) continue;
+
+      const dxC = x - camP.x, dyC = y - camP.y, dzC = z - camP.z;
+      const distSq = dxC * dxC + dyC * dyC + dzC * dzC;
+      let lod = distSq < RAIL_LOD_HIGH_DIST_SQ ? 0 : distSq < RAIL_LOD_MED_DIST_SQ ? 1 : 2;
+      let slotIdx = type * 3 + lod;
+      let im = lodRow[lod];
+      if (tcount[slotIdx] >= im.instanceMatrix.count && lod < 2) {
+        lod = Math.min(2, lod + 1);
+        slotIdx = type * 3 + lod;
+        im = lodRow[lod];
+      }
+      if (tcount[slotIdx] >= im.instanceMatrix.count) continue;
+
+      // Exact railhead top alignment: sim snapshot emits p[1] + 0.30; railLayer draws railhead top at yTop + 0.29
+      const railBase = y - 0.30;
+      const gC = terrain ? terrain.meshY(x, z) : -1e9;
+      const clr = railBase - Math.max(0, gC);
+      const yTop = (gC > 0.35 && clr < 2.2) ? Math.max(railBase, gC + 0.18) : railBase;
+      const railHeadY = yTop + 0.29;
+
       this.q.setFromAxisAngle(this.up, -h);
-      this.v.set(x, y + 0.3, z);
+      this.v.set(x, railHeadY, z);
       this.m.compose(this.v, this.q, this.sc);
-      const glow = this.trainGlow[type];
-      if (glow && tnight > 0.08) glow.setMatrixAt(tcount[type], this.m);
-      im.setMatrixAt(tcount[type]++, this.m);
+
+      // Deterministic realistic livery & line color via aTint = 1
+      const trainId = tc[o + 5] | 0;
+      const carHash = ((trainId * 31 + i * 17) >>> 0);
+      if (type === 5) {
+        if (this.metroLineColor) this.col.copy(this.metroLineColor);
+        else this.col.setHex(RAIL_METRO_PALETTE[0]);
+      } else if (type === 2) {
+        this.col.setHex(RAIL_CONTAINER_PALETTE[carHash % RAIL_CONTAINER_PALETTE.length]);
+      } else if (type === 0) {
+        this.col.setHex(RAIL_LOCO_PALETTE[(trainId >>> 0) % RAIL_LOCO_PALETTE.length]);
+      } else if (type === 1) {
+        this.col.setHex(RAIL_PASSENGER_PALETTE[(trainId >>> 0) % RAIL_PASSENGER_PALETTE.length]);
+      } else if (type === 3) {
+        this.col.setHex(RAIL_HOPPER_PALETTE[carHash % RAIL_HOPPER_PALETTE.length]);
+      } else {
+        this.col.setHex(RAIL_TANK_PALETTE[carHash % RAIL_TANK_PALETTE.length]);
+      }
+
+      const idx = tcount[slotIdx]++;
+      im.setMatrixAt(idx, this.m);
+      im.setColorAt(idx, this.col);
+
+      const glow = this.trainGlow[type][lod];
+      if (glow && tnight > 0.05 && tgcount[slotIdx] < glow.instanceMatrix.count) {
+        glow.setMatrixAt(tgcount[slotIdx]++, this.m);
+      }
     }
-    this.trains.forEach((im, k) => {
-      const prevC = im.count;
-      im.count = tcount[k];
-      if (tcount[k] > 0 || prevC > 0) im.instanceMatrix.needsUpdate = true;
-    });
-    this.trainGlowMat.color.setScalar(0.3 + 1.9 * tnight);
-    this.trainGlow.forEach((gm, k) => {
-      if (!gm) return;
-      const prevC = gm.count;
-      const nc = tnight > 0.08 ? tcount[k] : 0;
-      gm.count = nc;
-      if (nc > 0 || prevC > 0) gm.instanceMatrix.needsUpdate = true;
-    });
+    this.trainGlowMat.color.setScalar(0.4 + 2.2 * tnight);
+    for (let k = 0; k < this.trains.length; k++) {
+      for (let l = 0; l < 3; l++) {
+        const slotIdx = k * 3 + l;
+        const im = this.trains[k][l];
+        const prevC = im.count;
+        im.count = tcount[slotIdx];
+        if (tcount[slotIdx] > 0 || prevC > 0) {
+          im.instanceMatrix.needsUpdate = true;
+          if (im.instanceColor) im.instanceColor.needsUpdate = true;
+        }
+        const gm = this.trainGlow[k][l];
+        if (gm) {
+          const prevG = gm.count;
+          gm.count = tgcount[slotIdx];
+          if (tgcount[slotIdx] > 0 || prevG > 0) gm.instanceMatrix.needsUpdate = true;
+        }
+      }
+    }
   }
 
   private flushBucket(b: PedInstancedBucket) {

@@ -276,6 +276,7 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
   const { triangles, glowTriangles, minY } = built.meta;
   const size = effectiveSize(built, variant);
   const isSmallAsset = size[0] < 2.2 && size[1] < 2.2;
+  const isLongAsset = size[0] > 12;
   const targetY = Math.max(0.38, size[1] * 0.48);
   const W = window.innerWidth, H = window.innerHeight;
   const bannerH = 34;
@@ -302,9 +303,9 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
   }
 
   renderer.setScissorTest(true);
-  const cam = new THREE.PerspectiveCamera(36, aspect, 0.1, 500);
-  const baseDist = frameDistance(size, 36, aspect, isSmallAsset ? 0.56 : 0.68);
-  const swatchGap = isSmallAsset ? Math.max(size[2] * 1.9, 1.15) : Math.max(size[2] + 1.1, 2.8);
+  const cam = new THREE.PerspectiveCamera(36, aspect, 0.1, 600);
+  const baseDist = frameDistance(size, 36, aspect, isSmallAsset ? 0.56 : isLongAsset ? 0.64 : 0.68);
+  const swatchGap = isSmallAsset ? Math.max(size[2] * 1.9, 1.15) : isLongAsset ? Math.max(size[2] + 1.5, 4.4) : Math.max(size[2] + 1.1, 2.8);
 
   const cells: {
     col: number; row: number; label: string; tod: TimeOfDay;
@@ -313,20 +314,20 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
   }[] = [
     {
       col: 0, row: 0, label: '1. Close-Up 3/4 Frente (Dia)', tod: 'day',
-      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true, variant.pedShowcase)),
+      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], family.id !== 'rail', variant.pedShowcase)),
       camPos: [baseDist * 0.84, targetY + baseDist * 0.28, baseDist * 0.64],
       lookAt: [0, targetY, 0],
     },
     {
       col: 1, row: 0, label: '2. Close-Up 3/4 Traseira (Dia)', tod: 'day',
-      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true, variant.pedShowcase)),
+      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], family.id !== 'rail', variant.pedShowcase)),
       camPos: [-baseDist * 0.84, targetY + baseDist * 0.30, -baseDist * 0.62],
       lookAt: [0, targetY, 0],
     },
     {
       col: 2, row: 0, label: '3. Perfil Lateral (Escala & Solo Y=0)', tod: 'day',
-      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true, variant.pedShowcase)),
-      camPos: [0, targetY + 0.08, baseDist * 1.52],
+      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], family.id !== 'rail', variant.pedShowcase)),
+      camPos: [0, targetY + 0.08, baseDist * (isLongAsset ? 1.66 : 1.52)],
       lookAt: [0, targetY, 0],
       fov: 24,
     },
@@ -337,17 +338,18 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
       lookAt: [0, targetY, 0],
     },
     {
-      col: 1, row: 1, label: isSmallAsset ? '5. Distância de Cidade (~24m, 34°)' : '5. Distância de Cidade (~35m, 34°)', tod: 'day',
+      col: 1, row: 1, label: isSmallAsset ? '5. Distância de Cidade (~24m, 34°)' : isLongAsset ? '5. Distância de Cidade (~50m, 34°)' : '5. Distância de Cidade (~35m, 34°)', tod: 'day',
       setup: () => {
-        const sp = isSmallAsset ? Math.max(size[2] * 2.4, 1.8) : Math.max(size[2] * 2.2, 3.6);
+        const sp = isSmallAsset ? Math.max(size[2] * 2.4, 1.8) : isLongAsset ? Math.max(size[2] * 2.0, 6.0) : Math.max(size[2] * 2.2, 3.6);
         const sw = variant.swatches;
+        const xOff = isLongAsset ? size[0] * 0.30 : Math.max(size[0] * 1.4, 1.4);
         studio.content.add(makeAssetInstances(built, [
           { x: 0, y: 0, z: 0, color: variant.defaultColor },
-          { x: Math.max(size[0] * 1.4, 1.4), y: 0, z: -sp, color: sw[1 % sw.length] },
-          { x: -Math.max(size[0] * 1.3, 1.3), y: 0, z: sp, color: sw[2 % sw.length] },
-        ], true, variant.pedShowcase));
+          { x: xOff, y: 0, z: -sp, color: sw[1 % sw.length] },
+          { x: -xOff, y: 0, z: sp, color: sw[2 % sw.length] },
+        ], family.id !== 'rail', variant.pedShowcase));
       },
-      camPos: isSmallAsset ? [14, 13, 14] : [26, 22, 24],
+      camPos: isSmallAsset ? [14, 13, 14] : isLongAsset ? [35, 29, 32] : [26, 22, 24],
       lookAt: [0, targetY, 0],
       fov: 40,
     },
@@ -356,14 +358,14 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
       setup: () => {
         const sw = variant.swatches;
         const pls = sw.slice(0, 4).map((color, idx) => ({
-          x: (idx - 1.5) * (isSmallAsset ? 0.28 : 0.7),
+          x: (idx - 1.5) * (isSmallAsset ? 0.28 : isLongAsset ? 1.1 : 0.7),
           y: 0,
           z: (idx - 1.5) * swatchGap,
           color,
         }));
         studio.content.add(makeAssetInstances(built, pls, true, variant.pedShowcase));
       },
-      camPos: [baseDist * (isSmallAsset ? 1.55 : 1.45), targetY + baseDist * 0.62, baseDist * (isSmallAsset ? 1.40 : 1.35)],
+      camPos: [baseDist * (isSmallAsset ? 1.55 : isLongAsset ? 1.44 : 1.45), targetY + baseDist * 0.58, baseDist * (isSmallAsset ? 1.40 : isLongAsset ? 1.36 : 1.35)],
       lookAt: [0, targetY, 0],
     },
   ];
@@ -434,13 +436,16 @@ function renderLineup(studio: StudioRig, family: WorkbenchFamily, variants: Work
     const sz = effectiveSize(p.built, p.v);
     minZ = Math.min(minZ, p.z - sz[2] * 0.5);
     maxZ = Math.max(maxZ, p.z + sz[2] * 0.5);
-    studio.content.add(makeAssetInstances(p.built, [{ x: p.x, y: 0, z: p.z, color: p.v.defaultColor }], true, p.v.pedShowcase));
+    studio.content.add(makeAssetInstances(p.built, [{ x: p.x, y: 0, z: p.z, color: p.v.defaultColor }], family.id !== 'rail' || tod !== 'day', p.v.pedShowcase));
   }
 
   const spanZ = Math.max(isCompact ? 5.5 : 8, maxZ - minZ + (isCompact ? 1.8 : 3));
   const spanX = Math.max(isCompact ? 3.5 : 6, rowOffsets.length * rowDepth);
+  const isLong = maxLen > 12;
   const cam = new THREE.PerspectiveCamera(34, W / (H - bannerH), 0.2, 600);
-  const dist = Math.max(spanZ * (isCompact ? 0.85 : 0.92), spanX * 1.15);
+  const dist = isLong
+    ? Math.max(spanZ * 1.14, spanX * 1.30)
+    : Math.max(spanZ * (isCompact ? 0.85 : 0.92), spanX * 1.15);
   cam.position.set(dist * 0.85, maxH * 1.25 + dist * 0.30, dist * 0.58);
   cam.lookAt(0, maxH * 0.42, 0);
 
@@ -508,7 +513,7 @@ function renderCloseupGrid(studio: StudioRig, family: WorkbenchFamily, variants:
     const col = idx % cols, row = Math.floor(idx / cols);
     clearGroup(studio.content);
     studio.setTime(tod);
-    studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: v.defaultColor }], true, v.pedShowcase));
+    studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: v.defaultColor }], family.id !== 'rail' || tod !== 'day', v.pedShowcase));
     const sz = effectiveSize(built, v);
     const d = frameDistance(sz, 36, aspect, sz[0] < 2.2 ? 0.58 : 0.72);
     const ty = Math.max(0.38, sz[1] * 0.48);
@@ -548,7 +553,7 @@ function renderLodCompare(studio: StudioRig, family: WorkbenchFamily, variants: 
 
   addBanner(
     `${family.title} — Comparativo de LOD em Tempo Real (HIGH | MED | LOW)`,
-    `Distâncias na cidade: HIGH < 42m | MED 42–115m | LOW > 115m`,
+    family.lodHint ?? 'Comparativo lado a lado (HIGH | MED | LOW)',
   );
   const dh = document.createElement('div');
   dh.className = 'sheet-divider-h';
@@ -580,14 +585,19 @@ function renderLodCompare(studio: StudioRig, family: WorkbenchFamily, variants: 
     builds.forEach((entry, k) => {
       const z = (1 - k) * gap;
       studio.content.add(
-        makeAssetInstances(entry.built, [{ x: 0, y: 0, z, color: v.defaultColor }], true, v.pedShowcase, entry.d),
+        makeAssetInstances(entry.built, [{ x: 0, y: 0, z, color: v.defaultColor }], family.id !== 'rail' || tod !== 'day', v.pedShowcase, entry.d),
       );
     });
 
     const spanSize: [number, number, number] = [refSize[0], refSize[1], gap * 2.5 + refSize[2]];
-    const dist = frameDistance(spanSize, 34, aspect, 0.72);
+    const isLong = refSize[0] > 12;
+    const dist = frameDistance(spanSize, 34, aspect, isLong ? 0.66 : 0.72);
     const ty = Math.max(0.38, refSize[1] * 0.48);
-    cam.position.set(dist * 0.94, ty + dist * 0.24, dist * 0.32);
+    if (isLong) {
+      cam.position.set(dist * 0.82, ty + dist * 0.34, dist * 0.54);
+    } else {
+      cam.position.set(dist * 0.94, ty + dist * 0.24, dist * 0.32);
+    }
     cam.lookAt(0, ty, 0);
 
     const vx = col * cw, vy = (rows - 1 - row) * ch;

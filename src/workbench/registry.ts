@@ -1,5 +1,6 @@
 import { MeshBuilder, SURF, finalizeAsset, type AssetDetail } from '../render/meshKit';
 import { VEHICLE_PRESETS, buildVehicle } from '../render/vehicleGeom';
+import { RAIL_PRESETS, buildRailCar } from '../render/railGeom';
 import {
   BIKE_COLORS,
   LUGGAGE_COLORS,
@@ -75,6 +76,7 @@ const peopleFamily: WorkbenchFamily = {
   triangleBudget: 900,
   heroVariants: ['male-casual', 'female-dress', 'worker', 'tourist', 'cyclist', 'bike', 'umbrella', 'luggage'],
   lodCompareVariants: ['male-casual', 'female-dress', 'worker', 'cyclist', 'bike', 'umbrella'],
+  lodHint: 'Distâncias na cidade: HIGH < 42m | MED 42–115m | LOW > 115m',
   variants: (): WorkbenchVariant[] => [
     ...PED_PRESETS.map((p): WorkbenchVariant => ({
       id: p.id,
@@ -139,11 +141,31 @@ const peopleFamily: WorkbenchFamily = {
   ],
 };
 
+/** Parametric Railway Rolling Stock & Metro family (Frente 2): 6 car types with 3-tier real-time LOD. */
+const railFamily: WorkbenchFamily = {
+  id: 'rail',
+  title: 'Material Rodante Ferroviário & Metrô (LOD)',
+  description: '6 tipos de carros paramétricos (locomotiva, passageiros, porta-contêineres, hopper, tanque cilíndrico e metrô com pantógrafo) em bitola exata ±0,75 m e 3 níveis de LOD.',
+  triangleBudget: 950,
+  heroVariants: ['loco', 'passenger', 'container', 'hopper', 'tank', 'metro'],
+  lodCompareVariants: ['loco', 'passenger', 'container', 'hopper', 'tank', 'metro'],
+  lodHint: 'Distâncias na cidade: HIGH < 90m | MED 90–220m | LOW > 220m',
+  variants: () => RAIL_PRESETS.map((p) => ({
+    id: p.id,
+    label: p.label,
+    category: p.category,
+    defaultColor: p.defaultColor,
+    swatches: p.swatches,
+    build: (detail?: AssetDetail) => buildRailCar(p.id, detail),
+  })),
+};
+
 /** Central registry of all 3D asset families available in the Workbench. */
 export const WORKBENCH_FAMILIES: WorkbenchFamily[] = [
   kitFamily,
   vehiclesFamily,
   peopleFamily,
+  railFamily,
 ];
 
 export function getFamily(id?: string | null): WorkbenchFamily {

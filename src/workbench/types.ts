@@ -37,5 +37,7 @@ export interface WorkbenchFamily {
   heroVariants?: string[];
   /** Optional variant IDs for automated LOD comparison sheets (high / med / low side-by-side). */
   lodCompareVariants?: string[];
+  /** Optional HUD hint text describing real-time LOD distance thresholds in the city. */
+  lodHint?: string;
   variants: () => WorkbenchVariant[];
 }

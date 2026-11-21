@@ -420,7 +420,9 @@ export class Hud {
     const s = this.app.stats;
     this.dirhud.textContent = this.app.mode === 'auto' || this.app.mode === 'cinematic'
       ? `plano: ${this.app.director.status()}${s ? ` · ${fmt(s.vehicles)} veículos · ${fmt(s.peds)} pedestres` : ''}`
-      : this.app.mode === 'free' ? 'câmera livre — o diretor retoma após alguns segundos sem interação' : 'seguindo — clique em Voltar ao auto-diretor para sair';
+      : this.app.mode === 'free'
+        ? (this.app.willAutoResume ? 'câmera livre — o diretor retoma após alguns segundos sem interação' : 'câmera livre — clique em Voltar ao auto-diretor para sair')
+        : 'seguindo — clique em Voltar ao auto-diretor para sair';
     this.inspector.frame();
   }
 

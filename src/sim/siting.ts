@@ -1,10 +1,11 @@
 import { KINDS } from '../shared/catalog';
-import { LOT_SETBACK, RoadClass } from '../shared/constants';
+import { LOT_SETBACK, ROAD_HALF_WIDTH, ROAD_LANES, RoadClass } from '../shared/constants';
 import type { SimParams } from '../shared/params';
 import type { RNG } from '../shared/rng';
 import { clamp } from '../shared/rng';
 import type { Candidate } from './buildings';
 import type { Fields } from './fields';
+import { segRectDist } from './geom';
 import type { Occupancy } from './occupancy';
 import type { RoadNetwork } from './roads';
 import type { Terrain } from './terrain';
@@ -75,10 +76,20 @@ export function sampleSites(ctx: SiteContext, w: number, d: number, n: number, o
 }
 
 function valid(ctx: SiteContext, x: number, z: number, angle: number, w: number, d: number, maxSlope = 0.16, informal = false): boolean {
-  const { occ, terrain: T } = ctx;
+  const { occ, terrain: T, roads } = ctx;
   if (!T.inside(x, z, Math.max(w, d) / 2 + 20)) return false;
   if (!occ.rectFree(x, z, angle, w + 2, d + 2)) return false;
   const ca = Math.cos(angle), sa = Math.sin(angle);
+  // exact geometric clearance against nearby carriageways (coarse 4 m raster alone can miss diagonal edges)
+  const hwB = w * 0.5, hdB = d * 0.5;
+  for (const e of roads.edgesNear(x, z, Math.max(w, d) + 22)) {
+    if (!e.alive || e.tunnel || (e.deck !== undefined && e.deck >= 0)) continue;
+    const p = e.pts;
+    const minClear = ROAD_HALF_WIDTH[e.cls] + (e.lanes > ROAD_LANES[e.cls] ? 3 : 0) + 0.5;
+    for (let k = 0; k + 5 < p.length; k += 3) {
+      if (segRectDist(p[k] - x, p[k + 2] - z, p[k + 3] - x, p[k + 5] - z, ca, sa, hwB, hdB) < minClear) return false;
+    }
+  }
   let mn = Infinity, mx = -Infinity;
   for (const [u, v] of [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0, 0]]) {
     const h = T.heightAt(x + ca * u * w - sa * v * d, z + sa * u * w + ca * v * d);

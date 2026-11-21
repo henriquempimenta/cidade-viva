@@ -5,7 +5,7 @@ import type { Building } from './buildings';
 import { Act, ST_IN, ST_TRANSIT } from './citizens';
 import { projSeg, type REdge } from './roads';
 import { P_BUS } from './traffic';
-import { activePlanFromEdge, activePlanFromPoint, activePlanToEdge, activePlanToPoint, doorOf, walkPoints } from './trips';
+import { activePlanEdges, activePlanFromEdge, activePlanFromPoint, activePlanToEdge, activePlanToPoint, doorOf, walkPoints } from './trips';
 import type { World } from './world';
 import { KINDS } from '../shared/catalog';
 
@@ -21,6 +21,7 @@ export function lineFare(kind: 'bus' | 'brt' | 'rail' | 'metro'): number {
 }
 
 export interface Stop {
+  id: number;
   x: number;
   z: number;
   node: number;
@@ -38,11 +39,12 @@ export interface Line {
   id: number; kind: 'bus' | 'brt' | 'rail' | 'metro'; color: string; name: string;
   stops: Stop[]; path: number[]; startS: number; destS: number;
   fleet: number; vehicles: Set<number>; ridersToday: number; ridersYday: number;
+  /** waiting riders keyed by stable Stop.id (never array index) */
   waiting: Map<number, number[]>; onboard: Map<number, number[]>; edges: Set<number>;
   headway: number; lastSpawn: number; pts: number[];
   pendingBRT?: boolean;
 }
-interface Ride { line: number; from: number; to: number; phase: number; since: number; dest: number }
+export interface Ride { line: number; fromId: number; toId: number; gen: number; phase: number; since: number; dest: number }
 
 const COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e84393', '#fdcb6e', '#00cec9', '#6c5ce7', '#d35400', '#27ae60'];
 const ZONE = 300;
@@ -51,6 +53,7 @@ const ZONE = 300;
 export class Transit {
   lines: Line[] = [];
   private nextId = 1;
+  private nextStopId = 1;
   private od = new Map<number, number>();
   rides = new Map<number, Ride>();
   dirty = new Set<number>();
@@ -60,6 +63,10 @@ export class Transit {
   faresCollected = 0;
 
   constructor(private w: World) {}
+
+  allocStopId(): number { return this.nextStopId++; }
+  private findStopIdx(l: Line, stopId: number): number { return l.stops.findIndex((s) => s.id === stopId); }
+  private findStop(l: Line, stopId: number): Stop | undefined { return l.stops.find((s) => s.id === stopId); }
 
   private zone(x: number, z: number) { return Math.floor(x / ZONE) * 1000 + Math.floor(z / ZONE); }
   private zoneCenter(k: number) { return { x: (Math.floor(k / 1000) + 0.5) * ZONE, z: ((k % 1000) + 0.5) * ZONE }; }
@@ -113,6 +120,7 @@ export class Transit {
     }
     const refNode = s < e.len * 0.5 ? nStart : nEnd;
     return {
+      id: this.allocStopId(),
       x: curbX,
       z: curbZ,
       node: refNode,
@@ -196,8 +204,12 @@ export class Transit {
           }
         }
         if (rebuilt) {
+          // preserve stable Stop.id so queues and rides stay bound to this exact stop
+          rebuilt.id = st.id;
+          const movedDist = Math.hypot(rebuilt.x - st.x, rebuilt.z - st.z);
           l.stops[k] = rebuilt;
           this.layoutStopQueue(l, k);
+          if (movedDist > 2) this.repathWalkingRiders(l, rebuilt);
           changed = true;
         } else {
           deadIndices.add(k);
@@ -209,9 +221,14 @@ export class Transit {
         if (survivors.length >= 2) {
           this.replaceStops(l, survivors);
         } else {
-          // Fewer than 2 viable stops remain: evacuate waiting riders cleanly and suspend fleet
+          // Fewer than 2 viable stops remain: evacuate waiting, walking (phase 0) and onboard (phase 2) riders cleanly
           for (const q of l.waiting.values()) for (const cid of q) this.giveUp(cid);
           l.waiting.clear();
+          for (const pass of l.onboard.values()) for (const cid of pass) this.giveUp(cid);
+          l.onboard.clear();
+          for (const [cid, r] of [...this.rides.entries()]) {
+            if (r.line === l.id) this.giveUp(cid);
+          }
           l.stops = survivors;
           l.fleet = 0;
         }
@@ -237,7 +254,7 @@ export class Transit {
       const ride = Math.hypot(l.stops[b].x - l.stops[a].x, l.stops[b].z - l.stops[a].z) * 1.25 / (l.kind === 'bus' ? 7 : l.kind === 'brt' ? 10 : 17);
       const time = walk + l.headway / 2 + ride;
       const fare = lineFare(l.kind);
-      const t = { mode: l.kind === 'bus' || l.kind === 'brt' ? 3 : 4, time, fare, line: l.id, a, b };
+      const t = { mode: l.kind === 'bus' || l.kind === 'brt' ? 3 : 4, time, fare, line: l.id, a: l.stops[a].id, b: l.stops[b].id };
       if (!best || time < best.time) best = t;
     }
     void len;
@@ -274,9 +291,10 @@ export class Transit {
     const w = this.w;
     const l = this.lines.find((x) => x.id === opt.line);
     if (!l) return false;
-    const st = l.stops[opt.a];
-    if (!st) return false;
-    this.rides.set(i, { line: l.id, from: opt.a, to: opt.b, phase: 0, since: w.t, dest: to.id });
+    const st = this.findStop(l, opt.a);
+    const stTo = this.findStop(l, opt.b);
+    if (!st || !stTo || st.id === stTo.id) return false;
+    this.rides.set(i, { line: l.id, fromId: st.id, toId: stTo.id, gen: w.citizens.gen[i], phase: 0, since: w.t, dest: to.id });
     const door = doorOf(w.roads, from);
     if (w.peds.capacityLeft > 40) {
       // Always route via real sidewalks & crosswalks — never spawn a 2-point straight-line cut through buildings
@@ -294,10 +312,39 @@ export class Transit {
     return true;
   }
 
+  /** Remove a citizen completely from transit rides, waiting queues, onboard lists, and any waiting/walking ped. */
+  cancelCitizen(i: number) {
+    const w = this.w;
+    this.rides.delete(i);
+    const s = w.citizens.slot[i];
+    if (s >= 0 && w.peds.active[s] && w.peds.citizen[s] === i) {
+      w.peds.despawn(s);
+      w.citizens.slot[i] = -1;
+    }
+    for (const l of this.lines) {
+      for (const [stopId, q] of l.waiting) {
+        const idx = q.indexOf(i);
+        if (idx >= 0) {
+          q.splice(idx, 1);
+          const k = this.findStopIdx(l, stopId);
+          if (k >= 0) this.layoutStopQueue(l, k);
+        }
+      }
+      for (const list of l.onboard.values()) {
+        const idx = list.indexOf(i);
+        if (idx >= 0) list.splice(idx, 1);
+      }
+    }
+  }
+
   /** ped arrival callback for transit riders: reached the stop (phase 0) or the destination (phase 3) */
   pedArrived(i: number): boolean {
     const r = this.rides.get(i);
     if (!r) return false;
+    if (!this.w.citizens.alive[i] || this.w.citizens.gen[i] !== r.gen || this.w.citizens.state[i] !== ST_TRANSIT) {
+      this.rides.delete(i);
+      return false;
+    }
     if (r.phase === 0) { this.atStop(i); return true; }
     if (r.phase === 3) { this.rides.delete(i); this.w.citizens.arrive(i); return true; }
     return false;
@@ -323,12 +370,13 @@ export class Transit {
     return [px, pz, Math.atan2(-rz, -rx)];
   }
 
-  /** Re-align all waiting pedestrians in FIFO order at stop `k` of line `l`. */
+  /** Re-align all waiting pedestrians in FIFO order at stop index `k` of line `l`. */
   private layoutStopQueue(l: Line, k: number) {
     const w = this.w;
     const st = l.stops[k];
-    const q = l.waiting.get(k);
-    if (!st || !q) return;
+    if (!st) return;
+    const q = l.waiting.get(st.id);
+    if (!q) return;
     for (let idx = 0; idx < q.length; idx++) {
       const cid = q[idx];
       const slot = w.citizens.slot[cid];
@@ -339,15 +387,75 @@ export class Transit {
     }
   }
 
+  /** Plan a sidewalk route from an arbitrary live world point `(fx, fz)` to stop `st` (no backtracking to origin building). */
+  private planWalkFromPointToStop(fx: number, fz: number, st: Stop) {
+    const R = this.w.roads;
+    const pe = R.nearestEdgePoint(fx, fz, 140, (q) => q.alive && q.progress >= 1 && q.deck === undefined);
+    if (!pe) return null;
+    if (st.edge >= 0) {
+      const de = R.edges[st.edge];
+      if (de && de.alive && de.progress >= 1 && de.deck === undefined) {
+        const dt = st.dir === 0 ? st.s / Math.max(1, de.len) : 1 - st.s / Math.max(1, de.len);
+        const wp = activePlanEdges(R, pe.edge, pe.t, de, Math.max(0, Math.min(1, dt)), fx, fz, st.x, st.z, 2600);
+        if (wp) return wp;
+      }
+    }
+    const pd = R.nearestEdgePoint(st.x, st.z, 140, (q) => q.alive && q.progress >= 1 && q.deck === undefined);
+    if (!pd) return null;
+    return activePlanEdges(R, pe.edge, pe.t, pd.edge, pd.t, fx, fz, st.x, st.z, 2600);
+  }
+
+  /** Rebuild walk from the pedestrian's current live position `(fx, fz)` or cancel cleanly for phase-0 riders heading to a moved stop. */
+  private repathWalkingRiders(l: Line, st: Stop) {
+    const w = this.w;
+    for (const [cid, r] of [...this.rides.entries()]) {
+      if (r.line !== l.id || r.phase !== 0 || r.fromId !== st.id) continue;
+      if (!w.citizens.alive[cid] || w.citizens.gen[cid] !== r.gen || w.citizens.state[cid] !== ST_TRANSIT) {
+        this.rides.delete(cid);
+        continue;
+      }
+      const oldSlot = w.citizens.slot[cid];
+      let hasPos = false;
+      let fx = st.x, fz = st.z;
+      if (oldSlot >= 0 && w.peds.active[oldSlot] && w.peds.citizen[oldSlot] === cid) {
+        w.peds.pose(oldSlot);
+        fx = w.peds.x[oldSlot];
+        fz = w.peds.z[oldSlot];
+        hasPos = true;
+        w.peds.despawn(oldSlot);
+        w.citizens.slot[cid] = -1;
+      }
+      let wp = hasPos ? this.planWalkFromPointToStop(fx, fz, st) : null;
+      if (!wp && !hasPos) {
+        const fromB = w.buildings.byId.get(w.citizens.loc[cid]);
+        if (fromB) {
+          const d = doorOf(w.roads, fromB);
+          fx = d.x; fz = d.z;
+          wp = this.planWalkToStop(fromB, st);
+        }
+      }
+      if (wp && w.peds.capacityLeft > 40) {
+        const pts = walkPoints(w.roads, wp, { x: fx, z: fz }, st);
+        const ns = w.peds.spawn(pts, cid, 1.35, 0, 0);
+        if (ns >= 0) { w.citizens.slot[cid] = ns; continue; }
+      }
+      this.giveUp(cid);
+    }
+  }
+
   private atStop(i: number) {
     const w = this.w;
-    const r = this.rides.get(i)!;
+    const r = this.rides.get(i);
+    if (!r || !w.citizens.alive[i] || w.citizens.gen[i] !== r.gen || w.citizens.state[i] !== ST_TRANSIT) {
+      this.rides.delete(i);
+      return;
+    }
     const l = this.lines.find((x) => x.id === r.line);
-    if (!l || !l.stops[r.from]) { this.giveUp(i); return; }
+    const st = l ? this.findStop(l, r.fromId) : undefined;
+    if (!l || !st) { this.giveUp(i); return; }
     r.phase = 1; r.since = w.t;
-    const st = l.stops[r.from];
-    let q = l.waiting.get(r.from);
-    if (!q) l.waiting.set(r.from, (q = []));
+    let q = l.waiting.get(st.id);
+    if (!q) l.waiting.set(st.id, (q = []));
     const idx = q.length;
     q.push(i);
     // stand in an orderly FIFO queue on the sidewalk beside the shelter, facing the road
@@ -360,33 +468,38 @@ export class Transit {
 
   private giveUp(i: number) {
     const w = this.w;
+    const r = this.rides.get(i);
+    this.rides.delete(i);
+    if (!w.citizens.alive[i] || (r && w.citizens.gen[i] !== r.gen)) return;
     const s = w.citizens.slot[i];
     if (s >= 0 && w.peds.citizen[s] === i) w.peds.despawn(s);
-    this.rides.delete(i);
+    w.citizens.slot[i] = -1;
     w.citizens.virtualArrive(i, 300);
   }
 
   /**
    * A vehicle of line `l` is at stop index `k`: alight & board (FIFO), debiting real fares.
-   * `heading(to)`: does this vehicle travel towards stop `to` from here? Linear lines (rail, metro) only take riders
+   * `heading(toIdx)`: does this vehicle travel towards stop index `toIdx` from here? Linear lines (rail, metro) only take riders
    * going their way; loop lines reach every stop, so they leave it undefined.
    */
   serveStop(l: Line, k: number, vkey: number, capacity: number, heading?: (to: number) => boolean): number {
     const w = this.w;
+    const st = l.stops[k];
+    if (!st) return 0;
+    const stopId = st.id;
     let onboard = l.onboard.get(vkey);
     if (!onboard) l.onboard.set(vkey, (onboard = []));
     let moved = 0;
-    const st = l.stops[k];
-    // alight
+    // alight (strictly phase === 2: actually onboard)
     const stay: number[] = [];
     for (const i of onboard) {
       const r = this.rides.get(i);
-      if (!r || !w.citizens.alive[i]) continue;
-      if (r.to === k) {
+      if (!r || !w.citizens.alive[i] || w.citizens.gen[i] !== r.gen || w.citizens.state[i] !== ST_TRANSIT || r.line !== l.id || r.phase !== 2) continue;
+      if (r.toId === stopId) {
         moved++;
         r.phase = 3;
         const dest = w.buildings.byId.get(r.dest);
-        if (dest && st && w.peds.capacityLeft > 40) {
+        if (dest && w.peds.capacityLeft > 40) {
           const door = doorOf(w.roads, dest);
           const wp = this.planWalkFromStop(st, dest);
           if (wp) {
@@ -396,27 +509,30 @@ export class Transit {
           }
         }
         this.rides.delete(i);
-        w.citizens.virtualArrive(i, Math.hypot((dest?.x ?? st?.x ?? 0) - (st?.x ?? 0), (dest?.z ?? st?.z ?? 0) - (st?.z ?? 0)) / 1.3);
+        w.citizens.virtualArrive(i, Math.hypot((dest?.x ?? st.x) - st.x, (dest?.z ?? st.z) - st.z) / 1.3);
       } else stay.push(i);
     }
     onboard = stay;
-    // board in strict FIFO order, charging the real fare
+    // board in strict FIFO order, validating generation/state/line/stopId before boarding or charging fare
     const fare = lineFare(l.kind);
-    const q = l.waiting.get(k);
+    const q = l.waiting.get(stopId);
     if (q && q.length) {
       const rest: number[] = [];
       for (const i of q) {
         const r = this.rides.get(i);
-        if (!r || !w.citizens.alive[i]) continue;
-        if (onboard.length >= capacity || (heading && !heading(r.to))) { rest.push(i); continue; }
+        if (!r || !w.citizens.alive[i] || w.citizens.gen[i] !== r.gen || w.citizens.state[i] !== ST_TRANSIT || r.line !== l.id || r.fromId !== stopId || r.phase !== 1) continue;
+        const toIdx = this.findStopIdx(l, r.toId);
+        if (toIdx < 0) { this.giveUp(i); continue; }
+        if (onboard.length >= capacity || (heading && !heading(toIdx))) { rest.push(i); continue; }
         const h = w.citizens.households.get(w.citizens.hh[i]);
         if (h) {
           if (h.money < fare) {
             // household cannot afford the fare: leave queue and walk to destination instead of riding free
             const ps = w.citizens.slot[i];
             if (ps >= 0 && w.peds.citizen[ps] === i) w.peds.despawn(ps);
+            w.citizens.slot[i] = -1;
             this.rides.delete(i);
-            if (!st || !w.citizens.switchToWalk(i, st.x, st.z)) w.citizens.virtualArrive(i, 300, st?.x, st?.z);
+            if (!w.citizens.switchToWalk(i, st.x, st.z)) w.citizens.virtualArrive(i, 300, st.x, st.z);
             continue;
           }
           h.money -= fare;
@@ -431,7 +547,7 @@ export class Transit {
         this.ridersDay++;
         moved++;
       }
-      l.waiting.set(k, rest);
+      l.waiting.set(stopId, rest);
       if (rest.length) this.layoutStopQueue(l, k);
     }
     l.onboard.set(vkey, onboard);
@@ -451,8 +567,8 @@ export class Transit {
       const st = l.stops[k];
       if (st.edge !== edge || st.dir !== dir) continue;
       if (st.s < curS - 1.5 || st.s >= bestS) continue;
-      const waiting = (l.waiting.get(k)?.length ?? 0) > 0;
-      const alighting = !!onboard && onboard.some((cid) => this.rides.get(cid)?.to === k);
+      const waiting = (l.waiting.get(st.id)?.length ?? 0) > 0;
+      const alighting = !!onboard && onboard.some((cid) => this.rides.get(cid)?.toId === st.id);
       if (!waiting && !alighting) continue;
       bestS = st.s;
       bestIdx = k;
@@ -542,12 +658,13 @@ export class Transit {
       if (l.vehicles.size < target && w.t - l.lastSpawn > l.headway * 0.5) this.spawnBus(l);
     }
     // impatient riders give up
-    for (const [i, r] of this.rides) if (r.phase === 1 && w.t - r.since > HOUR_SECONDS * 1.5) {
+    for (const [i, r] of [...this.rides.entries()]) if (r.phase === 1 && w.t - r.since > HOUR_SECONDS * 1.5) {
       const l = this.lines.find((x) => x.id === r.line);
-      const q = l?.waiting.get(r.from);
+      const q = l?.waiting.get(r.fromId);
       if (l && q) {
-        l.waiting.set(r.from, q.filter((x) => x !== i));
-        this.layoutStopQueue(l, r.from);
+        l.waiting.set(r.fromId, q.filter((x) => x !== i));
+        const k = this.findStopIdx(l, r.fromId);
+        if (k >= 0) this.layoutStopQueue(l, k);
       }
       this.giveUp(i);
     }
@@ -678,21 +795,90 @@ export class Transit {
     this.w.events.emit('line_opened', s.x, s.z, 0.9, `${l.name} entra em operação com faixa exclusiva em ${lanes} trecho(s)`, { headline: `Linha mais lotada vira BRT com faixa exclusiva`, visual: 0.8 });
   }
 
-  /** new stop list for a line (a station opened in between): riders and queues follow their stop, matched by position */
+  /**
+   * Replace stops on a line preserving stable Stop.id via 1-to-1 matching (never merging stops by array index).
+   * Riders walking to a moved stop are repathed; riders whose stop was removed cancel cleanly.
+   */
   replaceStops(l: Line, stops: Stop[]) {
-    const map = l.stops.map((o) => { let bi = -1, bd = Infinity; stops.forEach((n, k) => { const d = Math.hypot(n.x - o.x, n.z - o.z); if (d < bd) { bd = d; bi = k; } }); return bi; });
-    for (const r of this.rides.values()) if (r.line === l.id) { r.from = map[r.from] ?? r.from; r.to = map[r.to] ?? r.to; }
-    const wq = new Map<number, number[]>();
-    for (const [k, q] of l.waiting) { const nk = map[k] ?? k; wq.set(nk, [...(wq.get(nk) ?? []), ...q]); }
-    l.waiting = wq;
+    const oldById = new Map(l.stops.map((s) => [s.id, s]));
+    const claimedOld = new Set<number>();
+    const usedNewIds = new Set<number>();
+    const movedStops: Stop[] = [];
+
+    // 1. Preserve explicit matching IDs first
+    for (const ns of stops) {
+      if (ns.id > 0 && oldById.has(ns.id) && !claimedOld.has(ns.id)) {
+        claimedOld.add(ns.id);
+        usedNewIds.add(ns.id);
+        const old = oldById.get(ns.id)!;
+        if (Math.hypot(ns.x - old.x, ns.z - old.z) > 2) movedStops.push(ns);
+      }
+    }
+    // 2. 1-to-1 nearest match for remaining stops within 120 m (never merges two old stops into one)
+    for (const ns of stops) {
+      if (usedNewIds.has(ns.id)) continue;
+      let bestOld: Stop | null = null, bd = 120;
+      for (const old of l.stops) {
+        if (claimedOld.has(old.id)) continue;
+        const d = Math.hypot(ns.x - old.x, ns.z - old.z);
+        if (d < bd) { bd = d; bestOld = old; }
+      }
+      if (bestOld) {
+        ns.id = bestOld.id;
+        claimedOld.add(bestOld.id);
+        usedNewIds.add(ns.id);
+        if (bd > 2) movedStops.push(ns);
+      } else {
+        if (!(ns.id > 0) || usedNewIds.has(ns.id)) ns.id = this.allocStopId();
+        usedNewIds.add(ns.id);
+      }
+    }
+
     l.stops = stops;
-    for (const k of l.waiting.keys()) this.layoutStopQueue(l, k);
+    const validIds = new Set(stops.map((s) => s.id));
+
+    // Drop queues for removed stops and notify waiting riders
+    for (const [sid, q] of [...l.waiting.entries()]) {
+      if (!validIds.has(sid)) {
+        l.waiting.delete(sid);
+        for (const cid of q) this.giveUp(cid);
+      }
+    }
+    // Handle riders whose origin or destination stop was removed or moved
+    for (const [cid, r] of [...this.rides.entries()]) {
+      if (r.line !== l.id) continue;
+      const hasFrom = validIds.has(r.fromId);
+      const hasTo = validIds.has(r.toId);
+      if (r.phase === 0) {
+        if (!hasFrom || !hasTo) this.giveUp(cid);
+      } else if (r.phase === 1) {
+        if (!hasFrom || !hasTo) {
+          const q = l.waiting.get(r.fromId);
+          if (q) l.waiting.set(r.fromId, q.filter((x) => x !== cid));
+          this.giveUp(cid);
+        }
+      } else if (r.phase === 2 && !hasTo) {
+        if (stops.length) {
+          const oldTo = oldById.get(r.toId);
+          let best = stops[0], bd = Infinity;
+          if (oldTo) {
+            for (const s of stops) { const d = Math.hypot(s.x - oldTo.x, s.z - oldTo.z); if (d < bd) { bd = d; best = s; } }
+          }
+          r.toId = best.id;
+        } else {
+          this.giveUp(cid);
+        }
+      }
+    }
+    for (const ms of movedStops) this.repathWalkingRiders(l, ms);
+    for (let k = 0; k < l.stops.length; k++) this.layoutStopQueue(l, k);
     this.dirty.add(l.id);
   }
 
   /** register a rail/metro line so citizens can ride it */
   addRailLine(kind: 'rail' | 'metro', name: string, stops: Stop[], pts: number[], headway: number): Line {
     const id = this.nextId++;
+    for (const st of stops) if (!(st.id > 0)) st.id = this.allocStopId();
     const l: Line = { id, kind, color: kind === 'metro' ? '#c0392b' : '#2d3436', name, stops, path: [], startS: 0, destS: 0, fleet: 0, vehicles: new Set(), ridersToday: 0, ridersYday: 0, waiting: new Map(), onboard: new Map(), edges: new Set(), headway, lastSpawn: 0, pts };
     this.lines.push(l);
     this.dirty.add(id);
@@ -717,7 +903,7 @@ export class Transit {
     if (!r) return 'no transporte público';
     const l = this.lines.find((x) => x.id === r.line);
     if (!l) return 'no transporte público';
-    const st = l.stops[r.phase <= 1 ? r.from : r.to];
+    const st = this.findStop(l, r.phase <= 1 ? r.fromId : r.toId);
     return r.phase === 0 ? `caminhando até o ponto (${l.name})` : r.phase === 1 ? `esperando no ponto ${st?.name ?? ''} (${l.name})` : r.phase === 2 ? `a bordo: ${l.name}, desce em ${st?.name ?? ''}` : `desceu do ${l.kind === 'bus' || l.kind === 'brt' ? 'ônibus' : 'trem'}`;
   }
 
@@ -726,7 +912,7 @@ export class Transit {
     const r = this.rides.get(i);
     if (!r) return null;
     const s = w.citizens.slot[i];
-    if (s >= 0 && w.peds.active[s] && w.peds.citizen[s] === i) { w.peds.pose(s); return { x: w.peds.x[s], y: Math.max(0.2, w.terrain.heightAt(w.peds.x[s], w.peds.z[s])) + 0.1, z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
+    if (s >= 0 && w.peds.active[s] && w.peds.citizen[s] === i) { w.peds.pose(s); return { x: w.peds.x[s], y: w.pedElevation(w.peds.x[s], w.peds.z[s]), z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     const l = this.lines.find((x) => x.id === r.line);
     if (!l) return null;
     if (r.phase === 2) {
@@ -735,7 +921,7 @@ export class Transit {
         else { const p = w.trainsSys?.trainPose(vk); if (p) return { ...p, inside: false, building: -1 }; }
       }
     }
-    const st = l.stops[r.from];
+    const st = this.findStop(l, r.fromId);
     if (!st) return null;
     return { x: st.x, y: Math.max(0, w.terrain.heightAt(st.x, st.z)) + 1, z: st.z, h: 0, inside: false, building: -1 };
   }

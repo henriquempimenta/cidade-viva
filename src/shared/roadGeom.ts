@@ -27,9 +27,10 @@ export function sidewalkCenterOffset(e: RoadWidthLike): number {
   return edgeHalfWidth(e) + SIDEWALK_CENTER;
 }
 
-/** Lateral walking offset for pedestrians along an edge (handles urban sidewalks, dirt shoulders, bridges). */
+/** Lateral walking offset for pedestrians along an edge (handles urban sidewalks, bridge walkways, dirt shoulders). */
 export function pedWalkOffset(e: RoadWidthLike & { bridge?: boolean; elevated?: boolean }): number {
-  if (e.bridge || e.elevated) return edgeHalfWidth(e) + 0.1;
+  if (e.bridge && !e.elevated) return edgeHalfWidth(e) + 0.75;
+  if (e.elevated) return edgeHalfWidth(e) + 0.1;
   if (e.cls === RoadClass.Dirt) return edgeHalfWidth(e) + 0.9;
   return sidewalkCenterOffset(e);
 }

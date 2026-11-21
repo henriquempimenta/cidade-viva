@@ -23,18 +23,18 @@ export interface ActivePlan { path: number[]; startS: number; destS: number; len
 
 export function activeAccessOf(R: RoadNetwork, b: Building): Access | null {
   const e = b.edge >= 0 ? R.edges[b.edge] : null;
-  if (e && e.alive && e.progress >= 1 && e.cls !== RoadClass.Highway && e.deck === undefined) {
+  if (e && e.alive && e.progress >= 1 && e.deck === undefined) {
     const a = R.nodes[e.a], bb = R.nodes[e.b];
     return { edge: e, t: b.edgeT, x: a.x + (bb.x - a.x) * b.edgeT, z: a.z + (bb.z - a.z) * b.edgeT };
   }
-  const p = R.nearestEdgePoint(b.x, b.z, Math.max(b.w, b.d) / 2 + 160, (q) => q.alive && q.progress >= 1 && !q.bridge && !q.elevated && q.cls !== RoadClass.Highway && q.deck === undefined);
+  const p = R.nearestEdgePoint(b.x, b.z, Math.max(b.w, b.d) / 2 + 160, (q) => q.alive && q.progress >= 1 && !q.bridge && !q.elevated && q.deck === undefined);
   if (!p) return null;
   const a = R.nodes[p.edge.a], bb = R.nodes[p.edge.b];
   return { edge: p.edge, t: p.t, x: a.x + (bb.x - a.x) * p.t, z: a.z + (bb.z - a.z) * p.t };
 }
 
 export function activePlanEdges(R: RoadNetwork, eo: REdge, to: number, ed: REdge, td: number, ox: number, oz: number, dx: number, dz: number, maxDist = 5200): ActivePlan | null {
-  if (eo.cls === RoadClass.Highway || ed.cls === RoadClass.Highway || eo.deck !== undefined || ed.deck !== undefined) return null;
+  if (eo.deck !== undefined || ed.deck !== undefined) return null;
   if (eo.id === ed.id) {
     const dir = td >= to ? 0 : 1;
     const startS = dir === 0 ? to * eo.len : (1 - to) * eo.len;
@@ -78,7 +78,7 @@ export function activePlan(R: RoadNetwork, from: Building, to: Building, maxDist
 export function activePlanToPoint(R: RoadNetwork, from: Building, tx: number, tz: number, maxDist = 1400): ActivePlan | null {
   const ao = activeAccessOf(R, from);
   if (!ao) return null;
-  const pe = R.nearestEdgePoint(tx, tz, 140, (q) => q.alive && q.progress >= 1 && q.cls !== RoadClass.Highway && q.deck === undefined);
+  const pe = R.nearestEdgePoint(tx, tz, 140, (q) => q.alive && q.progress >= 1 && q.deck === undefined);
   if (!pe) return null;
   return activePlanEdges(R, ao.edge, ao.t, pe.edge, pe.t, from.x, from.z, tx, tz, maxDist);
 }
@@ -93,7 +93,7 @@ export function activePlanToEdge(R: RoadNetwork, from: Building, edge: REdge, t:
 export function activePlanFromPoint(R: RoadNetwork, fx: number, fz: number, to: Building, maxDist = 1400): ActivePlan | null {
   const ad = activeAccessOf(R, to);
   if (!ad) return null;
-  const pe = R.nearestEdgePoint(fx, fz, 140, (q) => q.alive && q.progress >= 1 && q.cls !== RoadClass.Highway && q.deck === undefined);
+  const pe = R.nearestEdgePoint(fx, fz, 140, (q) => q.alive && q.progress >= 1 && q.deck === undefined);
   if (!pe) return null;
   return activePlanEdges(R, pe.edge, pe.t, ad.edge, ad.t, fx, fz, to.x, to.z, maxDist);
 }
@@ -296,9 +296,13 @@ export function walkPoints(
     const rEnd = R.nodeRenderR(nEnd) * 0.92;
     const swStart = Math.min(rStart, totalLen * 0.45);
     const swEnd = Math.max(totalLen - rEnd, totalLen * 0.55);
-    const urban = hasUrbanSidewalk(e);
-    const cwStart = rStart > 0 && urban && totalLen > 30 ? Math.min(swStart + CROSSWALK_INSET, totalLen * 0.5) : swStart;
-    const cwEnd = rEnd > 0 && urban && totalLen > 30 ? Math.max(swEnd - CROSSWALK_INSET, totalLen * 0.5) : swEnd;
+    const incStart = R.surfaceEdgesAt(nStart);
+    const incEnd = R.surfaceEdgesAt(nEnd);
+    const hasCwStart = hasEndCrosswalk(e, totalLen, incStart.length, incStart.some((q) => q.cls >= RoadClass.Local && q.cls <= RoadClass.Avenue), !!R.nodes[nStart]?.interchange);
+    const hasCwEnd = hasEndCrosswalk(e, totalLen, incEnd.length, incEnd.some((q) => q.cls >= RoadClass.Local && q.cls <= RoadClass.Avenue), !!R.nodes[nEnd]?.interchange);
+    const urban = hasUrbanSidewalk(e) || (e.cls === RoadClass.Highway && !e.bridge && !e.elevated && !e.tunnel && e.deck === undefined && (hasCwStart || hasCwEnd));
+    const cwStart = rStart > 0 && (urban || hasCwStart) && totalLen > 20 ? Math.min(swStart + CROSSWALK_INSET, totalLen * 0.5) : swStart;
+    const cwEnd = rEnd > 0 && (urban || hasCwEnd) && totalLen > 20 ? Math.max(swEnd - CROSSWALK_INSET, totalLen * 0.5) : swEnd;
     hops.push({
       e, dir, cum, totalLen, nStart, nEnd, rStart, rEnd, swStart, swEnd, cwStart, cwEnd,
       off: pedWalkOffset(e), urban,

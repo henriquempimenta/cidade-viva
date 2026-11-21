@@ -237,11 +237,17 @@ export class RoadsLayer {
     // smooth bends: deg-2 nodes where the road turns get a curved joint instead of a sharp vertex
     const plCache = new Map<number, PL>();
     const plOf = (e: EdgeView) => { let p = plCache.get(e.id); if (!p) plCache.set(e.id, (p = toPL(e.pts))); return p; };
+    const edgeHasWalk = (e: EdgeView): boolean => {
+      if (e.cls === RoadClass.Dirt || e.bridge || e.elevated || e.tunnel || e.deck !== undefined) return false;
+      if (e.cls !== RoadClass.Highway) return true;
+      const na = this.nodes.get(e.a), nb = this.nodes.get(e.b);
+      return (!!na && this.rdeg(na) >= 3 && !na.interchange) || (!!nb && this.rdeg(nb) >= 3 && !nb.interchange);
+    };
     const armOf = (nid: number, e: EdgeView, r: number): Arm => {
       const pl = plOf(e), len = pl.s[pl.s.length - 1];
       const fromA = e.a === nid;
       const q = at(pl, fromA ? Math.min(r, len) : Math.max(0, len - r));
-      const walk = e.cls !== RoadClass.Dirt && e.cls !== RoadClass.Highway && !e.bridge && !e.elevated;
+      const walk = edgeHasWalk(e);
       return { x: q[0], y: q[1], z: q[2], dx: fromA ? q[3] : -q[3], dz: fromA ? q[4] : -q[4], hw: edgeHalfWidth(e), walk };
     };
     const bendR = new Map<number, number>();
@@ -304,8 +310,8 @@ export class RoadsLayer {
         }
         if (e.upgrading) for (let s = s0; s < s1; s += 7) { const p = at(pl, s); m.makeTranslation(p[0] - p[4] * (hw - 0.6), p[1], p[2] + p[3] * (hw - 0.6)); cones.push(m.clone()); }
         if (!dirt) {
-          // sidewalks + curbs
-          if (e.cls !== RoadClass.Highway && !e.bridge && !e.elevated) {
+          // sidewalks + curbs (including at-grade urban highway stretches connected to urban junctions)
+          if (edgeHasWalk(e)) {
             ribbon(g, pl, s0, s1, hw, hw + SIDEWALK_WIDTH, 0.12, COL.walk);
             ribbon(g, pl, s0, s1, -hw - SIDEWALK_WIDTH, -hw, 0.12, COL.walk);
             ribbon(g, pl, s0, s1, hw, hw + 0.25, 0.14, COL.curb);
@@ -373,10 +379,20 @@ export class RoadsLayer {
       }
       // bridge / elevated structure
       if (e.bridge || e.elevated) {
-        ribbon(bg, pl, 0, len, -hw - 0.8, hw + 0.8, -1.0, COL.concrete);
+        const hasWalkway = !!e.bridge && !e.elevated && e.deck === undefined;
+        const deckPad = hasWalkway ? 1.9 : 0.8;
+        const paraOff = hasWalkway ? hw + 1.65 : hw + 0.6;
+        ribbon(bg, pl, 0, len, -hw - deckPad, hw + deckPad, -1.0, COL.concrete);
+        if (hasWalkway && done) {
+          // dedicated raised pedestrian walkways on both sides of the bridge deck inside the parapets
+          ribbon(g, pl, 0, len, hw, hw + 1.45, 0.12, COL.walk);
+          ribbon(g, pl, 0, len, -hw - 1.45, -hw, 0.12, COL.walk);
+          ribbon(g, pl, 0, len, hw, hw + 0.22, 0.14, COL.curb);
+          ribbon(g, pl, 0, len, -hw - 0.22, -hw, 0.14, COL.curb);
+        }
         // parapets: real walls with a top, plus the deck fascia down to the slab underside
         for (const sd of [-1, 1]) {
-          const o = (hw + 0.6) * sd;
+          const o = paraOff * sd;
           ribbon(bg, pl, 0, len, o - 0.2, o + 0.2, 1.0, COL.concrete);
           wall(bg, pl, 0, len, o + 0.2 * sd, -1.0, 1.0, COL.concrete);
           wall(bg, pl, 0, len, o - 0.2 * sd, 0, 1.0, COL.concrete);

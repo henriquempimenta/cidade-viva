@@ -42,6 +42,7 @@ export interface Household {
 export class Citizens {
   max = 0;
   alive = new Uint8Array(0);
+  gen = new Uint16Array(0);
   age = new Float32Array(0);
   sex = new Uint8Array(0);
   hh = new Int32Array(0);
@@ -79,6 +80,7 @@ export class Citizens {
   friends = new Int32Array(0);
   tourist = new Uint8Array(0);
   modeCount = [0, 0, 0, 0, 0];
+  tripsCompleted = 0;
   bio: { year: number; text: string }[][] = [];
   agenda: { day: number; h: number; act: Act; done: boolean }[][] = [];
   households = new Map<number, Household>();
@@ -97,6 +99,7 @@ export class Citizens {
     const old = this.max;
     if (n <= old) return;
     { const b = new Uint8Array(n * 1); b.set(this.alive);  this.alive = b; }
+    { const b = new Uint16Array(n * 1); b.set(this.gen);  this.gen = b; }
     { const b = new Float32Array(n * 1); b.set(this.age);  this.age = b; }
     { const b = new Uint8Array(n * 1); b.set(this.sex);  this.sex = b; }
     { const b = new Int32Array(n * 1); b.set(this.hh);  this.hh = b; }
@@ -152,6 +155,7 @@ export class Citizens {
     const i = this.free.pop()!;
     const r = this.rng;
     this.alive[i] = 1;
+    this.gen[i] = (this.gen[i] + 1) & 0xffff;
     this.age[i] = opts.age;
     this.sex[i] = opts.sex ?? (r.chance(0.5) ? 1 : 0);
     this.hh[i] = opts.hh;
@@ -186,6 +190,7 @@ export class Citizens {
   remove(i: number) {
     if (!this.alive[i]) return;
     this.endTrip(i);
+    this.w.transit2?.cancelCitizen(i);
     this.w.economy.leaveJob(i);
     this.w.economy.leaveSchool(i);
     const h = this.households.get(this.hh[i]);
@@ -527,7 +532,7 @@ export class Citizens {
       }
     }
     const speed = mode === 1 ? r.range(4, 5.5) : r.range(1.2, 1.5) * (this.age[i] > 70 ? 0.75 : 1);
-    const activeRoute = walkP ?? (carP && carP.path.every((de) => { const e = w.roads.edges[de >> 1]; return !!e && e.cls !== RoadClass.Highway && e.deck === undefined; }) ? carP : null);
+    const activeRoute = walkP ?? (carP && carP.path.every((de) => { const e = w.roads.edges[de >> 1]; return !!e && e.deck === undefined; }) ? carP : null);
     if (activeRoute && w.peds.capacityLeft > 30) {
       const pts = walkPoints(w.roads, activeRoute, doorOf(w.roads, from), doorOf(w.roads, to));
       const slot = w.peds.spawn(pts, i, speed, (mode === 1 ? PED_FLAG_BIKE : 0) | (this.tourist[i] ? PED_FLAG_TOURIST | (a === Act.Hotel ? PED_FLAG_LUGGAGE : 0) : 0), this.colorOf(i));
@@ -589,6 +594,7 @@ export class Citizens {
   /** physical or virtual arrival */
   arrive(i: number) {
     if (!this.alive[i]) return;
+    this.tripsCompleted++;
     const w = this.w;
     this.state[i] = ST_IN;
     this.slot[i] = -1;
@@ -613,6 +619,11 @@ export class Citizens {
   }
 
   endTrip(i: number) {
+    if (this.state[i] === ST_TRANSIT) {
+      this.w.transit2?.cancelCitizen(i);
+      this.slot[i] = -1;
+      return;
+    }
     const s = this.slot[i];
     if (s >= 0) {
       if (this.state[i] === ST_CAR && this.w.traffic.pKind[s] === P_CITIZEN && this.w.traffic.pId[s] === i) this.w.traffic.despawn(s);
@@ -885,7 +896,7 @@ export class Citizens {
     const st = this.state[i];
     const s = this.slot[i];
     if (st === ST_CAR && s >= 0 && w.traffic.active[s]) { w.traffic.computePose(s); return { x: w.traffic.x[s], y: w.traffic.y[s], z: w.traffic.z[s], h: w.traffic.h[s], inside: false, building: -1 }; }
-    if (st === ST_WALK && s >= 0 && w.peds.active[s]) { w.peds.pose(s); return { x: w.peds.x[s], y: Math.max(0.2, w.terrain.heightAt(w.peds.x[s], w.peds.z[s])) + 0.1, z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
+    if (st === ST_WALK && s >= 0 && w.peds.active[s]) { w.peds.pose(s); return { x: w.peds.x[s], y: w.pedElevation(w.peds.x[s], w.peds.z[s]), z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     if (st === ST_TRANSIT) { const p = w.transit2?.position(i); if (p) return p; }
     if (st === ST_VIRTUAL) {
       const dest = w.buildings.byId.get(this.tripDest[i]);

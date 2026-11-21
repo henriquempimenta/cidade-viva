@@ -1,7 +1,7 @@
 import { segRectDist } from './geom';
 import { KINDS } from '../shared/catalog';
 import { DAY_SECONDS, DAYS_PER_SEASON, DAYS_PER_YEAR, ERA_POP, ERAS, HOUR_SECONDS, RoadClass, SEASONS } from '../shared/constants';
-import { edgeHalfWidth } from '../shared/roadGeom';
+import { edgeHalfWidth, sampleEdgePts } from '../shared/roadGeom';
 import type { SimParams } from '../shared/params';
 import type { BuildingView, EdgeView, NodeView, RailEdgeView, WorldDiff, WorldInit } from '../shared/protocol';
 import { RNG, clamp } from '../shared/rng';
@@ -14,7 +14,7 @@ import { Integrity } from './corruption';
 import { Occupancy, OCC_RAIL } from './occupancy';
 import { Market, RoadGrowth } from './planner';
 import { borderPoint, chaikin, resample, simplify, terrainPath, type P2 } from './regional';
-import { RoadNetwork, type REdge, angDiff as angDiffW } from './roads';
+import { RoadNetwork, type REdge, angDiff as angDiffW, projSeg } from './roads';
 import { type SiteContext } from './siting';
 import { Terrain } from './terrain';
 import { Weather } from './weather';
@@ -46,6 +46,7 @@ export interface TourismLike { pressure: number }
 export interface TransitAPI {
   transitOption(from: Building, to: Building, len: number): { mode: number; time: number; fare: number } | null;
   board(i: number, from: Building, to: Building, opt: { mode: number; time: number; fare: number }): boolean;
+  cancelCitizen(i: number): void;
   describe(i: number): string;
   position(i: number): { x: number; y: number; z: number; h: number; inside: boolean; building: number } | null;
 }
@@ -269,7 +270,7 @@ export class World {
       this.traffic.splitEdge(o, e1, e2, t);
       this.transitSys?.onEdgeSplit(o, e1, e2, t);
     };
-    this.peds = new Peds(this.terrain);
+    this.peds = new Peds(this.terrain, (x, z) => this.pedElevation(x, z));
     this.hasCitizens = true;
     this.utils = new Utilities(this);
     this.utilities = this.utils;
@@ -291,6 +292,7 @@ export class World {
     this.transit2 = {
       transitOption: (a, b, len) => T.transitOption(a, b, len),
       board: (i, a, b, opt) => T.board(i, a, b, opt as never),
+      cancelCitizen: (i) => T.cancelCitizen(i),
       describe: (i) => T.describe(i),
       position: (i) => T.position(i),
     };
@@ -323,6 +325,44 @@ export class World {
     for (let i = 0; i < this.citizens.max; i++) if (this.citizens.alive[i]) this.economy.seekJobSoon(i);
     this.economy.hourly();
     this.updateDemand();
+  }
+
+  private bridgeCacheVer = -1;
+  private bridgeCache: { e: REdge; minX: number; maxX: number; minZ: number; maxZ: number; halfW: number }[] = [];
+
+  /** Elevation for pedestrians: ground height, or the bridge deck height when crossing a bridge over water. */
+  pedElevation(x: number, z: number): number {
+    const groundY = Math.max(0.2, this.terrain.heightAt(x, z));
+    const R = this.roads;
+    if (this.bridgeCacheVer !== R.topoVer) {
+      this.bridgeCacheVer = R.topoVer;
+      this.bridgeCache = [];
+      for (const e of R.edges) {
+        if (!e.alive || !e.bridge || e.deck !== undefined) continue;
+        const a = R.nodes[e.a], b = R.nodes[e.b];
+        const hw = edgeHalfWidth(e) + 2.4;
+        this.bridgeCache.push({
+          e,
+          minX: Math.min(a.x, b.x) - hw,
+          maxX: Math.max(a.x, b.x) + hw,
+          minZ: Math.min(a.z, b.z) - hw,
+          maxZ: Math.max(a.z, b.z) + hw,
+          halfW: hw,
+        });
+      }
+    }
+    let bestY = groundY;
+    for (let k = 0; k < this.bridgeCache.length; k++) {
+      const b = this.bridgeCache[k];
+      if (x < b.minX || x > b.maxX || z < b.minZ || z > b.maxZ) continue;
+      const a = R.nodes[b.e.a], nb = R.nodes[b.e.b];
+      const pr = projSeg(x, z, a.x, a.z, nb.x, nb.z);
+      if (pr.d <= b.halfW) {
+        const p = sampleEdgePts(b.e.pts, pr.t * b.e.len, 0);
+        if (p[1] > bestY) bestY = p[1];
+      }
+    }
+    return bestY + 0.15;
   }
 
   /** a direction or connectivity change: re-plan vehicles and lines that would otherwise drive against the traffic */
@@ -403,14 +443,24 @@ export class World {
   /** junction control: may a vehicle coming from edge e (direction dir) enter the node now? */
   nodeAllow = (n: RNode, e: REdge, dir: number, distToStop: number, waited = 0): boolean => {
     void dir;
-    void waited;
     const deg = n.edges.length;
     if (deg < 3) return true;
     if (n.interchange) {
       let major = 0;
       for (const id of n.edges) major = Math.max(major, this.roads.edges[id].cls);
       if (e.cls === major) return true; // passes over the viaduct
-      return n.inJunction === 0;
+      // count only vehicles in jSlots on the lower surface level (never blocked by viaduct traffic overhead!)
+      let lowerIn = 0;
+      const T = this.traffic;
+      for (const o of n.jSlots) {
+        if (!T.active[o] || T.jnode[o] !== n.id) continue;
+        const op = T.path[o];
+        const opi = T.pidx[o];
+        const oInDe = op && opi > 0 ? op[opi - 1] : -1;
+        const oInEdge = oInDe >= 0 ? this.roads.edges[oInDe >> 1] : null;
+        if (!oInEdge || oInEdge.cls < major) lowerIn++;
+      }
+      return lowerIn < 2 || (waited > 14 && lowerIn < 3);
     }
     if (n.control === 2 || n.control === 4) {
       if (!n.phases.length) this.computePhases(n);
@@ -426,10 +476,11 @@ export class World {
     if (n.control === 1) {
       let major = 0;
       for (const id of n.edges) major = Math.max(major, this.roads.edges[id].cls);
-      return e.cls < major ? n.inJunction === 0 : n.inJunction < 2;
+      if (e.cls < major) return n.inJunction < 3 || (waited > 14 && n.inJunction < 4);
+      return n.inJunction < 3;
     }
     // uncontrolled junction: non-conflicting movements are filtered strictly by Traffic.junctionConflict
-    return n.inJunction < 2;
+    return n.inJunction < 3 || (waited > 14 && n.inJunction < 4);
   };
 
   computePhases(n: RNode) {
@@ -770,6 +821,7 @@ export class World {
       });
     }
     this.buildings.dirty.add(b.id);
+    if (b.kind === 'railStation') this.rail2?.syncOpenStations();
   }
 
   hasCitizens = false;
@@ -809,6 +861,7 @@ export class World {
     this.weather.update(dt, this.dayFrac, this.season, this.params.raininess, this.params.snow, this.t);
     this.roads.stepRouting();
     this.stepSignals(dt);
+    this.traffic.era = this.era;
     this.traffic.rain = this.weather.rain;
     this.peds.rain = this.weather.rain;
     this.rail2.step(dt);

@@ -642,7 +642,10 @@ export class RoadNetwork {
       // install at a fixed step → identical results whatever thread computed them
       // a failed or late job is recomputed with the same kernel and graph: identical trees, the clock never hangs
       let nexts = p.backend.ready(p.ticket) ? p.backend.take(p.ticket) : null;
-      if (!nexts) { nexts = runTreeJob({ graph: p.graph, dests: p.dests }); this.routeFallbacks++; }
+      if (!nexts || nexts.length !== p.dests.length || nexts.some((a) => !(a instanceof Int32Array) || a.length !== p.graph.N)) {
+        nexts = runTreeJob({ graph: p.graph, dests: p.dests });
+        this.routeFallbacks++;
+      }
       p.dests.forEach((d, k) => {
         const old = this.trees.get(d);
         this.trees.set(d, { dist: new Float32Array(0), next: nexts[k], ver: p.ver, built: p.t, lastUse: old ? old.lastUse : p.t });
@@ -736,18 +739,29 @@ export class RoadNetwork {
   }
   /** drop every cached tree (direction changes make them unsafe even if they still look connected) */
   invalidateRoutes() { this.trees.clear(); this.graph = null; this.topoVer++; }
+  private walkDist = new Float64Array(0);
+  private walkPrev = new Int32Array(0);
+  private walkHeap = new MinHeap();
   /**
-   * Active-mode route (walking / cycling): ignores one-way restrictions and forbids regional highways
-   * and grade-separated decks, minimizing physical street distance instead of car travel time.
+   * Active-mode route (walking / cycling): ignores one-way restrictions and forbids grade-separated
+   * decks (viaducts / tunnels), minimizing physical street distance instead of car travel time.
+   * At-grade urban highway stretches remain walkable so the city backbone never splits into islands.
    */
   walkRoute(from: number, dest: number, maxDist = 5200): number[] | null {
     if (from === dest) return [];
     const N = this.nodes.length;
     if (from < 0 || dest < 0 || from >= N || dest >= N) return null;
     if (!this.nodes[from]?.alive || !this.nodes[dest]?.alive) return null;
-    const dist = new Float32Array(N).fill(Infinity);
-    const prevDe = new Int32Array(N).fill(-1);
-    const heap = new MinHeap();
+    if (this.walkDist.length < N) {
+      this.walkDist = new Float64Array(N + 512);
+      this.walkPrev = new Int32Array(N + 512);
+    }
+    const dist = this.walkDist;
+    const prevDe = this.walkPrev;
+    dist.fill(Infinity, 0, N);
+    prevDe.fill(-1, 0, N);
+    const heap = this.walkHeap;
+    heap.clear();
     dist[from] = 0;
     heap.push(from, 0);
     while (heap.size) {
@@ -758,7 +772,7 @@ export class RoadNetwork {
       if (u === dest) break;
       for (const eid of this.nodes[u].edges) {
         const e = this.edges[eid];
-        if (!e.alive || e.progress < 1 || e.cls === RoadClass.Highway || e.deck !== undefined) continue;
+        if (!e.alive || e.progress < 1 || e.deck !== undefined) continue;
         const v = e.a === u ? e.b : e.a;
         const dir = e.a === u ? 0 : 1;
         const nd = d + e.len;

@@ -28,80 +28,90 @@ export class Utilities {
     this.outage = new Uint8Array(w.fields.G * w.fields.G);
   }
 
-  /** road-graph nodes reachable from a set of active utility sources (and their finished transmission endpoints) */
-  private reachableNodes(sources: Building[], includeLines = false): Set<number> {
-    const R = this.w.roads;
-    const vis = new Set<number>();
-    const queue: number[] = [];
-    const seedPoint = (x: number, z: number) => {
-      const n = R.nearestNode(x, z, 260, (q) => q.edges.some((id) => R.edges[id]?.alive && R.edges[id].progress >= 1));
-      if (n && !vis.has(n.id)) { vis.add(n.id); queue.push(n.id); }
-    };
-    for (const s of sources) {
-      if (s.edge >= 0 && R.edges[s.edge]?.alive && R.edges[s.edge].progress >= 1) {
-        const e = R.edges[s.edge];
-        if (!vis.has(e.a)) { vis.add(e.a); queue.push(e.a); }
-        if (!vis.has(e.b)) { vis.add(e.b); queue.push(e.b); }
-      } else {
-        seedPoint(s.x, s.z);
-      }
-      if (includeLines) {
-        const lid = this.lineBuilt.get(s.id);
-        if (lid !== undefined && lid >= 0) {
-          const line = this.powerLines[lid];
-          if (line && line.progress >= 1 && line.pts.length >= 3) {
-            seedPoint(line.pts[line.pts.length - 3], line.pts[line.pts.length - 1]);
-          }
-        }
-      }
-    }
-    for (let head = 0; head < queue.length; head++) {
-      const u = queue[head];
-      for (const eid of R.nodes[u].edges) {
-        const e = R.edges[eid];
-        if (!e.alive || e.progress < 1) continue;
-        const v = e.a === u ? e.b : e.a;
-        if (!vis.has(v)) { vis.add(v); queue.push(v); }
-      }
-    }
-    return vis;
-  }
-
-  /** is building `b` physically connected to any active source via the road/distribution network or local proximity? */
-  private isConnected(b: Building, sources: Building[], nodes: Set<number>): boolean {
-    if (!sources.length) return false;
+  /** strict building -> live road node attachment (b.edge if valid, else immediate <= 45 m lot frontage) */
+  private buildingNode(b: Building): number {
     const R = this.w.roads;
     if (b.edge >= 0) {
       const e = R.edges[b.edge];
-      if (e?.alive && e.progress >= 1 && (nodes.has(e.a) || nodes.has(e.b))) return true;
+      if (e?.alive && e.progress >= 1) return e.a;
     }
-    const nearNode = R.nearestNode(b.x, b.z, 120, (q) => nodes.has(q.id));
-    if (nearNode) return true;
-    for (const s of sources) if (Math.hypot(b.x - s.x, b.z - s.z) < 250) return true;
-    return false;
+    const nearNode = R.nearestNode(b.x, b.z, 45, (q) => q.edges.some((id) => R.edges[id]?.alive && R.edges[id].progress >= 1));
+    return nearNode ? nearNode.id : -1;
+  }
+
+  /** build road-graph connected component Union-Find parent array */
+  private buildRoadDSU(): Int32Array {
+    const R = this.w.roads;
+    const N = R.nodes.length;
+    const parent = new Int32Array(N);
+    for (let i = 0; i < N; i++) parent[i] = i;
+    const find = (x: number): number => {
+      while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+      return x;
+    };
+    for (const e of R.edges) {
+      if (!e.alive || e.progress < 1) continue;
+      const ra = find(e.a), rb = find(e.b);
+      if (ra !== rb) parent[rb] = ra;
+    }
+    return parent;
+  }
+
+  private dsuFind(parent: Int32Array, x: number): number {
+    while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  }
+
+  private dsuUnion(parent: Int32Array, a: number, b: number) {
+    const ra = this.dsuFind(parent, a), rb = this.dsuFind(parent, b);
+    if (ra !== rb) parent[rb] = ra;
   }
 
   hourly() {
-    const w = this.w;
+    const w = this.w, R = w.roads;
     let ps = 0, pd = 0, ws = 0, wd = 0, sc = 0, gc = 0;
-    const activePlants: Building[] = [];
-    const wsrc: Building[] = [];
+    const activePlants: { b: Building; supply: number; lineNode: number }[] = [];
+    const wsrc: { b: Building; supply: number }[] = [];
+    const waterDSU = this.buildRoadDSU();
+    const powerDSU = waterDSU.slice();
+    const liveNode = (q: { edges: number[] }) => q.edges.some((id) => R.edges[id]?.alive && R.edges[id].progress >= 1);
+
+    // 1. Collect sources and bridge components via completed power transmission lines
     for (const b of w.buildings.list) {
       if (b.state !== 'done' || b.abandoned) continue;
       const d = b.def;
       const scale = d.public ? 1 : 1 + b.floors * 0.15;
       if (d.power < 0) {
-        if (!this.lineBuilt.has(b.id) && d.cat === 'power') this.buildLine(b);
+        if (!this.lineBuilt.has(b.id) && d.cat === 'power' && d.offRoad) this.buildLine(b);
         const lid = this.lineBuilt.get(b.id);
         const lineReady = lid === undefined || lid < 0 || (this.powerLines[lid]?.progress ?? 0) >= 1;
         // remote power plants deliver power only after their transmission line finishes construction
         if (lineReady) {
-          ps += -d.power * (b.kind === 'windFarm' ? 0.5 + w.weather.wind * 0.6 : b.kind === 'solarFarm' ? 0.4 + (1 - w.weather.rain) * 0.6 : 1);
-          activePlants.push(b);
+          const gen = -d.power * (b.kind === 'windFarm' ? 0.5 + w.weather.wind * 0.6 : b.kind === 'solarFarm' ? 0.4 + (1 - w.weather.rain) * 0.6 : 1);
+          let lineNode = -1;
+          if (lid !== undefined && lid >= 0) {
+            const line = this.powerLines[lid];
+            if (line && line.progress >= 1 && line.pts.length >= 3) {
+              const dst = R.nearestNode(line.pts[line.pts.length - 3], line.pts[line.pts.length - 1], 260, liveNode);
+              if (dst) lineNode = dst.id;
+            }
+          }
+          const bn = this.buildingNode(b);
+          if (bn >= 0 && lineNode >= 0) this.dsuUnion(powerDSU, bn, lineNode);
+          const gridNode = bn >= 0 ? bn : lineNode;
+          if (gridNode >= 0) {
+            ps += gen;
+            activePlants.push({ b, supply: gen, lineNode: gridNode });
+          }
         }
       } else pd += d.power * scale * (b.households.length ? 1 : 0.6);
-      if (d.waterUse < 0) { ws += -d.waterUse; wsrc.push(b); }
-      else wd += d.waterUse * scale * 2;
+      if (d.waterUse < 0) {
+        if (this.buildingNode(b) >= 0) {
+          const gen = -d.waterUse;
+          ws += gen;
+          wsrc.push({ b, supply: gen });
+        }
+      } else wd += d.waterUse * scale * 2;
       if (d.sewageCap) sc += d.sewageCap;
       if (d.garbageCap) gc += d.garbageCap;
     }
@@ -109,50 +119,121 @@ export class Utilities {
     this.water = { supply: ws, demand: wd * 3 };
     this.sewage = { cap: sc, prod: wd * 2.4 };
     this.garbage.cap = gc;
-    // ---- connectivity + load-shedding outages ----
-    const F = w.fields, G = F.G;
-    this.outage.fill(0);
-    const pNodes = this.reachableNodes(activePlants, true);
-    const wNodes = this.reachableNodes(wsrc, false);
-    const deficitP = this.forcedBlackout > 0 ? 0.6 : Math.max(0, 1 - ps / Math.max(1, this.power.demand));
-    const deficitW = Math.max(0, 1 - ws / Math.max(1, this.water.demand));
-    const wasBlack = this.blackout, wasDry = this.waterShortage;
-    this.blackout = deficitP > 0.02 || (pd > 0 && activePlants.length === 0);
-    this.waterShortage = deficitW > 0.03 || (wd > 0 && wsrc.length === 0);
-    const cells: { k: number; dp: number; dw: number; load: number }[] = [];
-    if (this.blackout || this.waterShortage) {
-      for (let k = 0; k < G * G; k++) {
-        const load = F.f.resDensity[k] + F.f.jobDensity[k] * 0.5;
-        if (load < 0.05) continue;
-        const [x, z] = F.center(k);
-        let dp = Infinity, dw = Infinity;
-        for (const p of activePlants) dp = Math.min(dp, Math.hypot(p.x - x, p.z - z));
-        for (const p of wsrc) dw = Math.min(dw, Math.hypot(p.x - x, p.z - z));
-        cells.push({ k, dp, dw, load });
+
+    // 2. Per-connected-component supply, demand, and load-shedding (never cross-subsidizing disconnected islands)
+    interface Comp { supply: number; demand: number; sources: Building[]; consumers: { b: Building; dem: number; dist: number }[] }
+    const pComps = new Map<number, Comp>();
+    const wComps = new Map<number, Comp>();
+    const getComp = (m: Map<number, Comp>, root: number): Comp => {
+      let c = m.get(root);
+      if (!c) m.set(root, (c = { supply: 0, demand: 0, sources: [], consumers: [] }));
+      return c;
+    };
+
+    for (const p of activePlants) {
+      const nid = p.lineNode;
+      if (nid < 0) continue;
+      const c = getComp(pComps, this.dsuFind(powerDSU, nid));
+      c.supply += p.supply;
+      c.sources.push(p.b);
+    }
+    for (const wsItem of wsrc) {
+      const nid = this.buildingNode(wsItem.b);
+      if (nid < 0) continue;
+      const c = getComp(wComps, this.dsuFind(waterDSU, nid));
+      c.supply += wsItem.supply;
+      c.sources.push(wsItem.b);
+    }
+
+    const poweredBuildings = new Set<number>();
+    const wateredBuildings = new Set<number>();
+    for (const b of w.buildings.list) {
+      const nid = this.buildingNode(b);
+      const d = b.def;
+      const scale = d.public ? 1 : 1 + b.floors * 0.15;
+      const activeConsumer = b.state === 'done' && !b.abandoned;
+      if (nid >= 0) {
+        const pr = this.dsuFind(powerDSU, nid);
+        const pc = pComps.get(pr);
+        if (d.power < 0) {
+          if (pc && pc.sources.length > 0) poweredBuildings.add(b.id);
+        } else {
+          const dem = activeConsumer ? d.power * scale * (b.households.length ? 1 : 0.6) * 4 : 0;
+          if (pc && pc.sources.length > 0) {
+            pc.demand += dem;
+            pc.consumers.push({ b, dem, dist: 0 });
+            poweredBuildings.add(b.id);
+          }
+        }
+        const wr = this.dsuFind(waterDSU, nid);
+        const wc = wComps.get(wr);
+        if (d.waterUse < 0) {
+          if (wc && wc.sources.length > 0) wateredBuildings.add(b.id);
+        } else {
+          const dem = activeConsumer ? d.waterUse * scale * 2 * 3 : 0;
+          if (wc && wc.sources.length > 0) {
+            wc.demand += dem;
+            wc.consumers.push({ b, dem, dist: 0 });
+            wateredBuildings.add(b.id);
+          }
+        }
       }
     }
-    const total = cells.reduce((a, c) => a + c.load, 0);
-    const loadOutage = new Uint8Array(G * G);
-    if (this.blackout) {
-      cells.sort((a, b) => b.dp - a.dp);
-      let acc = 0;
-      for (const c of cells) { if (acc > total * Math.min(0.85, Math.max(deficitP, activePlants.length ? 0 : 1) * 1.3)) break; loadOutage[c.k] = 1; acc += c.load; }
+
+    let anyPowerDeficit = this.forcedBlackout > 0 || (pd > 0 && activePlants.length === 0);
+    let anyWaterDeficit = wd > 0 && wsrc.length === 0;
+    let blackoutPos: [number, number] | null = null;
+
+    // Shed farthest consumers within each deficit power component only
+    for (const comp of pComps.values()) {
+      const deficit = this.forcedBlackout > 0 ? 0.6 : comp.demand > 0 ? Math.max(0, 1 - comp.supply / comp.demand) : 0;
+      if (deficit <= 0.02) continue;
+      anyPowerDeficit = true;
+      for (const item of comp.consumers) {
+        let md = Infinity;
+        for (const s of comp.sources) md = Math.min(md, Math.hypot(s.x - item.b.x, s.z - item.b.z));
+        item.dist = md;
+      }
+      comp.consumers.sort((a, b) => b.dist - a.dist || b.b.id - a.b.id);
+      const targetShed = Math.max(comp.demand - comp.supply, comp.demand * Math.min(0.95, deficit));
+      let shed = 0;
+      for (const item of comp.consumers) {
+        if (shed >= targetShed && (comp.demand - shed) <= comp.supply) break;
+        poweredBuildings.delete(item.b.id);
+        if (!blackoutPos) blackoutPos = [item.b.x, item.b.z];
+        shed += item.dem;
+      }
     }
-    const loadDry = new Uint8Array(G * G);
-    if (this.waterShortage) {
-      cells.sort((a, b) => b.dw - a.dw);
-      let acc = 0;
-      for (const c of cells) { if (acc > total * Math.min(0.85, Math.max(deficitW, wsrc.length ? 0 : 1) * 1.3)) break; loadDry[c.k] = 1; acc += c.load; }
+
+    // Shed farthest consumers within each deficit water component only
+    for (const comp of wComps.values()) {
+      const deficit = comp.demand > 0 ? Math.max(0, 1 - comp.supply / comp.demand) : 0;
+      if (deficit <= 0.03) continue;
+      anyWaterDeficit = true;
+      for (const item of comp.consumers) {
+        let md = Infinity;
+        for (const s of comp.sources) md = Math.min(md, Math.hypot(s.x - item.b.x, s.z - item.b.z));
+        item.dist = md;
+      }
+      comp.consumers.sort((a, b) => b.dist - a.dist || b.b.id - a.b.id);
+      const targetShed = Math.max(comp.demand - comp.supply, comp.demand * Math.min(0.95, deficit));
+      let shed = 0;
+      for (const item of comp.consumers) {
+        if (shed >= targetShed && (comp.demand - shed) <= comp.supply) break;
+        wateredBuildings.delete(item.b.id);
+        shed += item.dem;
+      }
     }
-    this.outage.set(loadOutage);
-    const dry = loadDry.slice();
-    // evaluate every building against read-only load-shedding grids (never order-dependent)
+
+    const F = w.fields, G = F.G;
+    this.outage.fill(0);
+    const dry = new Uint8Array(G * G);
     const connP = new Uint16Array(G * G), discP = new Uint16Array(G * G);
     const connW = new Uint16Array(G * G), discW = new Uint16Array(G * G);
     for (const b of w.buildings.list) {
       const k = F.idx(b.x, b.z);
-      const pw = !loadOutage[k] && this.isConnected(b, activePlants, pNodes);
-      const wt = !loadDry[k] && this.isConnected(b, wsrc, wNodes);
+      const pw = poweredBuildings.has(b.id);
+      const wt = wateredBuildings.has(b.id);
       if (pw !== b.powered || wt !== b.watered) { b.powered = pw; b.watered = wt; }
       if (b.state === 'done' && !b.abandoned) {
         if (pw) connP[k]++; else discP[k]++;
@@ -165,9 +246,12 @@ export class Utilities {
       F.f.power[k] = this.outage[k] ? 0 : 1;
       F.f.waterSupply[k] = dry[k] ? 0 : 1;
     }
+
+    const wasBlack = this.blackout, wasDry = this.waterShortage;
+    this.blackout = anyPowerDeficit;
+    this.waterShortage = anyWaterDeficit;
     if (this.blackout && !wasBlack) {
-      const c = cells.find((x) => this.outage[x.k]);
-      const [x, z] = c ? F.center(c.k) : [w.center.x, w.center.z];
+      const [x, z] = blackoutPos ?? [w.center.x, w.center.z];
       w.events.emit('blackout', x, z, 0.9, `Apagão: a demanda de energia (${this.power.demand.toFixed(0)} MW) supera a oferta (${ps.toFixed(0)} MW)`, { headline: `Apagão deixa bairros no escuro; demanda supera a geração`, visual: w.dayFrac > 0.75 || w.dayFrac < 0.25 ? 1 : 0.4 });
     }
     if (this.waterShortage && !wasDry) w.events.emit('water', w.center.x, w.center.z, 0.6, 'Falta d’água atinge bairros afastados das estações', { headline: 'Torneiras secas: falta d’água em bairros da periferia' });
@@ -181,19 +265,29 @@ export class Utilities {
     this.dispatchGarbageHourly();
   }
 
+  onGarbageArrived(targetId: number) {
+    this.garbageDispatched.delete(targetId);
+  }
+
+  onGarbageStuck(facId: number, targetId: number) {
+    this.garbageDispatched.delete(targetId);
+    const q = this.garbageQuota.get(facId);
+    if (q) q.left++;
+  }
+
   private dispatchGarbageHourly() {
     const w = this.w;
-    if (!this.garbageQuota.size || w.traffic.capacityLeft < 200) return;
-    const dirty = w.buildings.list.filter((b) => b.garbage > 0.3 && b.state === 'done' && !b.def.public).sort((a, b) => b.garbage - a.garbage);
+    if (!this.garbageQuota.size || w.traffic.count >= 3000) return;
+    const dirty = w.buildings.list.filter((b) => b.garbage > 0.2 && b.state === 'done' && !b.def.public).sort((a, b) => b.garbage - a.garbage);
     if (!dirty.length) return;
     for (const [facId, q] of this.garbageQuota) {
       if (q.left <= 0) continue;
       const fac = w.buildings.byId.get(facId);
       if (!fac || !fac.alive || fac.abandoned || fac.state !== 'done') { q.left = 0; continue; }
-      const batch = Math.min(2, q.left);
+      const batch = Math.min(3, q.left);
       let sent = 0;
       for (const tgt of dirty) {
-        if (sent >= batch || w.traffic.capacityLeft < 200) break;
+        if (sent >= batch || w.traffic.count >= 3000) break;
         if (this.garbageDispatched.has(tgt.id)) continue;
         const plan = carPlan(w.roads, fac, tgt);
         if (!plan) continue;
@@ -247,9 +341,9 @@ export class Utilities {
     this.garbageQuota.clear();
     this.garbageDispatched.clear();
     for (const fac of facilities) {
-      const cap = (fac.def.garbageCap ?? 100) * 0.02;
-      const rounds = Math.min(20, Math.max(2, Math.ceil(cap / 5)));
-      const loadPerTruck = Math.max(3, Math.round((cap / rounds) * 10)); // tenths of garbage units in pAux
+      const cap = (fac.def.garbageCap ?? 100) * 0.05;
+      const rounds = Math.min(24, Math.max(3, Math.ceil(cap / 4)));
+      const loadPerTruck = Math.max(4, Math.round((cap / rounds) * 10)); // tenths of garbage units in pAux
       this.garbageQuota.set(fac.id, { left: rounds, loadPerTruck });
     }
     // dispatch the first shift right away (1-2 trucks per facility)

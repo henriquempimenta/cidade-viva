@@ -42,7 +42,7 @@ export class Peds {
   /** closed railway level crossings: position, road unit axis (ux,uz) and carriageway+sidewalk half-width */
   closedGates: { x: number; z: number; ux?: number; uz?: number; halfW?: number }[] = [];
 
-  constructor(private T: Terrain) { this.grow(2048); }
+  constructor(private T: Terrain, private elevation?: (x: number, z: number) => number) { this.grow(2048); }
 
   private grow(n: number) {
     const old = this.max;
@@ -216,7 +216,8 @@ export class Peds {
       if (Math.abs(P[0] - cam.x) > L || Math.abs(P[1] - cam.z) > L) { out[o + 4] = -1; continue; }
       this.pose(i);
       if (Math.abs(this.x[i] - cam.x) > R || Math.abs(this.z[i] - cam.z) > R) { out[o + 4] = -1; continue; }
-      out[o] = this.x[i]; out[o + 1] = Math.max(0.2, this.T.heightAt(this.x[i], this.z[i])) + 0.15; out[o + 2] = this.z[i];
+      const py = this.elevation ? this.elevation(this.x[i], this.z[i]) : Math.max(0.2, this.T.heightAt(this.x[i], this.z[i])) + 0.15;
+      out[o] = this.x[i]; out[o + 1] = py; out[o + 2] = this.z[i];
       out[o + 3] = this.h[i]; out[o + 4] = this.gen[i];
       out[o + 5] = this.flags[i] | (this.rain > 0.3 && !(this.flags[i] & PED_FLAG_BIKE) && (i % 3 !== 0) ? PED_FLAG_UMBRELLA : 0);
       out[o + 6] = this.citizen[i];

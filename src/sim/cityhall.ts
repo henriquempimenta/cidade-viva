@@ -173,7 +173,8 @@ export class CityHall {
     const facilities = w.buildings.list.filter((b) => b.def.garbageCap);
     const piles = w.buildings.list.filter((b) => b.garbage > 1.5).length;
     const capUsed = U.garbage.stock / Math.max(1, facilities.reduce((a, b) => a + (b.def.garbageCap ?? 0), 0));
-    if ((!facilities.length && pop > 150) || piles > 15 + pop / 100 || capUsed > 0.8) {
+    const dailyCap = facilities.reduce((a, b) => a + (b.def.garbageCap ?? 0) * 0.04, 0);
+    if ((!facilities.length && pop > 150) || piles > 15 + pop / 100 || capUsed > 0.8 || (U.garbage.prod > dailyCap && pop > 400)) {
       if (!this.building(['dump', 'landfill', 'recycling', 'incinerator'])) {
         const motive = !facilities.length ? 'A cidade não tem destino para o lixo' : piles > 15 ? `${piles} imóveis com lixo acumulado na calçada` : 'Lixão perto da capacidade';
         add(era === 0 ? 'dump' : 'landfill', 25 + piles * 0.5, motive);

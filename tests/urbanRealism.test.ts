@@ -6,7 +6,7 @@ import { edgeHalfWidth, SIDEWALK_WIDTH } from '../src/shared/roadGeom';
 import { segRectDist } from '../src/sim/geom';
 import { projSeg } from '../src/sim/roads';
 import { P_BUS, P_CITIZEN, P_SERVICE } from '../src/sim/traffic';
-import { Act, ST_CAR, ST_IN } from '../src/sim/citizens';
+import { Act, ST_CAR, ST_IN, ST_TRANSIT } from '../src/sim/citizens';
 import { CAP_BRT, CAP_BUS, FARE_BRT, FARE_BUS, FARE_METRO, FARE_RAIL, type Line } from '../src/sim/transit';
 import { activePlan, doorOf, walkPoints } from '../src/sim/trips';
 
@@ -121,8 +121,8 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     const w = makeWorld(201);
     const S = w.transitSys;
     const busStops = [
-      { x: 100, z: 100, node: -1, edge: -1, dir: 0, s: 20, curbX: 100, curbZ: 100, ux: 1, uz: 0, name: 'P1' },
-      { x: 300, z: 100, node: -1, edge: -1, dir: 0, s: 80, curbX: 300, curbZ: 100, ux: 1, uz: 0, name: 'P2' },
+      { id: S.allocStopId(), x: 100, z: 100, node: -1, edge: -1, dir: 0, s: 20, curbX: 100, curbZ: 100, ux: 1, uz: 0, name: 'P1' },
+      { id: S.allocStopId(), x: 300, z: 100, node: -1, edge: -1, dir: 0, s: 80, curbX: 300, curbZ: 100, ux: 1, uz: 0, name: 'P2' },
     ];
     const lBus: Line = {
       id: 501, kind: 'bus', color: '#e74c3c', name: 'L1', stops: busStops, path: [], startS: 0, destS: 0,
@@ -144,11 +144,13 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     hRich.members.push(c1);
     hPoor.members.push(cPoor);
     w.citizens.tripDest[cPoor] = home.id;
+    w.citizens.state[c1] = ST_TRANSIT;
+    w.citizens.state[cPoor] = ST_TRANSIT;
 
     // Bus boarding: c1 pays FARE_BUS, cPoor cannot afford it and does not board
-    S.rides.set(c1, { line: lBus.id, from: 0, to: 1, phase: 1, since: 0, dest: home.id });
-    S.rides.set(cPoor, { line: lBus.id, from: 0, to: 1, phase: 1, since: 0, dest: home.id });
-    lBus.waiting.set(0, [c1, cPoor]);
+    S.rides.set(c1, { line: lBus.id, fromId: busStops[0].id, toId: busStops[1].id, gen: w.citizens.gen[c1], phase: 1, since: 0, dest: home.id });
+    S.rides.set(cPoor, { line: lBus.id, fromId: busStops[0].id, toId: busStops[1].id, gen: w.citizens.gen[cPoor], phase: 1, since: 0, dest: home.id });
+    lBus.waiting.set(busStops[0].id, [c1, cPoor]);
     const movedBus = S.serveStop(lBus, 0, 10, CAP_BUS);
     expect(movedBus).toBe(1);
     expect(lBus.onboard.get(10)).toEqual([c1]);
@@ -159,12 +161,15 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     const c2 = w.citizens.add({ age: 30, hh: hRich.id });
     const c3 = w.citizens.add({ age: 30, hh: hRich.id });
     const c4 = w.citizens.add({ age: 30, hh: hRich.id });
-    S.rides.set(c2, { line: lBrt.id, from: 0, to: 1, phase: 1, since: 0, dest: home.id });
-    S.rides.set(c3, { line: lRail.id, from: 0, to: 1, phase: 1, since: 0, dest: home.id });
-    S.rides.set(c4, { line: lMetro.id, from: 0, to: 1, phase: 1, since: 0, dest: home.id });
-    lBrt.waiting.set(0, [c2]);
-    lRail.waiting.set(0, [c3]);
-    lMetro.waiting.set(0, [c4]);
+    w.citizens.state[c2] = ST_TRANSIT;
+    w.citizens.state[c3] = ST_TRANSIT;
+    w.citizens.state[c4] = ST_TRANSIT;
+    S.rides.set(c2, { line: lBrt.id, fromId: busStops[0].id, toId: busStops[1].id, gen: w.citizens.gen[c2], phase: 1, since: 0, dest: home.id });
+    S.rides.set(c3, { line: lRail.id, fromId: busStops[0].id, toId: busStops[1].id, gen: w.citizens.gen[c3], phase: 1, since: 0, dest: home.id });
+    S.rides.set(c4, { line: lMetro.id, fromId: busStops[0].id, toId: busStops[1].id, gen: w.citizens.gen[c4], phase: 1, since: 0, dest: home.id });
+    lBrt.waiting.set(busStops[0].id, [c2]);
+    lRail.waiting.set(busStops[0].id, [c3]);
+    lMetro.waiting.set(busStops[0].id, [c4]);
     S.serveStop(lBrt, 0, 11, CAP_BRT);
     S.serveStop(lRail, 0, 12, 200);
     S.serveStop(lMetro, 0, 13, 200);
@@ -187,8 +192,9 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     expect(st.s).toBeGreaterThan(R.nodeRenderR(n1.id) + 5);
     expect(st.s).toBeLessThan(e.len - R.nodeRenderR(n2.id) - 5);
 
+    const st2 = { ...st, id: S.allocStopId(), s: st.s + 20, x: st.x + 20, curbX: st.curbX + 20 };
     const l: Line = {
-      id: 700, kind: 'bus', color: '#3498db', name: 'Teste', stops: [st, { ...st, s: st.s + 20, x: st.x + 20, curbX: st.curbX + 20 }],
+      id: 700, kind: 'bus', color: '#3498db', name: 'Teste', stops: [st, st2],
       path: [e.id * 2], startS: 0, destS: e.len - 1, fleet: 1, vehicles: new Set(),
       ridersToday: 0, ridersYday: 0, waiting: new Map(), onboard: new Map(), edges: new Set([e.id]),
       headway: 120, lastSpawn: 0, pts: [],
@@ -208,7 +214,8 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     const riders = [0, 1, 2].map(() => {
       const cid = w.citizens.add({ age: 30, hh: h.id });
       h.members.push(cid);
-      S.rides.set(cid, { line: l.id, from: 0, to: 1, phase: 0, since: 0, dest: home.id });
+      w.citizens.state[cid] = ST_TRANSIT;
+      S.rides.set(cid, { line: l.id, fromId: st.id, toId: st2.id, gen: w.citizens.gen[cid], phase: 0, since: 0, dest: home.id });
       S.pedArrived(cid); // enters atStop -> spawns held ped in FIFO queue
       return cid;
     });
@@ -224,7 +231,7 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     // Serve only 1 seat -> rider 0 boards, rider 1 shifts into rider 0's former front position!
     S.serveStop(l, 0, busSlot, 1);
     expect(l.onboard.get(busSlot)).toEqual([riders[0]]);
-    expect(l.waiting.get(0)).toEqual([riders[1], riders[2]]);
+    expect(l.waiting.get(st.id)).toEqual([riders[1], riders[2]]);
     expect(w.peds.x[slot1Before]).toBeCloseTo(x0Before, 2);
   });
 
@@ -252,11 +259,12 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     const riders = [0, 1, 2].map(() => {
       const cid = w.citizens.add({ age: 30, hh: h.id });
       h.members.push(cid);
-      S.rides.set(cid, { line: l.id, from: 0, to: 1, phase: 0, since: 0, dest: home.id });
+      w.citizens.state[cid] = ST_TRANSIT;
+      S.rides.set(cid, { line: l.id, fromId: st1.id, toId: st2.id, gen: w.citizens.gen[cid], phase: 0, since: 0, dest: home.id });
       S.pedArrived(cid);
       return cid;
     });
-    expect(l.waiting.get(0)?.length).toBe(3);
+    expect(l.waiting.get(st1.id)?.length).toBe(3);
 
     for (let i = 0; i < T.max; i++) if (T.active[i]) T.despawn(i);
     const busSlot = T.spawn(VType.Bus, l.path, 15, l.destS, { kind: P_BUS, id: l.id, aux: 0 });
@@ -291,7 +299,7 @@ describe('Pilar 2 — pontos de ônibus no meio-fio, abrigos, fila FIFO e tarifa
     expect(boardedCount).toBe(3);
     expect(resumedPastStop).toBe(true);
     expect(retriggeredStop).toBe(false);
-    expect(l.waiting.get(0)?.length ?? 0).toBe(0);
+    expect(l.waiting.get(st1.id)?.length ?? 0).toBe(0);
     expect(l.ridersToday).toBe(3);
     expect(h.money).toBeCloseTo(100 - 3 * FARE_BUS, 5);
     expect(S.fares()).toBeCloseTo(3 * FARE_BUS, 5);

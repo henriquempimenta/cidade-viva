@@ -343,6 +343,8 @@ export class App {
     this.prevMode = fromInput ? prev : 'free';
   }
   private prevMode: CamMode = 'auto';
+  /** true only when free camera was entered via temporary user interruption and will auto-resume director */
+  get willAutoResume(): boolean { return this.mode === 'free' && this.prevMode !== 'free'; }
 
   followEntity(f: { kind: 'citizen' | 'vehicle' | 'ped'; id: number; gen?: number }) {
     this.follow = f;

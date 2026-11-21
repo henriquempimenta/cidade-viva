@@ -6,6 +6,7 @@ const RENDER_PED = 6000;
 import { GB } from './geomBuilder';
 import { createAssetMaterial, createGlowMaterial } from './meshKit';
 import { buildVehicle, VEHICLE_PRESETS, type VehicleId } from './vehicleGeom';
+import { pickVehiclePreset } from '../shared/vehiclePresets';
 import { U } from './uniforms';
 
 const PED_FLAG_BIKE = 256;
@@ -14,34 +15,6 @@ const W = new THREE.Color(0xffffff), DARK = new THREE.Color(0x22262b), TIRE = ne
 const PRESET_INDEX: Record<VehicleId, number> = Object.fromEntries(
   VEHICLE_PRESETS.map((p, idx) => [p.id, idx]),
 ) as Record<VehicleId, number>;
-
-// Deterministic archetype tables for civilian cars (modern vs Era 0 vintage)
-const MODERN_CAR_POOL: number[] = [
-  PRESET_INDEX.sedan, PRESET_INDEX.sedan, PRESET_INDEX.sedan, PRESET_INDEX.sedan,
-  PRESET_INDEX.hatch, PRESET_INDEX.hatch, PRESET_INDEX.hatch,
-  PRESET_INDEX.suv, PRESET_INDEX.suv,
-  PRESET_INDEX.pickup, PRESET_INDEX.pickup,
-];
-const ERA0_CAR_POOL: number[] = [
-  PRESET_INDEX.vintage, PRESET_INDEX.vintage, PRESET_INDEX.vintage,
-  PRESET_INDEX.vintage, PRESET_INDEX.vintage, PRESET_INDEX.vintage,
-  PRESET_INDEX.pickup, PRESET_INDEX.sedan,
-];
-const DIRECT_VTYPE_PRESET: Partial<Record<VType, number>> = {
-  [VType.Taxi]: PRESET_INDEX.taxi,
-  [VType.Moto]: PRESET_INDEX.moto,
-  [VType.Bus]: PRESET_INDEX.bus,
-  [VType.SchoolBus]: PRESET_INDEX.schoolbus,
-  [VType.Truck]: PRESET_INDEX.truck,
-  [VType.Van]: PRESET_INDEX.van,
-  [VType.Garbage]: PRESET_INDEX.garbage,
-  [VType.Ambulance]: PRESET_INDEX.ambulance,
-  [VType.Police]: PRESET_INDEX.police,
-  [VType.Fire]: PRESET_INDEX.fire,
-  [VType.TourBus]: PRESET_INDEX.tourbus,
-  [VType.Construction]: PRESET_INDEX.construction,
-  [VType.Hearse]: PRESET_INDEX.hearse,
-};
 
 const CAR_COLORS = [0xf2f2f2, 0x262a30, 0x8f969c, 0xb5b9bd, 0xb83832, 0x2b558c, 0x2f6b4a, 0xd4c08a, 0x6d2b45, 0x3c6fb0, 0xd99b2a, 0x4a525c];
 const OLD_COLORS = [0x5ca09b, 0xd9cba0, 0x9c3d41, 0x3f6b54, 0x6b849c, 0xc8a45a, 0x9e5a38, 0xe6decb];
@@ -321,15 +294,9 @@ export class AgentsLayer {
       if (!this.frustum.intersectsSphere(sphere)) continue;
       const gen = cv[o + 5];
       const hash = ((i * 7 + gen * 13) >>> 0);
-      let slot: number;
-      if (type === VType.Car) {
-        const pool = old ? ERA0_CAR_POOL : MODERN_CAR_POOL;
-        slot = pool[hash % pool.length];
-      } else {
-        const direct = DIRECT_VTYPE_PRESET[type];
-        if (direct === undefined) continue;
-        slot = direct;
-      }
+      const presetId = pickVehiclePreset(type, i, gen, old ? 0 : 1);
+      if (!presetId) continue;
+      const slot = PRESET_INDEX[presetId];
       const im = this.veh[slot];
       if (!im || counts[slot] >= im.instanceMatrix.count) continue;
       this.q.setFromAxisAngle(this.up, -h);

@@ -22,10 +22,20 @@ npm run build      # checagem de tipos + build de produção
 
 Parâmetros pela URL, por exemplo `?seed=42&terrain=litoral&warmup=20`. O `warmup` avança N dias antes de abrir a cena. A seed padrão é `1234` (terreno `vale`); as seeds `42` e `1234` no `litoral` entram nos testes de implantação.
 
-### Testes e diagnósticos
+### Testes, bancada 3D e diagnósticos
 
 - `tests/sim.test.ts`: determinismo, roteamento em threads igual ao inline, crescimento sem teto, geometria da malha e rejeição NIMBY (com amostras mínimas obrigatórias dos dois lados, para o teste não passar vazio).
-- `tests/regressions.test.ts`: cada achado do parecer técnico virou um teste. Cobre partida sem sobreposição na faixa, cancela fechada para carro, moto e ambulância com sirene, rota em cache sem contramão após virar mão única, veículos replanejados, eixo e pista sem cortar prédios (seeds 42 e 1234 no litoral, 1234 no vale), backend de rotas trocado, travado ou com erro, ruído com a mesma medição na via, no mapa e no valor do solo, limites de velocidade por modo e embarque no sentido certo.
+- `tests/regressions.test.ts`: regressões do parecer técnico (espaço reservado na faixa, cancela fechada para carro/moto/ambulância com sirene, mão única, implantação sem cortar prédios, backend de rotas, ruído unificado, limites de velocidade, embarque no sentido certo, auto-diretor contínuo).
+- `tests/urbanRealism.test.ts`: calçadas reais e faixas de pedestres, pontos de ônibus no meio-fio com fila FIFO e tarifas reais, física centrada em cruzamentos e posse real do carro familiar.
+- `tests/stabilityGates.test.ts`: gates quantitativos de saúde de fluxo (40 dias), conectividade ativa (`activePlan`), passageiro zumbi, faixa BRT exclusiva, cancela fechada na partida, trecho curto, chegada honesta de serviços, worker de rotas corrompido, energia/água por componente conectado, estação ferroviária em obra, folga real entre picapes e trevo desnivelado.
+- `tests/vehicleGeom.test.ts` e `tests/meshKit.test.ts`: validação geométrica dos 18 presets paramétricos de veículos (orçamento de triângulos, LOD, contato no solo, normais, `aTint`/`aMat`).
+- **Bancada 3D e captura automatizada**:
+  - `workbench.html` (`npm run dev`, depois abrir `/workbench.html`): inspeção interativa em 3D dos ativos paramétricos com câmera orbital, LOD, paleta de cores e modo dia/noite.
+  - `npm run capture`: gera pranchas PNG automatizadas da bancada 3D via Chromium headless (CDP).
+  - `npm run capture:field`: executa observação de campo automatizada na cidade 3D real (`--seed`, `--terrain`, `--warmup`, `--out`), gravando capturas PNG e `field-report.json`.
+- **Documentação técnica em `docs/`**:
+  - `docs/3d-models-todo.md` e `docs/3d-review-rubric.md`: roadmap e rubrica visual de ativos 3D.
+  - `docs/sim-todo.md` e `docs/sim-review-rubric.md`: plano de realismo sistêmico e rubrica de avaliação comportamental.
 - Diagnósticos fora da suíte (executáveis), compilados com esbuild:
 
 ```bash
@@ -132,8 +142,8 @@ Os agentes andam em velocidade real (m/s), mas o calendário é comprimido: 1 di
 - **Tráfego.** As listas de faixas são arrays indexados, não `Map`. A potência do IDM é calculada sem `Math.pow`. Os campos usam kernels sem `hypot` por célula.
 - Prédios prontos são mesclados por chunk espacial; prédios em obra são desenhados um a um.
 - Veículos, pedestres, árvores, postes e trens usam `InstancedMesh`.
-- Pedestres só são avaliados e transmitidos perto da câmera.
-- Acima de cerca de 1.800 veículos, viagens longe da câmera viram "virtuais": continuam contando volume nas vias, mas não são simuladas fisicamente.
+- Pedestres só são avaliados e transmitidos perto da câmera (renderização).
+- Orçamento determinístico de tráfego físico (`1.800–3.000` veículos): entre 1.800 e 3.000 veículos ativos, um hash determinístico sobre `(seedKey, t)` (independente da câmera e sem consumir o PRNG) decide quais novas viagens de carro seguem como viagens virtuais (carregando volume, OD e ruído na malha); acima de 3.000 veículos físicos, novas partidas de carro entram como virtuais.
 - **Guarda de HDR.** Um passe limpa NaN e Inf do buffer antes do bloom. Antes, um pixel inválido (disco do sol, reflexo especular) se espalhava em blocos pretos. Nuvens não ficam mais escuras que o céu, e partículas encostadas na lente somem.
 
 Medido no navegador com a seed padrão e cerca de 2,8 mil habitantes: 100× e 400× sustentados, em 3 threads. No modo headless, um dia de jogo com 5 mil habitantes caiu de cerca de 42 s para cerca de 16 s de CPU numa única thread.
@@ -142,7 +152,7 @@ A medição acima foi feita antes das correções do parecer e não foi repetida
 
 **Não implementado:** impostores para prédios distantes.
 
-**Determinismo:** a mesma seed com os mesmos parâmetros gera a mesma cidade, com 0 ou N threads de roteamento. Com mais de cerca de 1.800 veículos, o LOD que depende da câmera decide quais viagens são animadas. A viagem virtual carrega a via com contagem, origem–destino e a emissão sonora estimada, mas o volume entra de uma vez em todo o caminho. Por isso a câmera ainda pode alterar trajetórias individuais e o momento exato da carga.
+**Determinismo:** a mesma seed com os mesmos parâmetros gera exatamente a mesma cidade, com 0 ou N threads de roteamento e independentemente da posição ou movimento da câmera. O orçamento de tráfego físico (`1.800–3.000` veículos) é puramente determinístico e desacoplado da câmera.
 
 ## Invariantes (correções do parecer técnico)
 

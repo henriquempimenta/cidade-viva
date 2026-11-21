@@ -222,6 +222,7 @@ export class Services {
     }
     if (kind === P_GARBAGE) {
       const b = w.buildings.byId.get(T.pId[slot]);
+      w.utils.onGarbageArrived(T.pId[slot]);
       if (!b) return;
       // truck actually reached the block: collect from the target and immediate neighbours up to its load
       let cap = T.pAux[slot] > 0 ? T.pAux[slot] / 10 : 4;
@@ -238,8 +239,8 @@ export class Services {
       if (cap > 0.1) {
         for (const n of w.buildings.list) {
           if (cap <= 0) break;
-          if (n.id === b.id || n.state !== 'done' || n.garbage <= 0.2) continue;
-          if (Math.hypot(n.x - b.x, n.z - b.z) <= 75) collect(n);
+          if (n.id === b.id || n.state !== 'done' || n.garbage <= 0.1) continue;
+          if (Math.hypot(n.x - b.x, n.z - b.z) <= 110) collect(n);
         }
       }
       if (collected > 0) w.utils.garbage.stock += collected;
@@ -274,6 +275,7 @@ export class Services {
     }
     if (kind === P_GARBAGE) {
       this.delayedResponses++;
+      w.utils.onGarbageStuck(T.origin[slot], T.pId[slot]);
       return;
     }
   }

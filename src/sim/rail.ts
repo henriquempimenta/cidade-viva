@@ -10,7 +10,8 @@ import { laneOffset, P_CARGO } from './traffic';
 import type { World } from './world';
 import { KINDS } from '../shared/catalog';
 
-interface RLine { /** construction progress 0..1 (lines built during the game grow along their length) */ built?: number; id: number; kind: 'main' | 'metro' | 'spur'; x: number[]; y: number[]; z: number[]; cum: number[]; tracks: number; elevated: boolean; len: number; transit?: Line; stations: { s: number; b: number; name: string; stop: number }[] }
+interface RStation { s: number; b: number; name: string; stop: number; stopId: number }
+interface RLine { /** construction progress 0..1 (lines built during the game grow along their length) */ built?: number; id: number; kind: 'main' | 'metro' | 'spur'; x: number[]; y: number[]; z: number[]; cum: number[]; tracks: number; elevated: boolean; len: number; transit?: Line; stations: RStation[]; openStations: RStation[] }
 interface Train { id: number; line: number; kind: 'pass' | 'freight' | 'metro'; s: number; dir: number; v: number; vmax: number; cars: number[]; dwell: number; served: Set<number>; gen: number }
 interface Crossing { edge: number; t: number; line: number; s: number; x: number; z: number; y: number; angle: number; separated: boolean; under?: boolean; /** a road deck flies over this crossing: the track may not be lifted here */ bypassed?: boolean; closed: boolean; /** vehicle-seconds queued at the gates today */ wait: number; /** consecutive saturated days */ hot: number }
 
@@ -40,6 +41,7 @@ export class Rail {
   private lastFreight = -1e9;
   private lastPass = -1e9;
   private lastMetro = -1e9;
+  private metroPackedAnnounced = false;
   freightToday = 0;
   /** trains run per kind, today and yesterday (noise, chronicle) */
   private runs = { freight: 0, pass: 0, metro: 0 };
@@ -140,7 +142,7 @@ export class Rail {
   private addLine(kind: RLine['kind'], path: P2[], y: number[], tracks: number, elevated: boolean): RLine {
     const cum = [0];
     for (let i = 1; i < path.length; i++) cum.push(cum[i - 1] + Math.hypot(path[i].x - path[i - 1].x, path[i].z - path[i - 1].z));
-    const l: RLine = { id: this.lines.length, kind, x: path.map((p) => p.x), y, z: path.map((p) => p.z), cum, tracks, elevated, len: cum[cum.length - 1], stations: [] };
+    const l: RLine = { id: this.lines.length, kind, x: path.map((p) => p.x), y, z: path.map((p) => p.z), cum, tracks, elevated, len: cum[cum.length - 1], stations: [], openStations: [] };
     this.lines.push(l);
     this.dirtyViews = true;
     return l;
@@ -166,14 +168,42 @@ export class Rail {
     return best;
   }
 
+  /** Synchronize main-line openStations and transit stops strictly with completed (state === 'done') station buildings. */
+  syncOpenStations() {
+    const w = this.w;
+    const main = this.lines[0];
+    if (!main) return;
+    const prevIds = main.openStations.map((s) => s.b).join(',');
+    const open = main.stations.filter((st) => {
+      const b = w.buildings.byId.get(st.b);
+      return !!b && b.alive && b.state === 'done';
+    });
+    open.sort((a, c) => a.s - c.s);
+    const nextIds = open.map((s) => s.b).join(',');
+    if (prevIds === nextIds && (!open.length || !!main.transit)) return;
+    main.openStations = open;
+    if (!open.length) {
+      if (main.transit) w.transitSys.replaceStops(main.transit, []);
+      return;
+    }
+    const stops: Stop[] = open.map((st) => {
+      const p = this.at(main, st.s);
+      return { id: st.stopId, x: p[0], z: p[2], node: -1, edge: -1, dir: 0, s: st.s, curbX: p[0], curbZ: p[2], ux: Math.cos(p[3]), uz: Math.sin(p[3]), name: st.name };
+    });
+    if (!main.transit) main.transit = w.transitSys.addRailLine('rail', 'Trem Regional', stops, [], HOUR_SECONDS * 1.5);
+    else w.transitSys.replaceStops(main.transit, stops);
+    main.transit.pts = main.x.flatMap((x, i) => [x, main.y[i], main.z[i]]);
+  }
+
   // ------------------------------------------------------------------ simulation
   step(dt: number) {
     const w = this.w;
     const main = this.lines[0];
+    if (main.stations.length !== main.openStations.length) this.syncOpenStations();
     // schedules
     const freightGap = HOUR_SECONDS * (this.terminal ? 2 : 3.5);
     if (w.t - this.lastFreight > freightGap) { if (this.dispatch(main, 'freight')) this.lastFreight = w.t; }
-    if (main.stations.length && w.t - this.lastPass > HOUR_SECONDS * (w.era >= 2 ? 1.2 : 2)) { if (this.dispatch(main, 'pass')) this.lastPass = w.t; }
+    if (main.openStations.length && w.t - this.lastPass > HOUR_SECONDS * (w.era >= 2 ? 1.2 : 2)) { if (this.dispatch(main, 'pass')) this.lastPass = w.t; }
     // metro trains shuttle end to end and are never retired: dispatch only up to the line's fleet (one per ~700 m)
     for (const l of this.lines) if (l.kind === 'metro' && (l.built ?? 1) >= 1 && w.t - this.lastMetro > HOUR_SECONDS * 0.5 && this.trains.filter((t) => t.line === l.id).length < Math.max(2, Math.round(l.len / 700))) { this.dispatch(l, 'metro'); this.lastMetro = w.t; }
     // move
@@ -182,7 +212,8 @@ export class Rail {
       if (tr.dwell > 0) { tr.dwell -= dt; continue; }
       // next stop ahead
       let stopS = Infinity;
-      const stops = tr.kind === 'freight' ? (this.terminal && l.kind === 'main' ? [{ s: this.terminalS, b: -1 }] : []) : l.stations;
+      const activeStations = l.kind === 'main' ? l.openStations : l.stations;
+      const stops = tr.kind === 'freight' ? (this.terminal && l.kind === 'main' ? [{ s: this.terminalS, b: -1 }] : []) : activeStations;
       for (const st of stops) {
         if (tr.served.has(st.s)) continue;
         const d = (st.s - tr.s) * tr.dir;
@@ -201,10 +232,20 @@ export class Rail {
           tr.v = 0;
           if (tr.kind === 'freight') { this.freightToday++; w.economy.railBonus = Math.min(2, (w.economy.railBonus ?? 0) + 0.2); }
           else if (l.transit) {
-            const k = l.stations.indexOf(st as never);
+            const k = activeStations.indexOf(st as never);
             // riders board only a train heading to their station; capacity follows the consist
             const seats = tr.cars.reduce((n, c) => n + (c === 1 ? 120 : c === 5 ? 150 : 0), 0);
-            if (k >= 0) w.transitSys.serveStop(l.transit, k, tr.id + 100000, seats, (to) => (l.stations[to].s - st.s) * tr.dir > 0);
+            if (k >= 0) {
+              w.transitSys.serveStop(l.transit, k, tr.id + 100000, seats, (to) => (activeStations[to].s - st.s) * tr.dir > 0);
+              if (l.kind === 'metro' && !this.metroPackedAnnounced && seats > 0) {
+                const onboard = l.transit.onboard.get(tr.id + 100000)?.length ?? 0;
+                if (onboard >= seats * 0.75) {
+                  this.metroPackedAnnounced = true;
+                  const mp = this.at(l, st.s);
+                  w.events.emit('line_opened', mp[0], mp[2], 0.9, `Composição do Metrô Linha 1 parte lotada (${onboard} passageiros)`, { headline: 'Metrô registra primeira composição lotada', visual: 0.9 });
+                }
+              }
+            }
           }
         }
       }
@@ -227,7 +268,15 @@ export class Rail {
         return true;
       }
       if ((tr.dir > 0 && tr.s > l.len + tail) || (tr.dir < 0 && tr.s < -tail)) {
-        if (l.transit) { const pass = l.transit.onboard.get(tr.id + 100000) ?? []; for (const i of pass) w.citizens.virtualArrive(i, 60); l.transit.onboard.delete(tr.id + 100000); }
+        if (l.transit) {
+          const pass = l.transit.onboard.get(tr.id + 100000) ?? [];
+          for (const i of pass) {
+            const r = w.transitSys.rides.get(i);
+            w.transitSys.rides.delete(i);
+            if (w.citizens.alive[i] && (!r || w.citizens.gen[i] === r.gen)) w.citizens.virtualArrive(i, 60);
+          }
+          l.transit.onboard.delete(tr.id + 100000);
+        }
         return false;
       }
       return true;
@@ -331,6 +380,7 @@ export class Rail {
   // ------------------------------------------------------------------ crossings
   /** daily: fold the queues measured at the gates into a persistent "pressure" per crossing */
   daily() {
+    this.syncOpenStations();
     this.runsYday = this.runs; this.runs = { freight: 0, pass: 0, metro: 0 };
     for (const l of this.lines) {
       if ((l.built ?? 1) >= 1) continue;
@@ -528,7 +578,7 @@ export class Rail {
       this.pendingStops.delete(l.id);
     }
     const p = this.at(l, l.len / 2);
-    w.events.emit('line_opened', p[0], p[2], 1, `${l.kind === 'metro' ? 'Metrô Linha 1' : 'Nova linha férrea'} começa a operar`, { headline: l.kind === 'metro' ? 'Metrô inaugurado: primeira composição parte lotada' : undefined, visual: 1 });
+    w.events.emit('line_opened', p[0], p[2], 1, `${l.kind === 'metro' ? 'Metrô Linha 1' : 'Nova linha férrea'} começa a operar`, { headline: l.kind === 'metro' ? 'Metrô Linha 1 inaugurado e entra em operação' : undefined, visual: 1 });
   }
 
   /** level crossings that would sit on the ramps join the same elevated stretch (one "elevado", not a roller coaster) */
@@ -618,16 +668,10 @@ export class Rail {
     if (!b) return false;
     const name = 'Estação ' + w.districtName(b.x, b.z);
     b.name = name;
-    main.stations.push({ s: this.projectS(main, b.x, b.z).s, b: b.id, name, stop: main.stations.length });
+    main.stations.push({ s: this.projectS(main, b.x, b.z).s, b: b.id, name, stop: main.stations.length, stopId: w.transitSys.allocStopId() });
     main.stations.sort((a, c) => a.s - c.s);
-    // register as a transit line (citizens can ride between stations)
-    const stops: Stop[] = main.stations.map((st) => {
-      const p = this.at(main, st.s);
-      return { x: p[0], z: p[2], node: -1, edge: -1, dir: 0, s: st.s, curbX: p[0], curbZ: p[2], ux: Math.cos(p[3]), uz: Math.sin(p[3]), name: st.name };
-    });
-    if (!main.transit) main.transit = w.transitSys.addRailLine('rail', 'Trem Regional', stops, [], HOUR_SECONDS * 1.5);
-    else w.transitSys.replaceStops(main.transit, stops); // keeps riders bound to their stations, not to old indices
-    main.transit.pts = main.x.flatMap((x, i) => [x, main.y[i], main.z[i]]);
+    // only inaugurate into main.openStations & main.transit once construction finishes (b.state === 'done')
+    this.syncOpenStations();
     this.dirtyStations.push({ id: b.id, x: b.x, z: b.z, y: b.y, angle: b.angle, len: b.w, kind: 'pass', name });
     w.events.emit('station', b.x, b.z, 0.9, `${name} começa a ser construída`, { headline: `${name}: trem de passageiros vai parar na cidade`, entity: { kind: 'building', id: b.id }, ref: b.id, visual: 0.8 });
     return true;
@@ -688,8 +732,9 @@ export class Rail {
       const p = this.at(l, stS);
       const name = 'Metrô ' + w.districtName(b.x, b.z);
       b.name = name;
-      l.stations.push({ s: stS, b: b.id, name, stop: stops.length });
-      stops.push({ x: p[0], z: p[2], node: -1, edge: -1, dir: 0, s: stS, curbX: p[0], curbZ: p[2], ux: Math.cos(p[3]), uz: Math.sin(p[3]), name });
+      const stopId = w.transitSys.allocStopId();
+      l.stations.push({ s: stS, b: b.id, name, stop: stops.length, stopId });
+      stops.push({ id: stopId, x: p[0], z: p[2], node: -1, edge: -1, dir: 0, s: stS, curbX: p[0], curbZ: p[2], ux: Math.cos(p[3]), uz: Math.sin(p[3]), name });
     }
     if (stops.length < 2) {
       // rollback: remove line and any single station placed

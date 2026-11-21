@@ -6,7 +6,7 @@ import { Director, type DirectorWorld } from '../src/director/director';
 import { DEFAULT_PARAMS, MAX_WARMUP_DAYS, sanitizeParams, sanitizeWarmup } from '../src/shared/params';
 import { VEH_FLAG_SIREN, VType, RoadClass } from '../src/shared/constants';
 import { P_CITIZEN, P_GARBAGE, P_SERVICE } from '../src/sim/traffic';
-import { ST_VIRTUAL, ST_WALK } from '../src/sim/citizens';
+import { ST_TRANSIT, ST_VIRTUAL, ST_WALK } from '../src/sim/citizens';
 import { activePlan, carPlan } from '../src/sim/trips';
 import type { Line } from '../src/sim/transit';
 import { edgeNoiseIndex, RoadNetwork, type REdge } from '../src/sim/roads';
@@ -218,16 +218,18 @@ describe('transporte: embarque no sentido certo', () => {
   it('no ponto B, quem vai para A não entra no trem A→B→C', () => {
     const w = world(3);
     const S = w.transitSys;
-    const stops = [0, 1, 2].map((k) => ({ x: 100 + k * 500, z: 100, node: -1, edge: -1, dir: 0, s: k * 500, curbX: 100 + k * 500, curbZ: 100, ux: 1, uz: 0, name: 'E' + k }));
+    const stops = [0, 1, 2].map((k) => ({ id: S.allocStopId(), x: 100 + k * 500, z: 100, node: -1, edge: -1, dir: 0, s: k * 500, curbX: 100 + k * 500, curbZ: 100, ux: 1, uz: 0, name: 'E' + k }));
     const l = S.addRailLine('rail', 'Teste', stops, [], 600);
     const toA = w.citizens.add({ age: 30, hh: -1 }), toC = w.citizens.add({ age: 30, hh: -1 });
-    S.rides.set(toA, { line: l.id, from: 1, to: 0, phase: 1, since: 0, dest: -1 });
-    S.rides.set(toC, { line: l.id, from: 1, to: 2, phase: 1, since: 0, dest: -1 });
-    l.waiting.set(1, [toA, toC]);
+    w.citizens.state[toA] = ST_TRANSIT;
+    w.citizens.state[toC] = ST_TRANSIT;
+    S.rides.set(toA, { line: l.id, fromId: stops[1].id, toId: stops[0].id, gen: w.citizens.gen[toA], phase: 1, since: 0, dest: -1 });
+    S.rides.set(toC, { line: l.id, fromId: stops[1].id, toId: stops[2].id, gen: w.citizens.gen[toC], phase: 1, since: 0, dest: -1 });
+    l.waiting.set(stops[1].id, [toA, toC]);
     const dir = 1; // trem indo de A (s=0) para C (s=1000)
     S.serveStop(l, 1, 999, 400, (to) => (stops[to].s - stops[1].s) * dir > 0);
     expect(l.onboard.get(999)).toEqual([toC]);
-    expect(l.waiting.get(1)).toEqual([toA]);
+    expect(l.waiting.get(stops[1].id)).toEqual([toA]);
   });
 });
 
@@ -342,8 +344,8 @@ describe('obras transacionais: binário e BRT', () => {
     const line1: Line = {
       id: 901, kind: 'bus', color: '#e74c3c', name: 'Linha 901 · Teste',
       stops: [
-        { x: w.center.x, z: w.center.z, node: e1.a, edge: e1.id, dir: 0, s: 25, curbX: w.center.x, curbZ: w.center.z, ux: 1, uz: 0, name: 'A' },
-        { x: w.center.x + 100, z: w.center.z, node: e1.b, edge: e1.id, dir: 0, s: 55, curbX: w.center.x + 100, curbZ: w.center.z, ux: 1, uz: 0, name: 'B' },
+        { id: S.allocStopId(), x: w.center.x, z: w.center.z, node: e1.a, edge: e1.id, dir: 0, s: 25, curbX: w.center.x, curbZ: w.center.z, ux: 1, uz: 0, name: 'A' },
+        { id: S.allocStopId(), x: w.center.x + 100, z: w.center.z, node: e1.b, edge: e1.id, dir: 0, s: 55, curbX: w.center.x + 100, curbZ: w.center.z, ux: 1, uz: 0, name: 'B' },
       ],
       path: [e1.id * 2], startS: 0, destS: e1.len - 1, fleet: 2, vehicles: new Set<number>(),
       ridersToday: 0, ridersYday: 900, waiting: new Map(), onboard: new Map(), edges: new Set([e1.id]),
@@ -431,11 +433,11 @@ describe('modos ativos independentes do carro e cancela para pedestres', () => {
     const walk = activePlan(R, b2, b1);
     expect(walk).not.toBeNull();
     expect(walk!.len).toBeGreaterThan(50);
-    // walkRoute must never use Highway edges
-    const hw = R.edges.find((x) => x.alive && x.progress >= 1 && x.cls === RoadClass.Highway);
-    expect(hw).toBeTruthy();
-    const route = R.walkRoute(hw!.a, hw!.b);
-    if (route) expect(route.some((de) => R.edges[de >> 1].cls === RoadClass.Highway)).toBe(false);
+    // walkRoute must forbid grade-separated decks (viaducts / tunnels) while allowing at-grade urban avenues/highways
+    const d1 = R.addNode(400, 400), d2 = R.addNode(520, 400);
+    const deckEdge = R.addEdge(d1.id, d2.id, RoadClass.Highway, { progress: 1, deck: 1, elevated: true });
+    expect(R.walkRoute(d1.id, d2.id)).toBeNull();
+    expect(deckEdge.deck).toBe(1);
   });
 
   it('pedestre para diante de cancela fechada (inclusive em avenida de 3 faixas) sem inchar a heap', () => {

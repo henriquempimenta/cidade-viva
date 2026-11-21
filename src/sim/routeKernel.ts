@@ -57,41 +57,101 @@ export class InlineBackend implements RouteBackend {
   take(ticket: number) { const r = this.done.get(ticket) ?? null; this.done.delete(ticket); return r; }
 }
 
-/** Pool of routing workers; a job is split across all of them and reassembled in order. */
+interface PendingPart {
+  left: number;
+  out: Int32Array[][];
+  expected: Map<number, number>;
+  slotOf: Map<number, number>;
+  nodeCount: number;
+}
+
+/** Pool of routing workers; a job is split across all healthy workers and reassembled in order. */
 export class WorkerBackend implements RouteBackend {
   private seq = 0;
-  private parts = new Map<number, { left: number; out: Int32Array[][] }>();
+  private parts = new Map<number, PendingPart>();
   private done = new Map<number, Int32Array[]>();
   private failed = new Set<number>();
+  private healthy: boolean[];
+  private consecutiveErrors: number[];
+  private static readonly MAX_CONSECUTIVE_ERRORS = 3;
   /** jobs that failed on a worker (error, bad message, crashed thread) */
   failures = 0;
   constructor(private workers: Worker[]) {
+    this.healthy = workers.map(() => true);
+    this.consecutiveErrors = workers.map(() => 0);
     workers.forEach((w, wi) => {
       w.onmessage = (ev: MessageEvent<{ id: number; nexts?: Int32Array[]; error?: string }>) => {
-        const p = this.parts.get(ev.data.id);
+        const data = ev.data;
+        if (!data || typeof data.id !== 'number') return;
+        const p = this.parts.get(data.id);
         if (!p) return;
-        if (!ev.data.nexts || ev.data.error) { this.fail(ev.data.id); return; }
-        p.out[wi] = ev.data.nexts;
-        if (--p.left === 0) { this.parts.delete(ev.data.id); this.done.set(ev.data.id, p.out.flat()); }
+        const expectedLen = p.expected.get(wi);
+        const slot = p.slotOf.get(wi);
+        if (expectedLen === undefined || slot === undefined) return;
+        const invalid = !!data.error
+          || !Array.isArray(data.nexts)
+          || data.nexts.length !== expectedLen
+          || data.nexts.some((a) => !(a instanceof Int32Array) || a.length !== p.nodeCount);
+        if (invalid) {
+          this.consecutiveErrors[wi]++;
+          if (this.consecutiveErrors[wi] >= WorkerBackend.MAX_CONSECUTIVE_ERRORS) this.healthy[wi] = false;
+          this.fail(data.id);
+          return;
+        }
+        this.consecutiveErrors[wi] = 0;
+        p.expected.delete(wi);
+        p.out[slot] = data.nexts!;
+        if (--p.left === 0) { this.parts.delete(data.id); this.done.set(data.id, p.out.flat()); }
       };
-      // a thread that dies takes its share of every open job with it: fail them all, the sim recomputes inline
-      const dead = () => { for (const id of [...this.parts.keys()]) this.fail(id); };
+      // a thread that dies is retired and takes its share of every open job with it: fail them all, the sim recomputes inline
+      const dead = () => {
+        this.healthy[wi] = false;
+        for (const [id, p] of [...this.parts.entries()]) {
+          if (p.expected.has(wi)) this.fail(id);
+        }
+      };
       w.onerror = dead;
       w.onmessageerror = dead;
     });
   }
   private fail(id: number) { this.parts.delete(id); this.failed.add(id); this.failures++; }
-  get threads() { return this.workers.length; }
+  get threads() {
+    let n = 0;
+    for (let i = 0; i < this.healthy.length; i++) if (this.healthy[i]) n++;
+    return n;
+  }
   submit(graph: RouteGraph, dests: number[]) {
     const id = ++this.seq;
-    const W = Math.min(this.workers.length, dests.length);
+    if (!dests.length) { this.done.set(id, []); return id; }
+    const active: number[] = [];
+    for (let i = 0; i < this.workers.length; i++) if (this.healthy[i]) active.push(i);
+    if (!active.length) { this.failed.add(id); this.failures++; return id; }
+    const W = Math.min(active.length, dests.length);
     const per = Math.ceil(dests.length / W);
-    const p = { left: W, out: new Array<Int32Array[]>(W) };
-    this.parts.set(id, p);
+    const nodeCount = graph.off.length - 1;
+    const p: PendingPart = { left: 0, out: [], expected: new Map(), slotOf: new Map(), nodeCount };
+    const dispatches: { wi: number; slot: number; chunk: number[] }[] = [];
     for (let k = 0; k < W; k++) {
       const chunk = dests.slice(k * per, (k + 1) * per);
-      // graph arrays are copied per worker (structured clone); they are small (~100 KB)
-      this.workers[k].postMessage({ id, graph, dests: chunk });
+      if (!chunk.length) continue;
+      const wi = active[k];
+      const slot = dispatches.length;
+      p.expected.set(wi, chunk.length);
+      p.slotOf.set(wi, slot);
+      dispatches.push({ wi, slot, chunk });
+    }
+    p.left = dispatches.length;
+    p.out = new Array<Int32Array[]>(dispatches.length);
+    this.parts.set(id, p);
+    for (const d of dispatches) {
+      try {
+        // graph arrays are copied per worker (structured clone); they are small (~100 KB)
+        this.workers[d.wi].postMessage({ id, graph, dests: d.chunk });
+      } catch {
+        this.healthy[d.wi] = false;
+        this.fail(id);
+        break;
+      }
     }
     return id;
   }

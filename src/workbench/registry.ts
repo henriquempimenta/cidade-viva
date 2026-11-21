@@ -1,4 +1,5 @@
 import { MeshBuilder, SURF, finalizeAsset, type AssetDetail } from '../render/meshKit';
+import { VEHICLE_PRESETS, buildVehicle } from '../render/vehicleGeom';
 import type { WorkbenchFamily } from './types';
 
 /** Built-in calibration/self-test family verifying meshKit primitives, aTint, aMat, and glow alignment. */
@@ -39,9 +40,27 @@ const kitFamily: WorkbenchFamily = {
   ],
 };
 
+/** Parametric Vehicles family (Pilot 1): 18 variants generated from vehicleGeom.ts. */
+const vehiclesFamily: WorkbenchFamily = {
+  id: 'vehicles',
+  title: 'Veículos Paramétricos',
+  description: 'Catálogo completo de 18 veículos (civis, serviços, emergência, ônibus, caminhões pesados e moto) gerados por vehicleGeom.ts.',
+  triangleBudget: 620,
+  heroVariants: ['sedan', 'hatch', 'suv', 'pickup', 'vintage', 'police', 'ambulance', 'bus', 'garbage', 'fire', 'moto'],
+  variants: () => VEHICLE_PRESETS.map((p) => ({
+    id: p.id,
+    label: p.label,
+    category: p.category,
+    defaultColor: p.defaultColor,
+    swatches: p.swatches,
+    build: (detail?: AssetDetail) => buildVehicle(p.id, detail),
+  })),
+};
+
 /** Central registry of all 3D asset families available in the Workbench. */
 export const WORKBENCH_FAMILIES: WorkbenchFamily[] = [
   kitFamily,
+  vehiclesFamily,
 ];
 
 export function getFamily(id?: string | null): WorkbenchFamily {

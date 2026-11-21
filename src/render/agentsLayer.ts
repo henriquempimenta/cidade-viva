@@ -1,81 +1,71 @@
 import * as THREE from 'three';
 import type { App } from '../app';
-import { MAX_PEDS, MAX_VEHICLES, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, PED_FLAG_UMBRELLA, PED_FLAG_WORKER, PED_STRIDE, TRAIN_STRIDE, VEH_FLAG_BRAKE, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_STRIDE, VType, VTYPE_COUNT, MAX_TRAIN_CARS, PED_FLAG_FUNERAL } from '../shared/constants';
+import { MAX_PEDS, MAX_VEHICLES, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, PED_FLAG_UMBRELLA, PED_FLAG_WORKER, PED_STRIDE, TRAIN_STRIDE, VEH_FLAG_BRAKE, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_STRIDE, VType, MAX_TRAIN_CARS, PED_FLAG_FUNERAL } from '../shared/constants';
 /** render budgets (instances drawn per frame); the simulation itself has no such cap */
-const RENDER_VEH = 8000, RENDER_PED = 6000;
+const RENDER_PED = 6000;
 import { GB } from './geomBuilder';
+import { createAssetMaterial, createGlowMaterial } from './meshKit';
+import { buildVehicle, VEHICLE_PRESETS, type VehicleId } from './vehicleGeom';
 import { U } from './uniforms';
 
 const PED_FLAG_BIKE = 256;
-const W = new THREE.Color(0xffffff), DARK = new THREE.Color(0x22262b), GLASS = new THREE.Color(0x2b3640), TIRE = new THREE.Color(0x1a1a1a);
+const W = new THREE.Color(0xffffff), DARK = new THREE.Color(0x22262b), TIRE = new THREE.Color(0x1a1a1a);
 
-function vehicleGeo(t: VType): THREE.BufferGeometry {
-  const g = new GB();
-  const wheels = (len: number, wid: number, r = 0.38) => {
-    for (const z of [-len * 0.32, len * 0.32]) for (const x of [-wid / 2, wid / 2]) g.box(x, 0, z, 0.3, r * 2, r * 2, TIRE);
-  };
-  // vehicles face +x in local space -> we build along z then rotate: keep length along x
-  const car = (len: number, wid: number, h: number, cabinF: number) => {
-    g.box(0, 0.35, 0, len, h * 0.5, wid, W);
-    g.box(-len * 0.05, 0.35 + h * 0.5, 0, len * cabinF, h * 0.42, wid * 0.86, GLASS, 0, { top: W });
-  };
-  switch (t) {
-    case VType.Car: case VType.Taxi: case VType.Police: case VType.Hearse:
-      car(4.3, 1.8, 1.45, t === VType.Hearse ? 0.7 : 0.52); wheelsX(g, 4.3, 1.8);
-      if (t === VType.Taxi) g.box(0, 1.55, 0, 0.6, 0.25, 0.3, new THREE.Color(0xffe066));
-      if (t === VType.Police) g.box(-0.2, 1.6, 0, 0.4, 0.2, 1.3, DARK);
-      break;
-    case VType.Moto:
-      g.box(0, 0.45, 0, 1.9, 0.5, 0.35, W); g.box(-0.2, 0.95, 0, 0.5, 0.7, 0.4, DARK); g.box(0.2, 1.4, 0, 0.3, 0.3, 0.3, W);
-      g.box(0.8, 0, 0, 0.6, 0.6, 0.12, TIRE); g.box(-0.8, 0, 0, 0.6, 0.6, 0.12, TIRE);
-      break;
-    case VType.Bus: case VType.TourBus: case VType.SchoolBus: {
-      const L = t === VType.SchoolBus ? 9.5 : 11.8;
-      g.box(0, 0.4, 0, L, 2.7, 2.5, W);
-      g.box(0, 1.4, 1.26, L * 0.9, 1.1, 0.02, GLASS); g.box(0, 1.4, -1.26, L * 0.9, 1.1, 0.02, GLASS);
-      g.box(L / 2 + 0.01, 1.2, 0, 0.02, 1.4, 2.2, GLASS);
-      if (t === VType.TourBus) g.box(0, 3.1, 0, L * 0.6, 0.3, 2.3, GLASS);
-      wheelsX(g, L, 2.5, 0.5);
-      break;
-    }
-    case VType.Truck: case VType.Garbage: case VType.Construction: case VType.Fire: {
-      const L = t === VType.Fire ? 9 : 8.5;
-      g.box(L / 2 - 1.1, 0.45, 0, 2.2, 2.4, 2.4, W);
-      g.box(L / 2 - 0.5, 1.6, 0, 0.9, 0.9, 2.2, GLASS);
-      if (t === VType.Construction) { g.box(-1.2, 0.9, 0, 5.6, 1.6, 2.4, new THREE.Color(0xd8b040)); g.box(-1.2, 2.4, 0, 5.2, 0.4, 2.2, new THREE.Color(0x8a6a45)); }
-      else if (t === VType.Garbage) g.box(-1.3, 0.6, 0, 5.8, 2.6, 2.4, new THREE.Color(0x5aa04a));
-      else if (t === VType.Fire) { g.box(-1.2, 0.6, 0, 6, 2, 2.4, W); g.box(-1.3, 2.6, 0, 5.5, 0.25, 0.5, new THREE.Color(0xcccccc)); }
-      else g.box(-1.4, 0.6, 0, 6, 2.8, 2.45, pickTrailer());
-      wheelsX(g, L, 2.4, 0.5);
-      break;
-    }
-    case VType.Van: case VType.Ambulance:
-      g.box(0, 0.4, 0, 5.2, 2.1, 2.0, W);
-      g.box(1.9, 1.3, 0, 1.2, 0.8, 1.9, GLASS);
-      if (t === VType.Ambulance) { g.box(0, 2.2, 0, 0.3, 0.3, 1.6, new THREE.Color(0xff3030)); g.box(-0.3, 1.5, 1.01, 1.2, 0.3, 0.02, new THREE.Color(0xff3030)); }
-      wheelsX(g, 5.2, 2.0);
-      break;
-    default:
-      car(4.3, 1.8, 1.45, 0.5); wheelsX(g, 4.3, 1.8);
-  }
-  return g.toGeometry(false);
-}
-function wheelsX(g: GB, len: number, wid: number, r = 0.38) {
-  for (const x of [-len * 0.32, len * 0.32]) for (const z of [-wid / 2, wid / 2]) g.box(x, 0, z, r * 2, r * 2, 0.3, TIRE);
-}
-function pickTrailer() { return W; }
+const PRESET_INDEX: Record<VehicleId, number> = Object.fromEntries(
+  VEHICLE_PRESETS.map((p, idx) => [p.id, idx]),
+) as Record<VehicleId, number>;
 
-const CAR_COLORS = [0xf2f2f2, 0x1c1c1e, 0x8f969c, 0xb5b9bd, 0xa32b2b, 0x23467a, 0x2f6b4a, 0xd4c08a, 0x6d2b45, 0x3c6fb0, 0xe0a030, 0x4a4f55];
-const OLD_COLORS = [0xd9cba0, 0x8a3a2a, 0x2f5a3a, 0x7a8a9a, 0xc8b070, 0xa05a30, 0x3a4a6a, 0xe8e0d0];
+// Deterministic archetype tables for civilian cars (modern vs Era 0 vintage)
+const MODERN_CAR_POOL: number[] = [
+  PRESET_INDEX.sedan, PRESET_INDEX.sedan, PRESET_INDEX.sedan, PRESET_INDEX.sedan,
+  PRESET_INDEX.hatch, PRESET_INDEX.hatch, PRESET_INDEX.hatch,
+  PRESET_INDEX.suv, PRESET_INDEX.suv,
+  PRESET_INDEX.pickup, PRESET_INDEX.pickup,
+];
+const ERA0_CAR_POOL: number[] = [
+  PRESET_INDEX.vintage, PRESET_INDEX.vintage, PRESET_INDEX.vintage,
+  PRESET_INDEX.vintage, PRESET_INDEX.vintage, PRESET_INDEX.vintage,
+  PRESET_INDEX.pickup, PRESET_INDEX.sedan,
+];
+const DIRECT_VTYPE_PRESET: Partial<Record<VType, number>> = {
+  [VType.Taxi]: PRESET_INDEX.taxi,
+  [VType.Moto]: PRESET_INDEX.moto,
+  [VType.Bus]: PRESET_INDEX.bus,
+  [VType.SchoolBus]: PRESET_INDEX.schoolbus,
+  [VType.Truck]: PRESET_INDEX.truck,
+  [VType.Van]: PRESET_INDEX.van,
+  [VType.Garbage]: PRESET_INDEX.garbage,
+  [VType.Ambulance]: PRESET_INDEX.ambulance,
+  [VType.Police]: PRESET_INDEX.police,
+  [VType.Fire]: PRESET_INDEX.fire,
+  [VType.TourBus]: PRESET_INDEX.tourbus,
+  [VType.Construction]: PRESET_INDEX.construction,
+  [VType.Hearse]: PRESET_INDEX.hearse,
+};
+
+const CAR_COLORS = [0xf2f2f2, 0x262a30, 0x8f969c, 0xb5b9bd, 0xb83832, 0x2b558c, 0x2f6b4a, 0xd4c08a, 0x6d2b45, 0x3c6fb0, 0xd99b2a, 0x4a525c];
+const OLD_COLORS = [0x5ca09b, 0xd9cba0, 0x9c3d41, 0x3f6b54, 0x6b849c, 0xc8a45a, 0x9e5a38, 0xe6decb];
+const TRUCK_COLORS = [0x325d8f, 0xb83b32, 0x366e50, 0xc88228, 0x56606b, 0xdce2e8];
+const VAN_COLORS = [0xeaeef3, 0xeaeef3, 0xeaeef3, 0x3c6ca8, 0xd97d2b, 0x4d825b];
+const MOTO_COLORS = [0xd1302a, 0x2665a8, 0x2c3038, 0xe8a822, 0x2f8a5b];
 const TYPE_COLOR: Partial<Record<VType, number>> = {
-  [VType.Taxi]: 0xf2c230, [VType.Bus]: 0x2f7fd0, [VType.SchoolBus]: 0xf2b705, [VType.Garbage]: 0xe8e8e8, [VType.Ambulance]: 0xffffff, [VType.Police]: 0xe8e8e8,
-  [VType.Fire]: 0xd02a20, [VType.TourBus]: 0x9a3fb0, [VType.Construction]: 0xf0b020, [VType.Hearse]: 0x111111, [VType.Van]: 0xe8e8e8,
+  [VType.Taxi]: 0xefb824,
+  [VType.Bus]: 0x2f7fd0,
+  [VType.SchoolBus]: 0xefa91a,
+  [VType.Garbage]: 0x2f7d47,
+  [VType.Ambulance]: 0xf2f5f8,
+  [VType.Police]: 0x1f2d42,
+  [VType.Fire]: 0xc92622,
+  [VType.TourBus]: 0xb82e38,
+  [VType.Construction]: 0xe09624,
+  [VType.Hearse]: 0x242830,
 };
 
 export class AgentsLayer {
   group = new THREE.Group();
   private veh: THREE.InstancedMesh[] = [];
-  private lights: THREE.InstancedMesh;
+  private vehGlow: (THREE.InstancedMesh | null)[] = [];
+  private vehGlowMat!: THREE.MeshBasicMaterial;
   private sirens: THREE.InstancedMesh;
   private bodies: THREE.InstancedMesh;
   private heads: THREE.InstancedMesh;
@@ -94,7 +84,8 @@ export class AgentsLayer {
   private frustum = new THREE.Frustum();
   private projScreen = new THREE.Matrix4();
   private cullSphere = new THREE.Sphere(new THREE.Vector3(), 10);
-  private vCounts = new Int32Array(VTYPE_COUNT);
+  private vCounts = new Int32Array(VEHICLE_PRESETS.length);
+  private vGlowCounts = new Int32Array(VEHICLE_PRESETS.length);
   private tCounts = new Int32Array(6);
   private vPos = new Float32Array(MAX_VEHICLES * 4); // interpolated x,y,z,h (grows with the sim pools)
   private pPos = new Float32Array(MAX_PEDS * 4);
@@ -103,22 +94,25 @@ export class AgentsLayer {
   lineColors = new Map<number, THREE.Color>();
 
   constructor(private app: App) {
-    const vehMat = new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.3 });
-    for (let t = 0; t < VTYPE_COUNT; t++) {
-      const im = new THREE.InstancedMesh(vehicleGeo(t as VType), vehMat, t === VType.Car ? 6000 : t === VType.Bike ? 1 : 900);
-      im.count = 0; im.castShadow = true; im.frustumCulled = false;
+    const vehMat = createAssetMaterial();
+    this.vehGlowMat = createGlowMaterial();
+    for (const preset of VEHICLE_PRESETS) {
+      const built = buildVehicle(preset.id, 'high');
+      const cap = preset.vtype === VType.Car ? 2500 : 900;
+      const im = new THREE.InstancedMesh(built.body, vehMat, cap);
+      im.count = 0; im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false;
       this.veh.push(im);
       this.group.add(im);
+      if (built.glow) {
+        const gm = new THREE.InstancedMesh(built.glow, this.vehGlowMat, cap);
+        gm.count = 0; gm.frustumCulled = false;
+        this.vehGlow.push(gm);
+        this.group.add(gm);
+      } else {
+        this.vehGlow.push(null);
+      }
     }
-    // head/tail lights merged: front warm white, rear red
-    const lg = new GB();
-    const front = new THREE.Color(1.0, 0.92, 0.75), rear = new THREE.Color(0.9, 0.05, 0.05);
-    lg.box(2.18, 0.7, 0.6, 0.06, 0.18, 0.35, front); lg.box(2.18, 0.7, -0.6, 0.06, 0.18, 0.35, front);
-    lg.box(-2.18, 0.75, 0.62, 0.06, 0.16, 0.3, rear); lg.box(-2.18, 0.75, -0.62, 0.06, 0.16, 0.3, rear);
-    const lmat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
-    this.lights = new THREE.InstancedMesh(lg.toGeometry(false), lmat, RENDER_VEH);
-    this.lights.count = 0; this.lights.frustumCulled = false;
-    this.sirens = new THREE.InstancedMesh(new THREE.BoxGeometry(0.4, 0.25, 1.2), new THREE.MeshBasicMaterial({ toneMapped: false }), 300);
+    this.sirens = new THREE.InstancedMesh(new THREE.BoxGeometry(0.36, 0.20, 1.15), new THREE.MeshBasicMaterial({ toneMapped: false }), 300);
     this.sirens.count = 0; this.sirens.frustumCulled = false;
     // pedestrians
     const pb = new GB();
@@ -137,7 +131,7 @@ export class AgentsLayer {
     this.bikes.count = 0; this.bikes.frustumCulled = false;
     this.bags = new THREE.InstancedMesh(new THREE.BoxGeometry(0.3, 0.45, 0.2).translate(-0.35, 0.22, 0.3), new THREE.MeshStandardMaterial({ color: 0x8a3fb0 }), 1500);
     this.bags.count = 0; this.bags.frustumCulled = false;
-    this.group.add(this.lights, this.sirens, this.bodies, this.heads, this.umbrellas, this.bikes, this.bags);
+    this.group.add(this.sirens, this.bodies, this.heads, this.umbrellas, this.bikes, this.bags);
     // trains: 0 loco, 1 passenger coach, 2 container flat, 3 hopper, 4 tank, 5 metro
     // (rolling stock with bogies and wheels, after the v14 build; lit windows/headlamps live in a glow twin)
     const C = (h: number) => new THREE.Color(h);
@@ -309,43 +303,57 @@ export class AgentsLayer {
 
     // ---- vehicles ----
     const counts = this.vCounts;
+    const gCounts = this.vGlowCounts;
     counts.fill(0);
-    let nl = 0, ns = 0;
+    gCounts.fill(0);
+    let ns = 0;
     const cv = cur.veh;
     const old = (this.app.stats?.era ?? 0) === 0;
     const NV = cv.length / VEH_STRIDE;
     for (let i = 0; i < NV; i++) {
       const o = i * VEH_STRIDE;
-      const type = cv[o + 4];
-      if (!type) continue;
+      const type = cv[o + 4] as VType;
+      if (!type || type === VType.Bike) continue;
       const x = this.vPos[i * 4], y = this.vPos[i * 4 + 1], z = this.vPos[i * 4 + 2], h = this.vPos[i * 4 + 3];
       if (Math.abs(x - camP.x) > farVeh || Math.abs(z - camP.z) > farVeh) continue;
       sphere.center.set(x + sOffVX, y + 1.5, z + sOffVZ);
       sphere.radius = rVeh;
       if (!this.frustum.intersectsSphere(sphere)) continue;
-      const im = this.veh[type];
-      if (!im || counts[type] >= im.instanceMatrix.count) continue;
+      const gen = cv[o + 5];
+      const hash = ((i * 7 + gen * 13) >>> 0);
+      let slot: number;
+      if (type === VType.Car) {
+        const pool = old ? ERA0_CAR_POOL : MODERN_CAR_POOL;
+        slot = pool[hash % pool.length];
+      } else {
+        const direct = DIRECT_VTYPE_PRESET[type];
+        if (direct === undefined) continue;
+        slot = direct;
+      }
+      const im = this.veh[slot];
+      if (!im || counts[slot] >= im.instanceMatrix.count) continue;
       this.q.setFromAxisAngle(this.up, -h);
       const flags = cv[o + 6];
       this.v.set(x, y, z);
       this.m.compose(this.v, this.q, this.sc);
-      im.setMatrixAt(counts[type], this.m);
-      const gen = cv[o + 5];
+      im.setMatrixAt(counts[slot], this.m);
       const line = cv[o + 7];
-      if ((type === VType.Bus) && line >= 0 && this.lineColors.has(line)) this.col.copy(this.lineColors.get(line)!);
-      else if (TYPE_COLOR[type as VType] !== undefined) this.col.setHex(TYPE_COLOR[type as VType]!);
+      if (type === VType.Bus && line >= 0 && this.lineColors.has(line)) this.col.copy(this.lineColors.get(line)!);
+      else if (TYPE_COLOR[type] !== undefined) this.col.setHex(TYPE_COLOR[type]!);
+      else if (type === VType.Truck) this.col.setHex(TRUCK_COLORS[hash % TRUCK_COLORS.length]);
+      else if (type === VType.Van) this.col.setHex(VAN_COLORS[hash % VAN_COLORS.length]);
+      else if (type === VType.Moto) this.col.setHex(MOTO_COLORS[hash % MOTO_COLORS.length]);
       else { const pal = old ? OLD_COLORS : CAR_COLORS; this.col.setHex(pal[(i * 7 + gen * 3) % pal.length]); }
-      im.setColorAt(counts[type], this.col);
-      counts[type]++;
-      if (night > 0.05 && nl < RENDER_VEH && type !== VType.Moto) {
-        const s = type === VType.Bus || type === VType.TourBus || type === VType.Truck || type === VType.Garbage || type === VType.Construction || type === VType.Fire ? 1.35 : 1;
-        this.sc.set(s * (type === VType.Bus || type === VType.TourBus ? 2.7 : type >= VType.Truck && type <= VType.Garbage ? 2 : 1), s, s);
-        this.m.compose(this.v, this.q, this.sc);
-        this.sc.set(1, 1, 1);
-        this.lights.setMatrixAt(nl++, this.m);
+      im.setColorAt(counts[slot], this.col);
+      counts[slot]++;
+      const gm = this.vehGlow[slot];
+      if (gm && (night > 0.05 || (flags & VEH_FLAG_SIREN)) && gCounts[slot] < gm.instanceMatrix.count) {
+        gm.setMatrixAt(gCounts[slot]++, this.m);
       }
       if (flags & VEH_FLAG_SIREN && ns < 300) {
-        this.v.y += type === VType.Fire ? 3.2 : 2.25;
+        const fwd = type === VType.Fire ? 3.55 : type === VType.Ambulance ? 1.35 : -0.15;
+        const dy = type === VType.Fire ? 2.94 : type === VType.Ambulance ? 2.16 : 1.56;
+        this.v.set(x + Math.cos(h) * fwd, y + dy, z + Math.sin(h) * fwd);
         this.m.compose(this.v, this.q, this.sc);
         this.sirens.setMatrixAt(ns, this.m);
         const ph = Math.sin(this.t * 14 + i) > 0;
@@ -355,19 +363,22 @@ export class AgentsLayer {
       }
       void VEH_FLAG_BRAKE; void VEH_FLAG_YIELD;
     }
-    for (let t = 0; t < VTYPE_COUNT; t++) {
-      const im = this.veh[t];
+    this.vehGlowMat.color.setScalar(0.4 + 2.2 * night);
+    for (let s = 0; s < this.veh.length; s++) {
+      const im = this.veh[s];
       const prevC = im.count;
-      im.count = counts[t];
-      if (counts[t] > 0 || prevC > 0) {
+      im.count = counts[s];
+      if (counts[s] > 0 || prevC > 0) {
         im.instanceMatrix.needsUpdate = true;
         if (im.instanceColor) im.instanceColor.needsUpdate = true;
       }
+      const gm = this.vehGlow[s];
+      if (gm) {
+        const prevG = gm.count;
+        gm.count = gCounts[s];
+        if (gCounts[s] > 0 || prevG > 0) gm.instanceMatrix.needsUpdate = true;
+      }
     }
-    const prevNl = this.lights.count;
-    this.lights.count = nl;
-    if (nl > 0 || prevNl > 0) this.lights.instanceMatrix.needsUpdate = true;
-    (this.lights.material as THREE.MeshBasicMaterial).color.setScalar(0.4 + 2.2 * night);
     const prevNs = this.sirens.count;
     this.sirens.count = ns;
     if (ns > 0 || prevNs > 0) {

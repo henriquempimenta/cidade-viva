@@ -14,6 +14,7 @@ export class TerrainView {
   private patch: THREE.Mesh | null = null;
   private fullIndex: THREE.BufferAttribute | null = null;
   private cutKey = '';
+  private lastCuts: { pts: number[]; hw: number }[] = [];
 
   constructor(private init: WorldInit) {
     const { size, hres, heights } = init;
@@ -115,6 +116,7 @@ export class TerrainView {
    * that follows the same planes at the cell borders (no cracks) and drops to the road floor inside the cut.
    */
   setCuts(cuts: { pts: number[]; hw: number }[]) {
+    this.lastCuts = cuts;
     const key = cuts.map((c) => c.hw.toFixed(1) + ':' + c.pts.map((v) => v.toFixed(1)).join(',')).join('|');
     if (key === this.cutKey) return;
     this.cutKey = key;
@@ -228,7 +230,8 @@ export class TerrainView {
 
   updateHeights(h: Float32Array) {
     this.heights = h;
-    this.cutKey = ''; // cuts are re-carved on the next road rebuild
+    this.init.heights = h;
+    this.cutKey = '';
     const pos = this.geo.attributes.position as THREE.BufferAttribute;
     for (let i = 0; i < pos.count; i++) {
       const ii = Math.round(pos.getX(i) / this.step), jj = Math.round(pos.getZ(i) / this.step);
@@ -236,8 +239,10 @@ export class TerrainView {
     }
     pos.needsUpdate = true;
     this.geo.computeVertexNormals();
+    this.colorize();
     const d = this.heightTex.image.data as unknown as Float32Array;
     for (let i = 0; i < h.length; i++) d[i * 4] = h[i];
     this.heightTex.needsUpdate = true;
+    if (this.lastCuts.length) this.setCuts(this.lastCuts);
   }
 }

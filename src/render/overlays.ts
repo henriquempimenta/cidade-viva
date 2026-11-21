@@ -47,9 +47,11 @@ export class Overlays {
   private shelterPostGeo = new THREE.CylinderGeometry(0.055, 0.055, 2.5, 6);
   private shelterPoleGeo = new THREE.CylinderGeometry(0.06, 0.06, 2.85, 6);
   private shelterSignGeo = new THREE.CylinderGeometry(0.38, 0.38, 0.12, 12).rotateX(Math.PI / 2);
+  private shelterPlinthGeo = new THREE.BoxGeometry(3.5, 1, 1.35).translate(0, -0.5, 0);
   private shelterFrameMat = new THREE.MeshStandardMaterial({ color: 0x3b4856, roughness: 0.55, metalness: 0.35 });
   private shelterGlassMat = new THREE.MeshStandardMaterial({ color: 0x8fb8d8, transparent: true, opacity: 0.45, roughness: 0.25 });
   private shelterBenchMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3c, roughness: 0.85 });
+  private shelterPlinthMat = new THREE.MeshStandardMaterial({ color: 0xaba69c, roughness: 0.92 });
   // Road incident 3D signage (cones, striped barricades, pulsing warning beacon & halo)
   private coneBaseGeo = new THREE.BoxGeometry(0.46, 0.06, 0.46);
   private coneBodyGeo = new THREE.ConeGeometry(0.19, 0.78, 8);
@@ -179,6 +181,12 @@ export class Overlays {
   }
   removeLine(id: number) { this.lines.delete(id); this.rebuildLines(); }
 
+  /** Resync bus shelters and road-incident signage onto updated terraformed terrain mesh heights. */
+  refreshGround() {
+    if (this.lines.size) this.rebuildLines();
+    if (this.incidents.length) this.setIncidents(this.incidents);
+  }
+
   private rebuildLines() {
     this.lineGroup.clear();
     this.stopGroup.clear();
@@ -192,17 +200,30 @@ export class Overlays {
       for (let i = 0; i < l.stops.length; i += 2) {
         const stopIdx = i / 2;
         const x = l.stops[i], z = l.stops[i + 1];
-        const y = Math.max(0, this.app.terrain.heightAt(x, z));
+        const y = Math.max(0, this.app.terrain.meshY(x, z));
         if (l.kind === 'bus' || l.kind === 'brt') {
           // bus shelter aligned on the back of the sidewalk, facing the carriageway (-Z local)
           const poseIdx = stopIdx * 3;
           const sx = l.stopPoses && poseIdx + 2 < l.stopPoses.length ? l.stopPoses[poseIdx] : x;
           const sz = l.stopPoses && poseIdx + 2 < l.stopPoses.length ? l.stopPoses[poseIdx + 1] : z;
           const angle = l.stopPoses && poseIdx + 2 < l.stopPoses.length ? l.stopPoses[poseIdx + 2] : 0;
-          const sy = Math.max(0.15, this.app.terrain.heightAt(sx, sz)) + 0.12;
+          const ca = Math.cos(angle), sa = Math.sin(angle);
+          let maxG = this.app.terrain.meshY(sx, sz);
+          let minG = maxG;
+          for (const [lx, lz] of [[-1.6, -0.6], [1.6, -0.6], [-1.6, 0.6], [1.6, 0.6], [0, -1.8]]) {
+            const gh = this.app.terrain.meshY(sx + lx * ca - lz * sa, sz + lx * sa + lz * ca);
+            if (gh > maxG) maxG = gh;
+            if (gh < minG) minG = gh;
+          }
+          // Seat cleanly atop the lifted sidewalk surface (never buried in grass, plinth seals downhill slope)
+          const sy = Math.max(0.25, maxG + 0.26);
           const shelter = new THREE.Group();
           shelter.position.set(sx, sy, sz);
           shelter.rotation.y = -angle;
+          const plinthH = Math.max(0.35, sy - minG + 0.35);
+          const plinth = new THREE.Mesh(this.shelterPlinthGeo, this.shelterPlinthMat);
+          plinth.scale.set(1, plinthH, 1);
+          plinth.position.set(0, 0.02, 0.06);
           // open-front canopy shelter: local +X along road travel dir, local -Z facing road, local +Z back wall
           const roof = new THREE.Mesh(this.shelterRoofGeo, this.shelterFrameMat);
           roof.position.set(0, 2.45, 0);
@@ -220,7 +241,7 @@ export class Overlays {
           pole.position.set(1.85, 1.42, -0.32);
           const sign = new THREE.Mesh(this.shelterSignGeo, new THREE.MeshBasicMaterial({ color: l.color }));
           sign.position.set(1.85, 2.75, -0.32);
-          shelter.add(roof, back, sideL, bench, p1, p2, pole, sign);
+          shelter.add(plinth, roof, back, sideL, bench, p1, p2, pole, sign);
           this.stopGroup.add(shelter);
         }
         const mk = new THREE.Mesh(new THREE.SphereGeometry(3, 8, 6), new THREE.MeshBasicMaterial({ color: l.color }));
@@ -310,8 +331,8 @@ export class Overlays {
         const wx = inc.x + cosA * lx - sinA * lz;
         const wz = inc.z + sinA * lx + cosA * lz;
         const roadY = pts ? sampleEdgePts(pts, inc.s + lx, inc.dir, cum)[1] : inc.y;
-        const terrY = this.app.terrain.heightAt(wx, wz);
-        return Math.max(roadY + 0.08, terrY + 0.10);
+        const terrY = this.app.terrain.meshY(wx, wz);
+        return Math.max(roadY + 0.08, terrY + 0.16);
       };
 
       const baseY = surfaceY(0, 0);

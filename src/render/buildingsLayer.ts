@@ -61,7 +61,7 @@ export class BuildingsLayer {
     if (!e) { e = { view: v, geo: null, chunk: null, smoke: [], blades: [], lights: [] }; this.entries.set(v.id, e); }
     e.view = v;
     if (v.state === 'done') {
-      const needGeo = !e.geo || !prev || prev.abandoned !== v.abandoned || prev.decay !== v.decay || prev.squatted !== v.squatted || prev.state !== 'done' || prev.variant !== v.variant || prev.heritage !== v.heritage;
+      const needGeo = !e.geo || !prev || Math.abs(prev.y - v.y) > 0.02 || prev.abandoned !== v.abandoned || prev.decay !== v.decay || prev.squatted !== v.squatted || prev.state !== 'done' || prev.variant !== v.variant || prev.heritage !== v.heritage;
       const wasWork = this.works.get(v.id);
       if (wasWork) { wasWork.dispose(this.group); this.works.delete(v.id); }
       if (needGeo) {
@@ -270,10 +270,10 @@ class ConstructionVisual {
     this.group.userData.bid = v.id;
     const ca = Math.cos(v.angle), sa = Math.sin(v.angle);
     void ca; void sa;
-    // lot / earthwork
+    // lot / earthwork (with foundation skirt so construction pads on slopes never float)
     const sg = new GB();
     sg.setTransform(v.x, v.y, v.z, v.angle);
-    sg.flat(0, 0.05, 0, v.w + 1, v.d + 1, new THREE.Color(0x9a7a55));
+    sg.box(0, -10.0, 0, v.w + 1, 10.05, v.d + 1, new THREE.Color(0x887862), 0, { top: new THREE.Color(0x9a7a55), noBottom: true });
     const tape = new THREE.Color(0xff7a1a);
     sg.box(0, 0, -v.d / 2 - 0.6, v.w + 1.2, 0.9, 0.08, tape); sg.box(0, 0, v.d / 2 + 0.6, v.w + 1.2, 0.9, 0.08, tape);
     sg.box(-v.w / 2 - 0.6, 0, 0, 0.08, 0.9, v.d + 1.2, tape); sg.box(v.w / 2 + 0.6, 0, 0, 0.08, 0.9, v.d + 1.2, tape);

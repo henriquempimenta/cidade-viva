@@ -182,42 +182,64 @@ interface WalkHop {
   urban: boolean;
 }
 
-function pushPt(out: number[], x: number, z: number) {
+function pushPt(out: number[], outY: number[], x: number, y: number, z: number) {
   if (out.length >= 2) {
     const lx = out[out.length - 2], lz = out[out.length - 1];
     if (Math.hypot(x - lx, z - lz) <= 0.25) return;
   }
   out.push(x, z);
+  outY.push(y);
 }
 
-function swPt(h: WalkHop, s: number, side: number): [number, number] {
+function groundWalkY(R: RoadNetwork, x: number, z: number, lift = 0.15): number {
+  return Math.max(0.2, R.terrain.meshY(x, z), R.terrain.heightAt(x, z)) + lift;
+}
+
+function swPt3D(R: RoadNetwork, h: WalkHop, s: number, side: number): [number, number, number] {
   const p = sampleEdgePts(h.e.pts, s, h.dir, h.cum);
-  return [p[0] - p[4] * h.off * side, p[2] + p[3] * h.off * side];
+  const wx = p[0] - p[4] * h.off * side;
+  const wz = p[2] + p[3] * h.off * side;
+  const e = h.e;
+  // Level-accurate elevation: structures (bridges, elevated decks, tunnels) strictly follow their own e.pts level;
+  // surface streets clear meshY without ever snapping up to overhead viaducts or dropping into tunnels below.
+  let wy: number;
+  if (e.tunnel) {
+    wy = p[1] + 0.12;
+  } else if (e.elevated) {
+    wy = p[1] + 0.12;
+  } else if (e.bridge) {
+    const nearEnd = s < 10 || s > h.totalLen - 10;
+    wy = nearEnd ? Math.max(p[1], R.terrain.meshY(wx, wz) + 0.14) + 0.12 : p[1] + 0.12;
+  } else {
+    const gY = Math.max(0.2, R.terrain.meshY(wx, wz), R.terrain.heightAt(wx, wz));
+    wy = Math.max(p[1], gY + 0.14) + (h.urban ? 0.13 : 0.04);
+  }
+  return [wx, wy, wz];
 }
 
-function pushAlongEdge(out: number[], h: WalkHop, sA: number, sB: number, side: number) {
-  const [ax, az] = swPt(h, sA, side);
-  pushPt(out, ax, az);
+function pushAlongEdge(R: RoadNetwork, out: number[], outY: number[], h: WalkHop, sA: number, sB: number, side: number) {
+  const [ax, ay, az] = swPt3D(R, h, sA, side);
+  pushPt(out, outY, ax, ay, az);
   if (Math.abs(sB - sA) <= 0.3) return;
   const n = h.cum.length;
   const total = h.totalLen;
   const forward = sB >= sA;
-  // follow intermediate vertices of e.pts so curved roads keep walkers strictly on the sidewalk
+  // follow intermediate vertices of e.pts so curved roads and bridges keep walkers on the exact sidewalk/deck height
   if (h.dir === 0) {
     if (forward) {
       for (let i = 1; i < n - 1; i++) {
         const si = h.cum[i];
         if (si > sA + 0.5 && si < sB - 0.5) {
-          const [px, pz] = swPt(h, si, side);
-          pushPt(out, px, pz);
+          const [px, py, pz] = swPt3D(R, h, si, side);
+          pushPt(out, outY, px, py, pz);
         }
       }
     } else {
       for (let i = n - 2; i >= 1; i--) {
         const si = h.cum[i];
         if (si < sA - 0.5 && si > sB + 0.5) {
-          const [px, pz] = swPt(h, si, side);
-          pushPt(out, px, pz);
+          const [px, py, pz] = swPt3D(R, h, si, side);
+          pushPt(out, outY, px, py, pz);
         }
       }
     }
@@ -226,61 +248,76 @@ function pushAlongEdge(out: number[], h: WalkHop, sA: number, sB: number, side: 
       for (let i = n - 2; i >= 1; i--) {
         const si = total - h.cum[i];
         if (si > sA + 0.5 && si < sB - 0.5) {
-          const [px, pz] = swPt(h, si, side);
-          pushPt(out, px, pz);
+          const [px, py, pz] = swPt3D(R, h, si, side);
+          pushPt(out, outY, px, py, pz);
         }
       }
     } else {
       for (let i = 1; i < n - 1; i++) {
         const si = total - h.cum[i];
         if (si < sA - 0.5 && si > sB + 0.5) {
-          const [px, pz] = swPt(h, si, side);
-          pushPt(out, px, pz);
+          const [px, py, pz] = swPt3D(R, h, si, side);
+          pushPt(out, outY, px, py, pz);
         }
       }
     }
   }
-  const [bx, bz] = swPt(h, sB, side);
-  pushPt(out, bx, bz);
+  const [bx, by, bz] = swPt3D(R, h, sB, side);
+  pushPt(out, outY, bx, by, bz);
 }
 
-/** Quadratic Bezier corner fillet matching junctions.ts sidewalks around a corner */
-function pushCornerFillet(out: number[], pA: [number, number], uA: [number, number], pB: [number, number], uB: [number, number]) {
+/** Quadratic Bezier corner fillet matching junctions.ts sidewalks around a corner, with C0 elevation interpolation */
+function pushCornerFillet(
+  out: number[], outY: number[],
+  pA: [number, number, number], uA: [number, number],
+  pB: [number, number, number], uB: [number, number],
+  R: RoadNetwork, surface = true,
+) {
   const det = uA[0] * (-uB[1]) - uA[1] * (-uB[0]);
   let cx = (pA[0] + pB[0]) * 0.5;
-  let cz = (pA[1] + pB[1]) * 0.5;
+  let cz = (pA[2] + pB[2]) * 0.5;
   if (Math.abs(det) > 0.08) {
-    const ex = pB[0] - pA[0], ez = pB[1] - pA[1];
+    const ex = pB[0] - pA[0], ez = pB[2] - pA[2];
     const t = (ex * (-uB[1]) - ez * (-uB[0])) / det;
     const u = (uA[0] * ez - uA[1] * ex) / det;
     if (t > 0 && u > 0 && t < 28 && u < 28) {
       cx = pA[0] + uA[0] * t;
-      cz = pA[1] + uA[1] * t;
+      cz = pA[2] + uA[1] * t;
     }
   }
   for (let step = 1; step <= 4; step++) {
     const f = step / 4, inv = 1 - f;
-    pushPt(
-      out,
-      inv * inv * pA[0] + 2 * inv * f * cx + f * f * pB[0],
-      inv * inv * pA[1] + 2 * inv * f * cz + f * f * pB[1],
-    );
+    const x = inv * inv * pA[0] + 2 * inv * f * cx + f * f * pB[0];
+    const z = inv * inv * pA[2] + 2 * inv * f * cz + f * f * pB[2];
+    const yLin = pA[1] + (pB[1] - pA[1]) * f;
+    const y = surface ? Math.max(yLin, groundWalkY(R, x, z, 0.27)) : yLin;
+    pushPt(out, outY, x, y, z);
   }
 }
 
+export interface WalkPath3D {
+  pts: number[];
+  ys: number[];
+}
+
 /**
- * Sidewalk & crosswalk waypoints [x,z,...] following real road geometry (`e.pts`),
- * keeping pedestrians on the actual rendered sidewalks (`[hw, hw + 2.6]`),
- * rounding corners along sidewalk fillets, and crossing streets only on crosswalks.
+ * Sidewalk & crosswalk waypoints [x,z,...] plus level-accurate per-waypoint elevations `ys`,
+ * following real road geometry (`e.pts`), keeping pedestrians on rendered sidewalks & bridge walkways,
+ * rounding corners along fillets, and never confusing multi-level viaducts/tunnels with surface streets.
  */
-export function walkPoints(
+export function walkPath(
   R: RoadNetwork,
   plan: { path: number[]; startS: number; destS: number },
   from: { x: number; z: number },
   to: { x: number; z: number },
-): number[] {
+): WalkPath3D {
   const m = plan.path.length;
-  if (!m) return [from.x, from.z, to.x, to.z];
+  if (!m) {
+    return {
+      pts: [from.x, from.z, to.x, to.z],
+      ys: [groundWalkY(R, from.x, from.z), groundWalkY(R, to.x, to.z)],
+    };
+  }
 
   const hops: WalkHop[] = [];
   for (let k = 0; k < m; k++) {
@@ -308,7 +345,12 @@ export function walkPoints(
       off: pedWalkOffset(e), urban,
     });
   }
-  if (!hops.length) return [from.x, from.z, to.x, to.z];
+  if (!hops.length) {
+    return {
+      pts: [from.x, from.z, to.x, to.z],
+      ys: [groundWalkY(R, from.x, from.z), groundWalkY(R, to.x, to.z)],
+    };
+  }
 
   // Determine which side (+1 right of dir, -1 left of dir) origin and destination lie on
   const sideOfPoint = (h: WalkHop, s: number, pt: { x: number; z: number }): number => {
@@ -321,7 +363,17 @@ export function walkPoints(
   const sideFrom = sideOfPoint(hops[0], s0Raw, from);
   const sideTo = sideOfPoint(hops[hops.length - 1], sEndRaw, to);
 
+  const firstEdge = hops[0].e;
+  const lastEdge = hops[hops.length - 1].e;
+  const fromY = firstEdge.bridge || firstEdge.elevated || firstEdge.tunnel
+    ? swPt3D(R, hops[0], s0Raw, sideFrom)[1]
+    : groundWalkY(R, from.x, from.z, 0.16);
+  const toY = lastEdge.bridge || lastEdge.elevated || lastEdge.tunnel
+    ? swPt3D(R, hops[hops.length - 1], sEndRaw, sideTo)[1]
+    : groundWalkY(R, to.x, to.z, 0.16);
+
   const out: number[] = [from.x, from.z];
+  const outY: number[] = [fromY];
 
   // Single-edge trip
   if (hops.length === 1) {
@@ -329,7 +381,7 @@ export function walkPoints(
     const sA = Math.max(0, Math.min(h.totalLen, plan.startS));
     const sB = Math.max(0, Math.min(h.totalLen, plan.destS));
     if (sideFrom === sideTo) {
-      pushAlongEdge(out, h, sA, sB, sideFrom);
+      pushAlongEdge(R, out, outY, h, sA, sB, sideFrom);
     } else {
       // Cross on the nearest painted crosswalk (or perpendicular midpoint on very long blocks)
       const cands: number[] = [];
@@ -342,13 +394,13 @@ export function walkPoints(
         if (extra < bestCost) { bestCost = extra; sCross = cw; }
       }
       if (bestCost > 160) sCross = Math.max(h.swStart, Math.min(h.swEnd, (sA + sB) * 0.5));
-      pushAlongEdge(out, h, sA, sCross, sideFrom);
-      const [cx2, cz2] = swPt(h, sCross, sideTo);
-      pushPt(out, cx2, cz2);
-      pushAlongEdge(out, h, sCross, sB, sideTo);
+      pushAlongEdge(R, out, outY, h, sA, sCross, sideFrom);
+      const [cx2, cy2, cz2] = swPt3D(R, h, sCross, sideTo);
+      pushPt(out, outY, cx2, cy2, cz2);
+      pushAlongEdge(R, out, outY, h, sCross, sB, sideTo);
     }
-    pushPt(out, to.x, to.z);
-    return out;
+    pushPt(out, outY, to.x, toY, to.z);
+    return { pts: out, ys: outY };
   }
 
   // Multi-edge trip: 2-state DP to pick the sidewalk side (+1/-1) on each edge minimizing street crossings
@@ -404,14 +456,15 @@ export function walkPoints(
     const p2 = sampleEdgePts(h2.e.pts, h2.swStart, h2.dir, h2.cum);
     const u1: [number, number] = [p1[3], p1[4]];
     const u2: [number, number] = [p2[3], p2[4]];
-    const mouth1 = swPt(h1, h1.swEnd, sd);
-    const mouth2 = swPt(h2, h2.swStart, sd);
+    const mouth1 = swPt3D(R, h1, h1.swEnd, sd);
+    const mouth2 = swPt3D(R, h2, h2.swStart, sd);
+    const surf = !h1.e.tunnel && !h2.e.tunnel && !h1.e.elevated && !h2.e.elevated;
     const cross = u1[0] * u2[1] - u1[1] * u2[0];
     const dot = u1[0] * u2[0] + u1[1] * u2[1];
 
     // Inner corner turn: pure sidewalk fillet (no asphalt crossed)
     if ((cross > 0.25 && sd === 1) || (cross < -0.25 && sd === -1)) {
-      pushCornerFillet(out, mouth1, u1, mouth2, u2);
+      pushCornerFillet(out, outY, mouth1, u1, mouth2, u2, R, surf);
       return;
     }
 
@@ -445,21 +498,25 @@ export function walkPoints(
         // side of sideArm facing h1 (behind u1) vs facing h2 (ahead along u2)
         const sideBehind = ((-sUz) * (-u1[0]) + sUx * (-u1[1])) >= 0 ? 1 : -1;
         const sideAhead = -sideBehind;
-        const pBehind: [number, number] = [sp[0] - sUz * sOff * sideBehind, sp[2] + sUx * sOff * sideBehind];
-        const pAhead: [number, number] = [sp[0] - sUz * sOff * sideAhead, sp[2] + sUx * sOff * sideAhead];
+        const bx = sp[0] - sUz * sOff * sideBehind, bz = sp[2] + sUx * sOff * sideBehind;
+        const ax = sp[0] - sUz * sOff * sideAhead, az = sp[2] + sUx * sOff * sideAhead;
+        const by = Math.max(sp[1], groundWalkY(R, bx, bz, 0.14)) + 0.13;
+        const ay = Math.max(sp[1], groundWalkY(R, ax, az, 0.14)) + 0.13;
+        const pBehind: [number, number, number] = [bx, by, bz];
+        const pAhead: [number, number, number] = [ax, ay, az];
         // Curve onto the side arm's sidewalk to its painted crosswalk, cross on zebra stripes, curve onto h2
-        pushCornerFillet(out, mouth1, u1, pBehind, [sUx, sUz]);
-        pushPt(out, pAhead[0], pAhead[1]);
-        pushCornerFillet(out, pAhead, [-sUx, -sUz], mouth2, u2);
+        pushCornerFillet(out, outY, mouth1, u1, pBehind, [sUx, sUz], R, surf);
+        pushPt(out, outY, pAhead[0], pAhead[1], pAhead[2]);
+        pushCornerFillet(out, outY, pAhead, [-sUx, -sUz], mouth2, u2, R, surf);
         return;
       }
       // No side arm (T-junction straight side): continuous sidewalk straight through
-      pushPt(out, mouth2[0], mouth2[1]);
+      pushPt(out, outY, mouth2[0], mouth2[1], mouth2[2]);
       return;
     }
 
     // Fallback smooth corner
-    pushCornerFillet(out, mouth1, u1, mouth2, u2);
+    pushCornerFillet(out, outY, mouth1, u1, mouth2, u2, R, surf);
   };
 
   for (let k = 0; k < H - 1; k++) {
@@ -467,18 +524,18 @@ export function walkPoints(
     const s1 = curSide;
     const s2 = sides[k + 1];
 
-    // Deg <= 2 bend (no intersection box)
+    // Deg <= 2 bend (no intersection box, including bridge abutments)
     if (h1.rEnd === 0) {
       if (s1 === s2) {
-        pushAlongEdge(out, h1, curS, h1.totalLen, s1);
-        const [bx, bz] = swPt(h2, 0, s2);
-        pushPt(out, bx, bz);
+        pushAlongEdge(R, out, outY, h1, curS, h1.totalLen, s1);
+        const [bx, by, bz] = swPt3D(R, h2, 0, s2);
+        pushPt(out, outY, bx, by, bz);
       } else {
         const sCross = Math.max(curS, h1.totalLen - 3);
-        pushAlongEdge(out, h1, curS, sCross, s1);
-        const [cx, cz] = swPt(h1, sCross, s2);
-        pushPt(out, cx, cz);
-        pushAlongEdge(out, h1, sCross, h1.totalLen, s2);
+        pushAlongEdge(R, out, outY, h1, curS, sCross, s1);
+        const [cx, cy, cz] = swPt3D(R, h1, sCross, s2);
+        pushPt(out, outY, cx, cy, cz);
+        pushAlongEdge(R, out, outY, h1, sCross, h1.totalLen, s2);
       }
       curS = 0;
       curSide = s2;
@@ -499,12 +556,12 @@ export function walkPoints(
     if (s1 !== cornerSide) {
       // Cross h1 on its painted crosswalk before reaching the junction mouth
       const sCross1 = Math.min(h1.cwEnd, Math.max(curS, h1.cwEnd));
-      pushAlongEdge(out, h1, curS, sCross1, s1);
-      const [cx1, cz1] = swPt(h1, sCross1, cornerSide);
-      pushPt(out, cx1, cz1);
-      pushAlongEdge(out, h1, sCross1, h1.swEnd, cornerSide);
+      pushAlongEdge(R, out, outY, h1, curS, sCross1, s1);
+      const [cx1, cy1, cz1] = swPt3D(R, h1, sCross1, cornerSide);
+      pushPt(out, outY, cx1, cy1, cz1);
+      pushAlongEdge(R, out, outY, h1, sCross1, h1.swEnd, cornerSide);
     } else {
-      pushAlongEdge(out, h1, curS, h1.swEnd, cornerSide);
+      pushAlongEdge(R, out, outY, h1, curS, h1.swEnd, cornerSide);
     }
 
     // Move around the corner fillet (or across the side arm's crosswalk when going straight)
@@ -512,9 +569,9 @@ export function walkPoints(
 
     if (cornerSide !== s2) {
       // Cross h2 on its painted crosswalk immediately after entering h2
-      pushAlongEdge(out, h2, h2.swStart, h2.cwStart, cornerSide);
-      const [cx2, cz2] = swPt(h2, h2.cwStart, s2);
-      pushPt(out, cx2, cz2);
+      pushAlongEdge(R, out, outY, h2, h2.swStart, h2.cwStart, cornerSide);
+      const [cx2, cy2, cz2] = swPt3D(R, h2, h2.cwStart, s2);
+      pushPt(out, outY, cx2, cy2, cz2);
       curS = h2.cwStart;
       curSide = s2;
     } else {
@@ -526,9 +583,19 @@ export function walkPoints(
   // Final hop to destination sidewalk projection, then perpendicular into destination door
   const lastH = hops[H - 1];
   const finalS = Math.max(lastH.swStart, Math.min(lastH.totalLen, sEndRaw));
-  pushAlongEdge(out, lastH, curS, finalS, curSide);
-  pushPt(out, to.x, to.z);
-  return out;
+  pushAlongEdge(R, out, outY, lastH, curS, finalS, curSide);
+  pushPt(out, outY, to.x, toY, to.z);
+  return { pts: out, ys: outY };
+}
+
+/** Backwards-compatible 2D [x,z,...] wrapper around `walkPath()`. */
+export function walkPoints(
+  R: RoadNetwork,
+  plan: { path: number[]; startS: number; destS: number },
+  from: { x: number; z: number },
+  to: { x: number; z: number },
+): number[] {
+  return walkPath(R, plan, from, to).pts;
 }
 
 export function pathLength(R: RoadNetwork, plan: CarPlan): number {

@@ -1,6 +1,8 @@
 import { HOUR_SECONDS, MAX_TRAIN_CARS, ROAD_HALF_WIDTH, RoadClass, TRAIN_STRIDE, VType } from '../shared/constants';
+import { edgeHalfWidth, SIDEWALK_WIDTH } from '../shared/roadGeom';
 import type { CrossingView, RailEdgeView, RailStationView } from '../shared/protocol';
 import type { Building, Candidate } from './buildings';
+import { segRectDist } from './geom';
 import { OCC_RAIL } from './occupancy';
 import type { P2 } from './regional';
 import { segInt } from './roads';
@@ -57,8 +59,43 @@ export class Rail {
     const gr = path.map((p) => Math.max(T.heightAt(p.x, p.z), 0) + 0.05);
     for (let it = 0; it < 3; it++) { for (let i = 0; i < ys.length; i++) ys[i] = Math.max(ys[i], gr[i]); for (let i = 1; i < ys.length - 1; i++) ys[i] = Math.max(gr[i], (ys[i - 1] + ys[i] * 2 + ys[i + 1]) / 4); }
     const y = ys.map((v, i) => (wet[Math.max(0, i - 1)] || wet[i] || wet[Math.min(ys.length - 1, i + 1)] ? Math.max(v, 6) : v) + 0.4);
-    this.addLine('main', path, y, 1, false);
+    const main = this.addLine('main', path, y, 1, false);
+    this.gradeLineTerrain(main);
     w.roads.railCheck = (ax, az, bx, bz, cls) => this.roadCheck(ax, az, bx, bz, cls);
+  }
+
+  /** Grade terrain under ground-level stretches of a rail line and re-sync rail elevations cleanly. */
+  gradeLineTerrain(l: RLine) {
+    if (l.elevated) return;
+    const changed = this.w.terraforming.gradeRail(l.x, l.y, l.z, l.tracks, l.elevated);
+    const T = this.w.terrain;
+    let moved = changed;
+    for (let i = 0; i < l.x.length; i++) {
+      const gh = T.heightAt(l.x[i], l.z[i]);
+      const my = T.meshY(l.x[i], l.z[i]);
+      const meshG = Math.max(gh, my);
+      if (meshG < T.seaLevel + 0.35) continue;
+      if (l.y[i] < meshG + 0.14) {
+        l.y[i] = meshG + 0.18;
+        moved = true;
+      }
+    }
+    if (changed) {
+      // Re-sync any buildings or roads adjacent to the newly graded rail corridor
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (let i = 0; i < l.x.length; i++) {
+        if (l.x[i] < minX) minX = l.x[i];
+        if (l.x[i] > maxX) maxX = l.x[i];
+        if (l.z[i] < minZ) minZ = l.z[i];
+        if (l.z[i] > maxZ) maxZ = l.z[i];
+      }
+      if (minX <= maxX) {
+        const cx = (minX + maxX) * 0.5, cz = (minZ + maxZ) * 0.5;
+        const rad = Math.hypot(maxX - minX, maxZ - minZ) * 0.5 + 32;
+        this.w.resyncInfrastructureNear(cx, cz, rad);
+      }
+    }
+    if (moved) this.dirtyViews = true;
   }
 
   // ------------------------------------------------------------------ the railway as an urban barrier
@@ -426,7 +463,8 @@ export class Rail {
           const s = l.cum[i] + Math.hypot(l.x[i + 1] - l.x[i], l.z[i + 1] - l.z[i]) * hit.u;
           // a track already lifted here (earlier viaduct, rail bridge) needs no gates, whatever the edge id now is
           const raised = this.clearance(l, i, hit.u, hit.x, hit.z) > 4.5;
-          out.push({ edge: e.id, t: hit.t, line: l.id, s, x: hit.x, z: hit.z, y: Math.max(0, w.terrain.heightAt(hit.x, hit.z)) + 0.2, angle: Math.atan2(b.z - a.z, b.x - a.x), separated: raised || (old.get(`${e.id}`) ?? false), closed: false, wait: 0, hot: 0 });
+          const cy = Math.max(0, w.terrain.heightAt(hit.x, hit.z), w.terrain.meshY(hit.x, hit.z)) + 0.2;
+          out.push({ edge: e.id, t: hit.t, line: l.id, s, x: hit.x, z: hit.z, y: cy, angle: Math.atan2(b.z - a.z, b.x - a.x), separated: raised || (old.get(`${e.id}`) ?? false), closed: false, wait: 0, hot: 0 });
         }
       }
     }
@@ -449,8 +487,9 @@ export class Rail {
       const d = Math.abs(l.cum[i] - c.s);
       if (d >= R0) continue;
       const f = 1 - d / R0, wgt = f * f * (3 - 2 * f);
-      const target = Math.max(Math.max(0, T.heightAt(l.x[i], l.z[i])) + 0.05, c.y + 0.12);
-      const ny = l.y[i] + (target - l.y[i]) * wgt;
+      const g = Math.max(0, T.heightAt(l.x[i], l.z[i]), T.meshY(l.x[i], l.z[i]));
+      const target = Math.max(g + 0.16, c.y + 0.12);
+      const ny = Math.max(g + 0.14, l.y[i] + (target - l.y[i]) * wgt);
       if (Math.abs(ny - l.y[i]) > 0.02) { l.y[i] = ny; moved = true; }
     }
     if (moved) this.dirtyViews = true;
@@ -483,7 +522,7 @@ export class Rail {
         }
         const s0 = l.cum[i], s1 = l.cum[Math.min(l.x.length - 1, i + seg)], bl = (l.built ?? 1) * l.len;
         const progress = Math.max(0, Math.min(1, (bl - s0) / Math.max(1, s1 - s0)));
-        out.push({ id: id++, pts, tracks: l.tracks, progress, bridge: bridge && l.kind !== 'metro', elevated: l.elevated || (bridge && l.kind === 'main' && pts[1] > 3), metro: l.kind === 'metro', spur: l.kind === 'spur' });
+        out.push({ id: id++, pts, tracks: l.tracks, progress, bridge: bridge && l.kind !== 'metro', elevated: l.elevated, metro: l.kind === 'metro', spur: l.kind === 'spur' });
       }
     }
     return out;
@@ -541,7 +580,7 @@ export class Rail {
     }
     // duplication of the single track
     if (!this.duplicated && this.waitingSingle > 40 && w.era >= 1) {
-      out.push({ kind: 'rail_dup', label: 'Duplicação da ferrovia', motive: `Trens esperando em via singela (${this.waitingSingle} esperas)`, benefit: 30, cost: 2500, run: () => { main.tracks = 2; this.duplicated = true; this.dirtyViews = true; const p = this.at(main, main.len / 2); w.events.emit('rail_build', p[0], p[2], 0.85, 'Ferrovia é duplicada: trens passam a cruzar sem esperar', { headline: 'Linha férrea ganha segunda via', visual: 0.8 }); return true; } });
+      out.push({ kind: 'rail_dup', label: 'Duplicação da ferrovia', motive: `Trens esperando em via singela (${this.waitingSingle} esperas)`, benefit: 30, cost: 2500, run: () => { main.tracks = 2; this.duplicated = true; this.gradeLineTerrain(main); this.dirtyViews = true; const p = this.at(main, main.len / 2); w.events.emit('rail_build', p[0], p[2], 0.85, 'Ferrovia é duplicada: trens passam a cruzar sem esperar', { headline: 'Linha férrea ganha segunda via', visual: 0.8 }); return true; } });
     }
     // grade separation of level crossings that stay jammed day after day (not a one-off peak)
     let worst: Crossing | null = null;
@@ -645,18 +684,35 @@ export class Rail {
     const w = this.w;
     const def = KINDS[kind];
     const bw = def.w[1], bd = def.d[1];
-    for (const ds of [0, 60, -60, 120, -120, 200, -200, 300, -300]) for (const extra of [0, 12]) for (const side of [1, -1]) {
-      const p = this.at(l, s + ds);
-      const nx = -Math.sin(p[3]) * side, nz = Math.cos(p[3]) * side;
-      const cx = p[0] + nx * (offset + extra + bd / 2), cz = p[2] + nz * (offset + extra + bd / 2);
-      if (!w.occ.rectFree(cx, cz, p[3], bw, bd, true)) continue;
-      if (w.terrain.heightAt(cx, cz) < 1) continue;
-      const pe = w.roads.nearestEdgePoint(cx, cz, 250, (e) => e.alive && e.progress >= 1 && e.cls !== RoadClass.Highway);
-      const c: Candidate = { x: cx, z: cz, angle: p[3], edge: pe ? pe.edge.id : -1, t: pe ? pe.t : 0, side, access: pe ? pe.edge.a : w.roads.nearestNode(cx, cz, 800)?.id ?? 0, offDist: pe ? pe.d : 0, total: 0, terms: {} };
-      if (!pe && !w.buildAccessRoad(c, bw, bd)) continue;
-      const b = w.buildings.create(kind, c, { era: w.era, day: w.day, w: bw, d: bd, maxDensity: 5, decision: { actor: 'Prefeitura', kind, day: w.day, motive: kind === 'railStation' ? 'Ponto da ferrovia com mais moradores e empregos num raio de 700 m' : 'Ponto da ferrovia mais próximo das indústrias', chosen: c, alternatives: [], sampled: 1 } });
-      w.onBuildingStarted(b);
-      return b;
+    const searchR = Math.hypot(bw, bd) * 0.5 + 35;
+    for (const ds of [0, 60, -60, 120, -120, 180, -180, 260, -260, 340, -340, 440, -440]) {
+      for (const extra of [0, 10, 22, 34]) {
+        for (const side of [1, -1]) {
+          const p = this.at(l, s + ds);
+          const nx = -Math.sin(p[3]) * side, nz = Math.cos(p[3]) * side;
+          const cx = p[0] + nx * (offset + extra + bd / 2), cz = p[2] + nz * (offset + extra + bd / 2);
+          // Never place a station/terminal over any road corridor (allowRoad = false)
+          if (!w.occ.rectFree(cx, cz, p[3], bw + 2, bd + 2, false)) continue;
+          if (w.terrain.heightAt(cx, cz) < 1) continue;
+          // Continuous geometric clearance against all nearby active roads (carriageway + sidewalk + margin)
+          const ca = Math.cos(p[3]), sa = Math.sin(p[3]);
+          let roadConflict = false;
+          for (const e of w.roads.edgesNear(cx, cz, searchR)) {
+            if (!e.alive || e.deck !== undefined) continue;
+            const ea = w.roads.nodes[e.a], eb = w.roads.nodes[e.b];
+            if (!ea || !eb) continue;
+            const minClr = edgeHalfWidth(e) + SIDEWALK_WIDTH + 0.5;
+            if (segRectDist(ea.x - cx, ea.z - cz, eb.x - cx, eb.z - cz, ca, sa, bw * 0.5, bd * 0.5) < minClr) { roadConflict = true; break; }
+          }
+          if (roadConflict) continue;
+          const pe = w.roads.nearestEdgePoint(cx, cz, 250, (e) => e.alive && e.progress >= 1 && e.cls !== RoadClass.Highway);
+          const c: Candidate = { x: cx, z: cz, angle: p[3], edge: pe ? pe.edge.id : -1, t: pe ? pe.t : 0, side, access: pe ? pe.edge.a : w.roads.nearestNode(cx, cz, 800)?.id ?? 0, offDist: pe ? pe.d : 0, total: 0, terms: {} };
+          if (!pe && !w.buildAccessRoad(c, bw, bd)) continue;
+          const b = w.buildings.create(kind, c, { era: w.era, day: w.day, w: bw, d: bd, maxDensity: 5, decision: { actor: 'Prefeitura', kind, day: w.day, motive: kind === 'railStation' ? 'Ponto da ferrovia com mais moradores e empregos num raio de 700 m' : 'Ponto da ferrovia mais próximo das indústrias', chosen: c, alternatives: [], sampled: 1 } });
+          w.onBuildingStarted(b);
+          return b;
+        }
+      }
     }
     return null;
   }
@@ -692,7 +748,8 @@ export class Rail {
       pts.push({ x: p[0] - Math.sin(p[3]) * 8 * side, z: p[2] + Math.cos(p[3]) * 8 * side });
       ys.push(p[1]);
     }
-    this.addLine('spur', pts, ys, 2, false);
+    const spur = this.addLine('spur', pts, ys, 2, false);
+    this.gradeLineTerrain(spur);
     w.events.emit('rail_build', b.x, b.z, 0.85, 'Terminal de cargas liga o distrito industrial à ferrovia', { headline: 'Nova linha de carga liga o distrito industrial à ferrovia', entity: { kind: 'building', id: b.id }, ref: b.id, visual: 0.8 });
     return true;
   }

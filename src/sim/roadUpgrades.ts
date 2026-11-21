@@ -189,6 +189,7 @@ export class RoadUpgrades {
     n.control = c;
     n.phases = [];
     this.w.roads.updateNodeGeom(n);
+    if (c === 3) this.w.terraformJunction(n);
     this.w.roads.topoVer++;
   }
 

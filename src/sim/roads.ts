@@ -194,7 +194,7 @@ export class RoadNetwork {
   // ---------- construction ----------
   addNode(x: number, z: number): RNode {
     const n: RNode = {
-      id: this.nodes.length, x, z, y: Math.max(this.terrain.heightAt(x, z), 0.3) + 0.1,
+      id: this.nodes.length, x, z, y: Math.max(this.terrain.meshY(x, z), this.terrain.heightAt(x, z), 0.3) + 0.1,
       edges: [], control: 0, phase: 0, phaseT: 0, phases: [], interchange: false, inJunction: 0, jSlots: [], delay: 0, waitAcc: 0, alive: true, radius: 4,
     };
     this.nodes.push(n);
@@ -240,11 +240,36 @@ export class RoadNetwork {
     return out;
   }
 
+  private nodeGeomCacheVer = -1;
+  private nodeGeomCache = new Map<number, { renderR: number; deg: number; hasUrban: boolean }>();
+
+  /** Cached junction surface metrics (invalidated on topoVer change) for O(1) Traffic stop-line queries. */
+  nodeCrosswalkInfo(nid: number): { renderR: number; deg: number; hasUrban: boolean } {
+    if (this.nodeGeomCacheVer !== this.topoVer) {
+      this.nodeGeomCacheVer = this.topoVer;
+      this.nodeGeomCache.clear();
+    }
+    let info = this.nodeGeomCache.get(nid);
+    if (!info) {
+      const n = this.nodes[nid];
+      if (!n || !n.alive) {
+        info = { renderR: 0, deg: 0, hasUrban: false };
+      } else {
+        const inc = this.surfaceEdgesAt(nid);
+        info = {
+          renderR: nodeRenderRadius(n.control, inc),
+          deg: inc.length,
+          hasUrban: inc.some((q) => q.cls >= RoadClass.Local && q.cls <= RoadClass.Avenue),
+        };
+      }
+      this.nodeGeomCache.set(nid, info);
+    }
+    return info;
+  }
+
   /** exact junction fillet radius used by RoadsLayer.nodeR() */
   nodeRenderR(nid: number): number {
-    const n = this.nodes[nid];
-    if (!n || !n.alive) return 0;
-    return nodeRenderRadius(n.control, this.surfaceEdgesAt(nid));
+    return this.nodeCrosswalkInfo(nid).renderR;
   }
 
   streetName(cls: RoadClass): string {
@@ -283,10 +308,15 @@ export class RoadNetwork {
   computePts(e: REdge) {
     const a = this.nodes[e.a], b = this.nodes[e.b];
     const n = Math.max(1, Math.ceil(e.len / 10));
-    const pts: number[] = [];
+    const xs = new Float64Array(n + 1);
+    const ys = new Float64Array(n + 1);
+    const zs = new Float64Array(n + 1);
+    const minG = new Float64Array(n + 1);
+    const isBridgeSpan = e.bridge && !e.elevated && e.deck === undefined;
     for (let i = 0; i <= n; i++) {
       const t = i / n;
       const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+      xs[i] = x; zs[i] = z;
       let y: number;
       if (e.deck !== undefined) {
         y = this.deckY(e, a, b, t, x, z);
@@ -295,12 +325,28 @@ export class RoadNetwork {
         const clearance = e.elevated ? 7 : 6.5;
         const ramp = Math.min(1, Math.min(t, 1 - t) * e.len / 40);
         y = Math.max(base, base * (1 - ramp) + clearance * ramp + Math.sin(Math.PI * t) * (e.elevated ? 0 : 2));
-        if (e.elevated) y = base + ramp * clearance;
+        if (e.elevated) {
+          y = base + ramp * clearance;
+        } else {
+          const g = Math.max(this.terrain.meshY(x, z), this.terrain.heightAt(x, z)) + 0.14;
+          minG[i] = g;
+          y = Math.max(y, g);
+        }
       } else {
-        y = Math.max(this.terrain.heightAt(x, z), 0.3) + 0.12;
+        y = Math.max(this.terrain.meshY(x, z), this.terrain.heightAt(x, z), 0.3) + 0.14;
       }
-      pts.push(x, y, z);
+      ys[i] = y;
     }
+    if (isBridgeSpan && n >= 2) {
+      // Smooth bridge approach profiles gently while strictly preserving riverbank meshY clearance
+      for (let pass = 0; pass < 2; pass++) {
+        for (let i = 1; i < n; i++) {
+          ys[i] = Math.max(minG[i], (ys[i - 1] + ys[i] * 2 + ys[i + 1]) * 0.25);
+        }
+      }
+    }
+    const pts: number[] = [];
+    for (let i = 0; i <= n; i++) pts.push(xs[i], ys[i], zs[i]);
     e.pts = pts;
   }
 
@@ -809,7 +855,9 @@ export class RoadNetwork {
         if (!e.alive || e.progress < 1 || e.deck !== undefined) continue;
         const v = e.a === u ? e.b : e.a;
         const dir = e.a === u ? 0 : 1;
-        const nd = d + e.len;
+        // Strongly prefer surface streets & pedestrian bridge walkways over express elevated/tunnel stretches
+        const penalty = e.elevated || e.tunnel ? 3.5 : 1;
+        const nd = d + e.len * penalty;
         if (nd < dist[v] && nd <= maxDist) {
           dist[v] = nd;
           prevDe[v] = eid * 2 + dir;

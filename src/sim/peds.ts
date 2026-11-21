@@ -22,13 +22,14 @@ export class Peds {
   flags = new Uint16Array(0);
   speed = new Float32Array(0);
   pts: (Float32Array | null)[] = [];
+  ptsY: (Float32Array | null)[] = [];
   cum: (Float32Array | null)[] = [];
   t0 = new Float64Array(0);
   arrive = new Float64Array(0);
   color = new Float32Array(0);
   kind = new Uint8Array(0); // 0 citizen, 1 tourist, 2 worker, 3 funeral, 4 waiting
   // pose cache (evaluated lazily)
-  x = new Float32Array(0); z = new Float32Array(0); h = new Float32Array(0);
+  x = new Float32Array(0); y = new Float32Array(0); z = new Float32Array(0); h = new Float32Array(0);
   // tight path AABB for cheap spatial rejection (gates & snapshot culling)
   private minX = new Float32Array(0); private maxX = new Float32Array(0);
   private minZ = new Float32Array(0); private maxZ = new Float32Array(0);
@@ -50,11 +51,11 @@ export class Peds {
     this.active = g(this.active, Uint8Array); this.gen = g(this.gen, Uint16Array); this.citizen = g(this.citizen, Int32Array);
     this.flags = g(this.flags, Uint16Array); this.speed = g(this.speed, Float32Array); this.t0 = g(this.t0, Float64Array);
     this.arrive = g(this.arrive, Float64Array); this.color = g(this.color, Float32Array); this.kind = g(this.kind, Uint8Array);
-    this.x = g(this.x, Float32Array); this.z = g(this.z, Float32Array); this.h = g(this.h, Float32Array);
+    this.x = g(this.x, Float32Array); this.y = g(this.y, Float32Array); this.z = g(this.z, Float32Array); this.h = g(this.h, Float32Array);
     this.minX = g(this.minX, Float32Array); this.maxX = g(this.maxX, Float32Array);
     this.minZ = g(this.minZ, Float32Array); this.maxZ = g(this.maxZ, Float32Array);
     this.delayed = g(this.delayed, Uint8Array);
-    for (let i = old; i < n; i++) { this.pts.push(null); this.cum.push(null); }
+    for (let i = old; i < n; i++) { this.pts.push(null); this.ptsY.push(null); this.cum.push(null); }
     for (let i = n - 1; i >= old; i--) this.free.push(i);
     this.max = n;
   }
@@ -62,12 +63,13 @@ export class Peds {
   /** soft budget only: storage grows, so callers are never refused for lack of slots */
   get capacityLeft() { return 1e9; }
 
-  spawn(pts: number[], citizen: number, speed: number, flags: number, color: number, kind = 0): number {
+  spawn(pts: number[], citizen: number, speed: number, flags: number, color: number, kind = 0, yPts?: number[]): number {
     if (pts.length < 4) return -1;
     if (!this.free.length) this.grow(this.max * 2);
     const i = this.free.pop()!;
     const n = pts.length / 2;
     const P = new Float32Array(pts), C = new Float32Array(n);
+    const Y = yPts && yPts.length === n ? new Float32Array(yPts) : null;
     let x0 = P[0], x1 = P[0], z0 = P[1], z1 = P[1];
     for (let k = 1; k < n; k++) {
       const px = P[k * 2], pz = P[k * 2 + 1];
@@ -82,12 +84,13 @@ export class Peds {
     this.citizen[i] = citizen;
     this.flags[i] = flags;
     this.speed[i] = v;
-    this.pts[i] = P; this.cum[i] = C;
+    this.pts[i] = P; this.ptsY[i] = Y; this.cum[i] = C;
     this.t0[i] = this.time;
     this.arrive[i] = this.time + C[n - 1] / v;
     this.delayed[i] = 0;
     this.q.push(i, this.arrive[i]);
     this.x[i] = P[0]; this.z[i] = P[1]; this.h[i] = Math.atan2(P[3] - P[1], P[2] - P[0]);
+    this.y[i] = Y ? Y[0] : (this.elevation ? this.elevation(P[0], P[1]) : Math.max(0.2, this.T.meshY(P[0], P[1])) + 0.15);
     this.color[i] = color;
     this.kind[i] = kind;
     this.count++;
@@ -96,13 +99,21 @@ export class Peds {
   /** keep a walker standing where it is until explicitly removed (queues at stops) */
   hold(i: number) { if (this.active[i]) this.arrive[i] = Infinity; }
   /** reposition a held pedestrian (e.g. FIFO bus-stop queue shifting forward) without despawning */
-  setHeldPose(i: number, x: number, z: number, h: number) {
+  setHeldPose(i: number, x: number, z: number, h: number, y?: number) {
     if (!this.active[i]) return;
     const x2 = x + Math.cos(h) * 0.05;
     const z2 = z + Math.sin(h) * 0.05;
     const P = this.pts[i];
     if (P && P.length >= 4) {
       P[0] = x; P[1] = z; P[2] = x2; P[3] = z2;
+    }
+    const Y = this.ptsY[i];
+    if (y !== undefined) {
+      if (Y && Y.length >= 2) { Y[0] = y; Y[1] = y; }
+      this.y[i] = y;
+    } else if (Y && Y.length >= 2) {
+      const gy = this.elevation ? this.elevation(x, z) : Math.max(0.2, this.T.meshY(x, z)) + 0.15;
+      Y[0] = gy; Y[1] = gy; this.y[i] = gy;
     }
     this.minX[i] = Math.min(x, x2); this.maxX[i] = Math.max(x, x2);
     this.minZ[i] = Math.min(z, z2); this.maxZ[i] = Math.max(z, z2);
@@ -113,12 +124,12 @@ export class Peds {
     if (!this.active[i]) return;
     this.active[i] = 0;
     this.delayed[i] = 0;
-    this.pts[i] = null; this.cum[i] = null;
+    this.pts[i] = null; this.ptsY[i] = null; this.cum[i] = null;
     this.free.push(i);
     this.count--;
   }
 
-  /** distance walked so far → pose cache */
+  /** distance walked so far → pose cache (including exact level-aware 3D elevation y) */
   pose(i: number) {
     const P = this.pts[i], C = this.cum[i];
     if (!P || !C) return;
@@ -130,6 +141,12 @@ export class Peds {
     const ax = P[lo * 2], az = P[lo * 2 + 1], bx = P[hi * 2], bz = P[hi * 2 + 1];
     this.x[i] = ax + (bx - ax) * u; this.z[i] = az + (bz - az) * u;
     if (bx !== ax || bz !== az) this.h[i] = Math.atan2(bz - az, bx - ax);
+    const Y = this.ptsY[i];
+    if (Y) {
+      this.y[i] = Y[lo] + (Y[hi] - Y[lo]) * u;
+    } else {
+      this.y[i] = this.elevation ? this.elevation(this.x[i], this.z[i]) : Math.max(0.2, this.T.meshY(this.x[i], this.z[i])) + 0.15;
+    }
   }
 
   remainingTime(i: number): number {
@@ -216,8 +233,7 @@ export class Peds {
       if (Math.abs(P[0] - cam.x) > L || Math.abs(P[1] - cam.z) > L) { out[o + 4] = -1; continue; }
       this.pose(i);
       if (Math.abs(this.x[i] - cam.x) > R || Math.abs(this.z[i] - cam.z) > R) { out[o + 4] = -1; continue; }
-      const py = this.elevation ? this.elevation(this.x[i], this.z[i]) : Math.max(0.2, this.T.heightAt(this.x[i], this.z[i])) + 0.15;
-      out[o] = this.x[i]; out[o + 1] = py; out[o + 2] = this.z[i];
+      out[o] = this.x[i]; out[o + 1] = this.y[i]; out[o + 2] = this.z[i];
       out[o + 3] = this.h[i]; out[o + 4] = this.gen[i];
       out[o + 5] = this.flags[i] | (this.rain > 0.3 && !(this.flags[i] & PED_FLAG_BIKE) && (i % 3 !== 0) ? PED_FLAG_UMBRELLA : 0);
       out[o + 6] = this.citizen[i];

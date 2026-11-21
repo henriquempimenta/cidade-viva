@@ -114,6 +114,9 @@ export class Buildings {
   /** buildings currently being torn down (avoids scanning the whole city every step) */
   demolishing: Building[] = [];
 
+  /** optional hook invoked before footY when a building is created (e.g. terrain grading) */
+  onBeforeCreate: ((c: Candidate, w: number, d: number) => void) | null = null;
+
   constructor(private occ: Occupancy, private terrain: Terrain, private rng: RNG) {}
 
   create(kind: string, c: Candidate, opts: { level?: number; wealth?: number; era: number; day: number; w: number; d: number; maxDensity: number; decision: Decision | null; instant?: boolean; floors?: number; variant?: number }): Building {
@@ -121,6 +124,7 @@ export class Buildings {
     const level = opts.level ?? 1;
     const floors = opts.floors ?? floorsFor(kind, level, this.rng, opts.maxDensity);
     const id = this.nextId++;
+    this.onBeforeCreate?.(c, opts.w, opts.d);
     const y = this.footY(c.x, c.z, c.angle, opts.w, opts.d);
     const b: Building = {
       id, kind, def, level, wealth: opts.wealth ?? 1, x: c.x, z: c.z, y, angle: c.angle, w: opts.w, d: opts.d,
@@ -162,9 +166,9 @@ export class Buildings {
   footY(x: number, z: number, a: number, w: number, d: number): number {
     const ca = Math.cos(a), sa = Math.sin(a);
     let mx = -Infinity;
-    for (const [u, v] of [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0, 0]]) {
+    for (const [u, v] of [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0, -0.5], [0, 0.5], [-0.5, 0], [0.5, 0], [0, 0]]) {
       const px = x + ca * u * w - sa * v * d, pz = z + sa * u * w + ca * v * d;
-      mx = Math.max(mx, this.terrain.heightAt(px, pz));
+      mx = Math.max(mx, this.terrain.meshY(px, pz), this.terrain.heightAt(px, pz));
     }
     return Math.max(mx, 0.3);
   }

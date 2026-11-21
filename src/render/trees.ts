@@ -59,11 +59,15 @@ const TREE_CHUNK = 400;
 export class TreesView {
   meshes: THREE.InstancedMesh[] = [];
   private map: { mesh: number; idx: number }[] = [];
+  private treeData: Float32Array;
+  private alive: Uint8Array;
   group = new THREE.Group();
   constructor(trees: Float32Array) {
     const geos = treeGeometries();
     const mat = swayMaterial();
     const n = trees.length / 5;
+    this.treeData = trees.slice();
+    this.alive = new Uint8Array(n).fill(1);
     // partition trees into spatial chunks (400x400 m) per species so both the main camera
     // and the directional shadow frustum cull out-of-view trees automatically
     const buckets = new Map<string, { type: number; ids: number[] }>();
@@ -108,10 +112,37 @@ export class TreesView {
     const zero = new THREE.Matrix4().makeScale(0, 0, 0);
     const touched = new Set<THREE.InstancedMesh>();
     for (const id of ids) {
+      this.alive[id] = 0;
       const r = this.map[id];
       if (!r) continue;
       const m = this.meshes[r.mesh];
       m.setMatrixAt(r.idx, zero);
+      touched.add(m);
+    }
+    for (const m of touched) m.instanceMatrix.needsUpdate = true;
+  }
+
+  /** Snap alive trees onto updated terraformed terrain mesh heights so none float or sink. */
+  syncHeights(ground: (x: number, z: number) => number) {
+    const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const touched = new Set<THREE.InstancedMesh>();
+    const td = this.treeData;
+    for (let i = 0, n = this.alive.length; i < n; i++) {
+      if (!this.alive[i]) continue;
+      const tx = td[i * 5], ty = td[i * 5 + 1], tz = td[i * 5 + 2];
+      const ny = ground(tx, tz);
+      if (Math.abs(ny - ty) < 0.04) continue;
+      td[i * 5 + 1] = ny;
+      const r = this.map[i];
+      if (!r) continue;
+      const sc = td[i * 5 + 3];
+      p.set(tx, ny - 0.2, tz);
+      q.setFromAxisAngle(up, (i * 2.399) % 6.28);
+      s.set(sc, sc * (0.85 + ((i * 7) % 10) / 30), sc);
+      mtx.compose(p, q, s);
+      const m = this.meshes[r.mesh];
+      m.setMatrixAt(r.idx, mtx);
       touched.add(m);
     }
     for (const m of touched) m.instanceMatrix.needsUpdate = true;

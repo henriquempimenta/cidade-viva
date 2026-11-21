@@ -1,4 +1,5 @@
 import { EMERGENCY_CAP, EMERGENCY_EXCESS, MODE_CAP, LANE_WIDTH, MAX_VEHICLES, RoadClass, VEH_FLAG_BRAKE, VEH_FLAG_HAZARD, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_FLAG_FULL, VEH_STRIDE, VType, HOUR_SECONDS } from '../shared/constants';
+import { crosswalkStopBack } from '../shared/roadGeom';
 import { vehiclePhysicalLen } from '../shared/vehiclePresets';
 import { vehicleSound, type RNode, type REdge, type RoadNetwork } from './roads';
 
@@ -53,6 +54,7 @@ export class Traffic {
   jnode = new Int32Array(0);
   jlen = new Float32Array(0);
   jp = new Float32Array(0);
+  jy = new Float32Array(0);
   x = new Float32Array(0); y = new Float32Array(0); z = new Float32Array(0); h = new Float32Array(0);
   pKind = new Uint8Array(0);
   pId = new Int32Array(0);
@@ -102,7 +104,7 @@ export class Traffic {
     const self = this as unknown as Record<string, unknown>;
     for (const k of Object.keys(self)) {
       const a = self[k];
-      if (!ArrayBuffer.isView(a) || k === 'jp') continue;
+      if (!ArrayBuffer.isView(a) || k === 'jp' || k === 'jy') continue;
       const C = (a as unknown as { constructor: new (n: number) => Float32Array }).constructor;
       const b = new C(n); b.set(a as Float32Array); self[k] = b;
     }
@@ -110,6 +112,7 @@ export class Traffic {
     this.incidentId.fill(-1, old);
     this.variant.fill(-1, old);
     const jp = new Float32Array(n * 6); jp.set(this.jp); this.jp = jp;
+    const jy = new Float32Array(n * 2); jy.set(this.jy); this.jy = jy;
     for (let i = old; i < n; i++) this.path.push(null);
     for (let i = n - 1; i >= old; i--) this.free.push(i);
     this.max = n;
@@ -122,8 +125,26 @@ export class Traffic {
     const n = this.R.nodes[nodeId];
     return n.edges.length >= 3 ? Math.min(n.radius, e.len * 0.3) : 0;
   }
+  /**
+   * Approach stop-line setback from `nodeId`: aligns the first stopped vehicle's front bumper strictly
+   * behind the painted zebra crosswalk (`nodeRenderR * 0.92 + CROSSWALK_INSET + 1.4 + gap`) when
+   * `hasEndCrosswalk` holds, while preserving room for buses/trucks on short blocks.
+   */
+  stopTrim(e: REdge, nodeId: number): number {
+    const base = this.trim(e, nodeId);
+    const n = this.R.nodes[nodeId];
+    if (!n || n.edges.length < 3) return base;
+    const info = this.R.nodeCrosswalkInfo(nodeId);
+    const cwBack = crosswalkStopBack(e, e.len, info.renderR, info.deg, info.hasUrban, n.interchange);
+    if (cwBack <= base) return base;
+    const otherId = nodeId === e.a ? e.b : e.a;
+    const otherTrim = this.trim(e, otherId);
+    // Keep at least 18 m usable lane space so convoys & 12 m buses/trucks stay fluid on shorter blocks
+    const maxStop = Math.max(base, Math.min(e.len * 0.32, e.len - otherTrim - 18));
+    return Math.max(base, Math.min(cwBack, maxStop));
+  }
   sStart(e: REdge, dir: number) { return this.trim(e, dir === 0 ? e.a : e.b); }
-  sEnd(e: REdge, dir: number) { return e.len - this.trim(e, dir === 0 ? e.b : e.a); }
+  sEnd(e: REdge, dir: number) { return e.len - this.stopTrim(e, dir === 0 ? e.b : e.a); }
 
   /** lanes a vehicle of (type, flags) is legally allowed to occupy on edge `e` (enforces exclusive BRT bus lanes) */
   allowedLanes(e: REdge, type: VType, flags = 0): number[] {
@@ -873,7 +894,7 @@ export class Traffic {
       if (!e?.alive) { this.despawnForStuck(i, e, dir, nodesSignal); continue; }
       // left the junction once the body clears sStart?
       if (this.jnode[i] >= 0) {
-        const releaseS = Math.min(this.sStart(e, dir) + this.len[i] * 0.4, this.sEnd(e, dir) - 0.5);
+        const releaseS = Math.min(this.sStart(e, dir) + this.len[i] * 0.25, this.sEnd(e, dir) - 0.5);
         if (this.s[i] >= releaseS) this.releaseJunction(i);
       }
       const path = this.path[i]!;
@@ -1140,6 +1161,7 @@ export class Traffic {
     }
     const b = this.jp;
     b[i * 6] = p0[0]; b[i * 6 + 1] = p0[2]; b[i * 6 + 2] = cx; b[i * 6 + 3] = cz; b[i * 6 + 4] = p2[0]; b[i * 6 + 5] = p2[2];
+    this.jy[i * 2] = p0[1]; this.jy[i * 2 + 1] = p2[1];
     const l1 = Math.hypot(cx - p0[0], cz - p0[2]), l2 = Math.hypot(p2[0] - cx, p2[2] - cz), l3 = Math.hypot(p2[0] - p0[0], p2[2] - p0[2]);
     this.jlen[i] = Math.max(0.5, (l1 + l2 + l3) / 2);
     void node;
@@ -1160,7 +1182,10 @@ export class Traffic {
       const dx = 2 * a1 * (b[o + 2] - b[o]) + 2 * u * (b[o + 4] - b[o + 2]);
       const dz = 2 * a1 * (b[o + 3] - b[o + 1]) + 2 * u * (b[o + 5] - b[o + 3]);
       const node = this.R.nodes[this.jnode[i] >= 0 ? this.jnode[i] : dir === 0 ? e.a : e.b];
-      this.x[i] = x; this.z[i] = z; this.y[i] = node.y + 0.05;
+      const y0 = this.jy[i * 2] || node.y, y2 = this.jy[i * 2 + 1] || node.y;
+      const yCurve = a1 * a1 * y0 + 2 * a1 * u * node.y + u * u * y2;
+      const gY = !e.bridge && !e.elevated && e.deck === undefined ? Math.max(this.R.terrain.meshY(x, z), 0.3) + 0.14 : -1e9;
+      this.x[i] = x; this.z[i] = z; this.y[i] = Math.max(yCurve, gY);
       this.h[i] = Math.atan2(dz, dx);
       return;
     }

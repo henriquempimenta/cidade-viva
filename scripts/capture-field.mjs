@@ -687,6 +687,138 @@ async function main() {
       });
     }
 
+    // --- 9. Infrastructure close-ups: 08-sloped-junction, 09-rail-crossing-bridge, 10-hillside-buildings ---
+    await cdp.eval(`(() => { window.app.hud.inspector.close(); window.app.setSpeed(1); })()`);
+
+    // 08: Sloped or acute urban junction (close-up showing junction seam, sidewalks, zebra & stop-line)
+    const slopedJunction = await cdp.eval(`(() => {
+      const a = window.app, s = a.curSnap;
+      const vehPts = [];
+      for (let i = 0; i < s.veh.length / 9; i++) {
+        const o = i * 9;
+        if (s.veh[o + 4]) vehPts.push([s.veh[o], s.veh[o + 2]]);
+      }
+      let best = null, bestScore = -1;
+      for (const n of a.roads.nodes.values()) {
+        const inc = a.roads.edgesAt(n.id);
+        if (inc.length < 3) continue;
+        if (!inc.some((e) => e.cls >= 1 && e.cls <= 3 && !e.bridge && !e.elevated)) continue;
+        const gC = a.terrain.meshY(n.x, n.z);
+        const slope = Math.hypot(
+          (a.terrain.meshY(n.x + 12, n.z) - a.terrain.meshY(n.x - 12, n.z)) / 24,
+          (a.terrain.meshY(n.x, n.z + 12) - a.terrain.meshY(n.x, n.z - 12)) / 24,
+        );
+        // Minimum angle between adjacent arms
+        const angs = inc.map((e) => {
+          const o = a.roads.nodes.get(e.a === n.id ? e.b : e.a);
+          return o ? Math.atan2(o.z - n.z, o.x - n.x) : 0;
+        }).sort((x, y) => x - y);
+        let minAng = Math.PI;
+        for (let i = 0; i < angs.length; i++) {
+          const d = (angs[(i + 1) % angs.length] - angs[i] + Math.PI * 2) % (Math.PI * 2);
+          if (d < minAng) minAng = d;
+        }
+        let nearVeh = 0;
+        for (const [vx, vz] of vehPts) if (Math.hypot(vx - n.x, vz - n.z) < 50) nearVeh++;
+        const acuteBonus = minAng < 1.25 ? (1.25 - minAng) * 35 : 0;
+        const sigBonus = n.control === 2 || n.control === 4 ? 14 : 0;
+        const score = slope * 180 + acuteBonus + sigBonus + Math.min(nearVeh, 8) * 3;
+        if (score > bestScore) {
+          bestScore = score;
+          best = { id: n.id, x: n.x, y: gC, z: n.z, deg: inc.length, control: n.control, slope, minAngDeg: minAng * 180 / Math.PI, nearVeh };
+        }
+      }
+      return best;
+    })()`);
+    if (slopedJunction) {
+      await lookAtPoint(slopedJunction.x, slopedJunction.z, 34, 24, slopedJunction.y + 0.8);
+      await sleep(700);
+      await snapFrozen('08-sloped-junction.png', 1, async () => {
+        const time = await cdp.eval(`window.app.timeLabel()`);
+        return {
+          kind: 'sloped-junction', state: 'observing', mode: 'infrastructure', gen: -1,
+          cameraMode: 'free', insideBuilding: false, inconclusive: false,
+          junction: slopedJunction, time,
+        };
+      });
+    }
+
+    // 09: Railway level crossing, bridge or hillside embankment close-up
+    const railTarget = await cdp.eval(`(() => {
+      const a = window.app;
+      // Priority 1: level crossing (gates, deck, signals, tracks)
+      const level = (a.rail.crossings || []).filter((c) => !c.separated || c.under);
+      if (level.length) {
+        const c = level[0];
+        return { kind: c.under ? 'underpass' : 'crossing', x: c.x, y: Math.max(c.y, a.terrain.meshY(c.x, c.z)), z: c.z };
+      }
+      // Priority 2: rail bridge over river / valley (piers, closed deck, abutments)
+      for (const e of a.rail.edges.values()) {
+        if (!e.bridge || !e.pts || e.pts.length < 6) continue;
+        const mi = Math.floor(e.pts.length / 6) * 3;
+        return { kind: 'rail-bridge', x: e.pts[mi], y: e.pts[mi + 1], z: e.pts[mi + 2] };
+      }
+      // Priority 3: steepest hillside rail stretch near city
+      let best = null, bestScore = -Infinity;
+      const cc = a.cityCenter;
+      for (const e of a.rail.edges.values()) {
+        if (!e.pts || e.pts.length < 6) continue;
+        for (let i = 0; i < e.pts.length; i += 3) {
+          const x = e.pts[i], y = e.pts[i + 1], z = e.pts[i + 2];
+          const slope = Math.hypot(
+            (a.terrain.meshY(x + 10, z) - a.terrain.meshY(x - 10, z)) / 20,
+            (a.terrain.meshY(x, z + 10) - a.terrain.meshY(x, z - 10)) / 20,
+          );
+          const dist = Math.hypot(x - cc.x, z - cc.z);
+          const score = slope * 200 - dist * 0.04;
+          if (score > bestScore) { bestScore = score; best = { kind: 'rail-slope', x, y, z, slope }; }
+        }
+      }
+      return best;
+    })()`);
+    if (railTarget) {
+      await lookAtPoint(railTarget.x, railTarget.z, 38, 22, railTarget.y + 0.8);
+      await sleep(500);
+      await snapFrozen('09-rail-crossing-bridge.png', 1, async () => {
+        const time = await cdp.eval(`window.app.timeLabel()`);
+        return {
+          kind: 'rail-crossing-bridge', state: 'observing', mode: 'infrastructure', gen: -1,
+          cameraMode: 'free', insideBuilding: false, inconclusive: false,
+          rail: railTarget, time,
+        };
+      });
+    }
+
+    // 10: Steepest hillside buildings + terraced streets (plinths, terraforming, retaining skirts)
+    const hillCluster = await cdp.eval(`(() => {
+      const a = window.app;
+      const blds = a.buildings.all().filter((b) => b.state === 'done');
+      let best = null, bestScore = -1;
+      for (const b of blds) {
+        const slope = Math.hypot(
+          (a.terrain.meshY(b.x + 14, b.z) - a.terrain.meshY(b.x - 14, b.z)) / 28,
+          (a.terrain.meshY(b.x, b.z + 14) - a.terrain.meshY(b.x, b.z - 14)) / 28,
+        );
+        let neighbors = 0;
+        for (const o of blds) if (o.id !== b.id && Math.hypot(o.x - b.x, o.z - b.z) < 60) neighbors++;
+        const score = slope * 260 + Math.min(neighbors, 6) * 4;
+        if (score > bestScore) { bestScore = score; best = { id: b.id, kind: b.kind, x: b.x, y: b.y, z: b.z, slope, neighbors }; }
+      }
+      return best;
+    })()`);
+    if (hillCluster) {
+      await lookAtPoint(hillCluster.x, hillCluster.z, 44, 24, hillCluster.y + 2);
+      await sleep(500);
+      await snapFrozen('10-hillside-buildings.png', 1, async () => {
+        const time = await cdp.eval(`window.app.timeLabel()`);
+        return {
+          kind: 'hillside-buildings', state: 'observing', mode: 'infrastructure', gen: -1,
+          cameraMode: 'free', insideBuilding: false, inconclusive: false,
+          cluster: hillCluster, time,
+        };
+      });
+    }
+
     writeFileSync(resolve(outDir, 'field-report.json'), JSON.stringify(report, null, 2));
     console.log(`Captured ${report.shots.length} field screenshots + telemetry to ${outDir}`);
   } finally {

@@ -33,10 +33,11 @@ export function buildingGeometry(b: BuildingView): BuildResult {
   const kind = b.kind;
   const def = KINDS[kind];
   g.winParams = [3.2, 3, (b.seed % 1000) / 1000];
-  // pad / ground plinth so buildings sit on slopes
+  // concrete/stone foundation plinth descending 12 m below base so hillside buildings never float even in serra
   const lotC: Record<string, number> = { res: 0x86a35e, informal: 0x9a8a6a, com: 0xb3aea4, off: 0xaaa69e, ind: 0x9a948a };
-  const plinthC = C(lotC[def.cat] ?? (def.cat === 'park' || def.cat === 'deathcare' ? 0x6f9a50 : 0xa9a99a));
-  g.box(0, -3, 0, w + 0.6, 3.02, d + 0.6, plinthC, 0, { noBottom: true });
+  const topPadC = C(lotC[def.cat] ?? (def.cat === 'park' || def.cat === 'deathcare' ? 0x6f9a50 : 0xa9a99a));
+  const foundC = C(def.cat === 'park' || def.cat === 'deathcare' ? 0x7c7b72 : 0x8f8a80);
+  g.box(0, -12.0, 0, w + 0.6, 12.02, d + 0.6, foundC, 0, { top: topPadC, noBottom: true });
   switch (def.cat) {
     case 'res': residential(ctx); break;
     case 'informal': informal(ctx); break;

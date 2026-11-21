@@ -118,11 +118,11 @@ export class App {
     this.trees = new TreesView(init.trees);
     scene.add(this.trees.group);
     this.roads = new RoadsLayer();
-    this.roads.ground = (x, z) => this.terrain.heightAt(x, z);
+    this.roads.ground = (x, z) => this.terrain.meshY(x, z);
     this.roads.onCuts = (c) => this.terrain.setCuts(c);
     scene.add(this.roads.group);
     this.rail = new RailLayer();
-    this.rail.ground = (x, z) => this.terrain.heightAt(x, z);
+    this.rail.ground = (x, z) => this.terrain.meshY(x, z);
     scene.add(this.rail.group);
     this.smoke = new Particles(6000, false);
     this.glow = new Particles(5000, true);
@@ -219,7 +219,13 @@ export class App {
     if (d.fields) this.overlays.setField(d.fields.name, d.fields.data, d.fields.max);
     if (d.od) this.overlays.setFlows(d.od, false);
     if (d.cargo) this.overlays.setFlows(d.cargo, true);
-    if (d.heights) this.terrain.updateHeights(d.heights);
+    if (d.heights) {
+      this.terrain.updateHeights(d.heights);
+      this.roads.markDirty();
+      this.rail.markDirty();
+      this.overlays.refreshGround();
+      this.trees.syncHeights((x, z) => this.terrain.meshY(x, z));
+    }
     if (d.floodLevel !== undefined) this.effects.setFlood(d.floodLevel);
     if (d.dikes) this.effects.setDikes(d.dikes);
     if (d.stats) {

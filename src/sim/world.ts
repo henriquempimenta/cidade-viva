@@ -1,6 +1,6 @@
 import { segRectDist } from './geom';
 import { KINDS } from '../shared/catalog';
-import { DAY_SECONDS, DAYS_PER_SEASON, DAYS_PER_YEAR, ERA_POP, ERAS, HOUR_SECONDS, RoadClass, SEASONS } from '../shared/constants';
+import { DAY_SECONDS, DAYS_PER_SEASON, DAYS_PER_YEAR, ERA_POP, ERAS, HOUR_SECONDS, ROAD_HALF_WIDTH, RoadClass, SEASONS } from '../shared/constants';
 import { edgeHalfWidth, sampleEdgePts } from '../shared/roadGeom';
 import type { SimParams } from '../shared/params';
 import type { BuildingView, EdgeView, NodeView, RailEdgeView, WorldDiff, WorldInit } from '../shared/protocol';
@@ -17,6 +17,7 @@ import { borderPoint, chaikin, resample, simplify, terrainPath, type P2 } from '
 import { RoadNetwork, type REdge, angDiff as angDiffW, projSeg } from './roads';
 import { type SiteContext } from './siting';
 import { Terrain } from './terrain';
+import { Terraforming } from './terraforming';
 import { Weather } from './weather';
 import { Citizens, type Household } from './citizens';
 import { Economy } from './economy';
@@ -24,7 +25,7 @@ import { Traffic, P_CITIZEN, P_CONSTRUCTION, P_FUNERAL, P_INCIDENT, P_SERVICE } 
 import { RoadIncidents } from './incidents';
 import { Peds } from './peds';
 import { Places } from './places';
-import { carPlan, carPlanFromNode, carPlanToNode, doorOf, walkPoints, type CarPlan } from './trips';
+import { carPlan, carPlanFromNode, carPlanToNode, doorOf, walkPath, type CarPlan } from './trips';
 import type { RNode } from './roads';
 import { Utilities } from './utilities';
 import { Services } from './services';
@@ -57,6 +58,7 @@ export class World {
   params: SimParams;
   rng: RNG;
   terrain: Terrain;
+  terraforming: Terraforming;
   occ: Occupancy;
   fields: Fields;
   roads: RoadNetwork;
@@ -123,16 +125,26 @@ export class World {
   population = 0;
   households = 0;
   private hhSeq = 1;
+  private foundingDone = false;
 
   constructor(params: SimParams) {
     this.params = { ...params };
     this.rng = new RNG(params.seed);
     this.terrain = new Terrain(params.mapSize, params.terrain, params.seed);
+    this.terraforming = new Terraforming(this.terrain);
     this.occ = new Occupancy(params.mapSize, this.terrain);
     this.fields = new Fields(this.terrain);
     this.roads = new RoadNetwork(this.terrain, this.occ, this.rng.fork(11));
     this.buildings = new Buildings(this.occ, this.terrain, this.rng.fork(12));
-    this.roads.onEdgeAdded = (e) => this.clearTreesForEdge(e);
+    this.roads.onEdgeAdded = (e) => {
+      this.clearTreesForEdge(e);
+      if (this.foundingDone) this.terraformRoadEdge(e);
+    };
+    this.buildings.onBeforeCreate = (c, w, d) => {
+      if (!this.foundingDone) return;
+      const res = this.terraforming.gradeBuilding(c.x, c.z, c.angle, w, d);
+      if (res.changed) this.resyncInfrastructureNear(c.x, c.z, res.radius);
+    };
     this.market = new Market(this);
     this.growth = new RoadGrowth(this);
     this.events = new EventBus(() => ({ t: this.t, day: this.day }));
@@ -192,8 +204,19 @@ export class World {
       const n = this.roads.addNode(hp[i].x, hp[i].z);
       if (prev >= 0) {
         const a = this.roads.nodes[prev];
-        const mid = { x: (a.x + n.x) / 2, z: (a.z + n.z) / 2 };
-        const wet = T.isWater(mid.x, mid.z) || T.isWater(a.x * 0.75 + n.x * 0.25, a.z * 0.75 + n.z * 0.25) || T.isWater(a.x * 0.25 + n.x * 0.75, a.z * 0.25 + n.z * 0.75);
+        const dx = n.x - a.x, dz = n.z - a.z;
+        const el = Math.hypot(dx, dz) || 1;
+        const px = -dz / el, pz = dx / el;
+        const hw = ROAD_HALF_WIDTH[RoadClass.Highway];
+        let wet = false;
+        for (const t of [0.1, 0.25, 0.5, 0.75, 0.9]) {
+          const sx = a.x + dx * t, sz = a.z + dz * t;
+          for (const lat of [-hw, 0, hw]) {
+            const qx = sx + px * lat, qz = sz + pz * lat;
+            if (T.isWater(qx, qz) || T.meshY(qx, qz) < T.seaLevel) { wet = true; break; }
+          }
+          if (wet) break;
+        }
         this.roads.addEdge(prev, n.id, RoadClass.Highway, { progress: 1, bridge: wet, name: 'Rodovia Regional' });
       }
       prev = n.id;
@@ -249,6 +272,121 @@ export class World {
     this.publicNow('church', 'Capela da vila');
     placeNow('com', 1, 'Armazém da vila');
     updateFields(this);
+    // Grade all founding roads, junctions, and buildings deterministically in one clean pass before attachAgents/initMessage
+    this.foundingDone = true;
+    for (const e of this.roads.edges) this.terraforming.gradeRoad(e, this.roads);
+    for (const n of this.roads.nodes) if (n.edges.length >= 3) this.terraforming.gradeJunction(n, this.roads);
+    for (const b of this.buildings.list) this.terraforming.gradeBuilding(b.x, b.z, b.angle, b.w, b.d);
+    for (const n of this.roads.nodes) {
+      if (!n.alive || n.deck) continue;
+      n.y = Math.max(this.terrain.meshY(n.x, n.z), this.terrain.heightAt(n.x, n.z), 0.3) + 0.1;
+      this.roads.dirtyNodes.add(n.id);
+    }
+    for (const e of this.roads.edges) {
+      if (!e.alive) continue;
+      this.roads.computePts(e);
+      this.roads.dirtyEdges.add(e.id);
+    }
+    for (const b of this.buildings.list) {
+      if (!b.alive) continue;
+      b.y = this.buildings.footY(b.x, b.z, b.angle, b.w, b.d);
+      this.buildings.dirty.add(b.id);
+    }
+    // founding complete: sync tree base heights to terraformed ground before initMessage()
+    this.syncTreeHeights();
+    this.terraforming.heightsDirty = false;
+  }
+
+  /** Sync alive tree base Y values to current terrain mesh height (used at founding before initMessage). */
+  private syncTreeHeights() {
+    const T = this.terrain;
+    const tr = T.trees;
+    for (let i = 0, n = tr.length / 5; i < n; i++) {
+      if (!T.treeAlive[i]) continue;
+      tr[i * 5 + 1] = T.meshY(tr[i * 5], tr[i * 5 + 2]);
+    }
+  }
+
+  /** Grade terrain under a road edge + its junctions and resync nearby roads/buildings/rail. */
+  terraformRoadEdge(e: REdge) {
+    if (!e || !e.alive || e.bridge || e.elevated || e.tunnel || e.deck !== undefined) return;
+    const rEdge = this.terraforming.gradeRoad(e, this.roads);
+    let changed = rEdge.changed;
+    let cx = rEdge.cx, cz = rEdge.cz, rad = rEdge.radius;
+    const na = this.roads.nodes[e.a], nb = this.roads.nodes[e.b];
+    if (na && na.edges.length >= 3) {
+      const ra = this.terraforming.gradeJunction(na, this.roads);
+      if (ra.changed) { changed = true; rad = Math.max(rad, Math.hypot(na.x - cx, na.z - cz) + ra.radius); }
+    }
+    if (nb && nb.edges.length >= 3) {
+      const rb = this.terraforming.gradeJunction(nb, this.roads);
+      if (rb.changed) { changed = true; rad = Math.max(rad, Math.hypot(nb.x - cx, nb.z - cz) + rb.radius); }
+    }
+    if (changed) this.resyncInfrastructureNear(cx, cz, rad);
+  }
+
+  /** Grade terrain under a junction (e.g. roundabout upgrade) and resync nearby infrastructure. */
+  terraformJunction(n: RNode) {
+    const r = this.terraforming.gradeJunction(n, this.roads);
+    if (r.changed) this.resyncInfrastructureNear(r.cx, r.cz, r.radius);
+  }
+
+  /** Re-sample node/edge/building/rail elevations affected by local terrain grading. */
+  resyncInfrastructureNear(cx: number, cz: number, radius: number) {
+    const T = this.terrain, R = this.roads, B = this.buildings;
+    const rNodes = radius + 14;
+    const touchedNodes = new Set<number>();
+    for (const n of R.nodesNear(cx, cz, rNodes)) {
+      if (!n.alive || n.deck) continue;
+      const ny = Math.max(T.meshY(n.x, n.z), T.heightAt(n.x, n.z), 0.3) + 0.1;
+      if (Math.abs(ny - n.y) > 0.01) {
+        n.y = ny;
+        R.dirtyNodes.add(n.id);
+        touchedNodes.add(n.id);
+      }
+    }
+    for (const e of R.edgesNear(cx, cz, radius + 24)) {
+      if (!e.alive) continue;
+      const isSurface = !e.bridge && !e.elevated && !e.tunnel && e.deck === undefined;
+      if (isSurface || touchedNodes.has(e.a) || touchedNodes.has(e.b)) {
+        R.computePts(e);
+        R.dirtyEdges.add(e.id);
+      }
+    }
+    // Re-sync nearby buildings (accounting for heightmap triangle spillover + each building's own footprint radius)
+    const baseBldR = radius + 24;
+    for (const b of B.list) {
+      if (!b.alive) continue;
+      const rBld = baseBldR + Math.hypot(b.w, b.d) * 0.5;
+      const dx = b.x - cx, dz = b.z - cz;
+      if (dx * dx + dz * dz > rBld * rBld) continue;
+      const ny = B.footY(b.x, b.z, b.angle, b.w, b.d);
+      if (Math.abs(ny - b.y) > 0.04) {
+        b.y = ny;
+        B.dirty.add(b.id);
+      }
+    }
+    // Re-sync ground-level rail points inside the modified area
+    if (this.rail2) {
+      const rRail2 = (radius + 16) * (radius + 16);
+      let railMoved = false;
+      for (const l of this.rail2.lines) {
+        if (l.elevated) continue;
+        for (let i = 0; i < l.x.length; i++) {
+          const dx = l.x[i] - cx, dz = l.z[i] - cz;
+          if (dx * dx + dz * dz > rRail2) continue;
+          const gh = T.heightAt(l.x[i], l.z[i]);
+          const my = T.meshY(l.x[i], l.z[i]);
+          const meshG = Math.max(gh, my);
+          if (meshG < T.seaLevel + 0.35) continue;
+          if (l.y[i] < meshG + 0.14) {
+            l.y[i] = meshG + 0.18;
+            railMoved = true;
+          }
+        }
+      }
+      if (railMoved) this.rail2.dirtyViews = true;
+    }
   }
 
   private attachAgents() {
@@ -339,7 +477,7 @@ export class World {
 
   /** Elevation for pedestrians: ground height, or the bridge deck height when crossing a bridge over water. */
   pedElevation(x: number, z: number): number {
-    const groundY = Math.max(0.2, this.terrain.heightAt(x, z));
+    const groundY = Math.max(0.2, this.terrain.meshY(x, z), this.terrain.heightAt(x, z));
     const R = this.roads;
     if (this.bridgeCacheVer !== R.topoVer) {
       this.bridgeCacheVer = R.topoVer;
@@ -729,9 +867,9 @@ export class World {
       if (!plan) continue;
       if (this.traffic.capacityLeft > 200) this.traffic.spawn(VType.Construction, plan.path, plan.startS, plan.destS, { kind: P_CONSTRUCTION, id: b.id, aux: 0 });
       if (this.peds.capacityLeft > 300) {
-        const pts = walkPoints(this.roads, plan, { x: from.x, z: from.z }, doorOf(this.roads, b));
+        const wp3 = walkPath(this.roads, plan, { x: from.x, z: from.z }, doorOf(this.roads, b));
         const n = 1 + Math.floor(this.rng.next() * 3);
-        for (let k = 0; k < n; k++) this.peds.spawn(pts, -1, this.rng.range(1.2, 1.5), PED_FLAG_WORKER, 0.13);
+        for (let k = 0; k < n; k++) this.peds.spawn(wp3.pts, -1, this.rng.range(1.2, 1.5), PED_FLAG_WORKER, 0.13, 2, wp3.ys);
       }
     }
   }
@@ -930,6 +1068,7 @@ export class World {
     e.upgrading = false;
     if (e.upgradeTo) Object.assign(e, e.upgradeTo);
     e.upgradeTo = undefined;
+    this.terraformRoadEdge(e);
     this.roads.computePts(e);
     this.clearTreesForEdge(e);
     this.roads.updateNodeGeom(this.roads.nodes[e.a]);
@@ -1087,7 +1226,11 @@ export class World {
     const lv = this.transitSys?.views(); if (lv?.length) diff.lines = lv;
     if (this.happen) {
       if (Math.abs(this.happen.floodLevel - this.sentFlood) > 0.1) { this.sentFlood = this.happen.floodLevel; diff.floodLevel = this.happen.floodLevel; }
-      if (this.happen.dikesDirty) { this.happen.dikesDirty = false; diff.dikes = this.happen.dikes; diff.heights = this.terrain.heights.slice(); }
+      if (this.happen.dikesDirty) { this.happen.dikesDirty = false; diff.dikes = this.happen.dikes; this.terraforming.heightsDirty = true; }
+    }
+    if (this.terraforming.heightsDirty) {
+      this.terraforming.heightsDirty = false;
+      diff.heights = this.terrain.heights.slice();
     }
     if (this.utils?.dirtyLines.size) { diff.powerLines = [...this.utils.dirtyLines].map((id) => ({ ...this.utils.powerLines[id] })); this.utils.dirtyLines.clear(); }
     this.diffHook?.(diff);

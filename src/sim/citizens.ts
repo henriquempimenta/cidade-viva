@@ -3,7 +3,7 @@ import { FIRST_F, FIRST_M, LAST } from '../shared/names';
 import { MinHeap } from './heap';
 import type { Building } from './buildings';
 import type { World } from './world';
-import { activePlan, activePlanFromPoint, carPlan, carPlanFromNode, carPlanToNode, doorOf, pathLength, walkPoints, type CarPlan } from './trips';
+import { activePlan, activePlanFromPoint, carPlan, carPlanFromNode, carPlanToNode, doorOf, pathLength, walkPath, type CarPlan } from './trips';
 import { P_CITIZEN, P_FUNERAL, P_MOVING } from './traffic';
 import { PED_FLAG_BIKE } from './peds';
 import type { PlaceCat } from './places';
@@ -574,8 +574,8 @@ export class Citizens {
     const speed = mode === 1 ? r.range(4, 5.5) : r.range(1.2, 1.5) * (this.age[i] > 70 ? 0.75 : 1);
     const activeRoute = walkP ?? (carP && carP.path.every((de) => { const e = w.roads.edges[de >> 1]; return !!e && e.deck === undefined; }) ? carP : null);
     if (activeRoute && w.peds.capacityLeft > 30) {
-      const pts = walkPoints(w.roads, activeRoute, doorOf(w.roads, from), doorOf(w.roads, to));
-      const slot = w.peds.spawn(pts, i, speed, (mode === 1 ? PED_FLAG_BIKE : 0) | (this.tourist[i] ? PED_FLAG_TOURIST | (a === Act.Hotel ? PED_FLAG_LUGGAGE : 0) : 0), this.colorOf(i));
+      const wp3 = walkPath(w.roads, activeRoute, doorOf(w.roads, from), doorOf(w.roads, to));
+      const slot = w.peds.spawn(wp3.pts, i, speed, (mode === 1 ? PED_FLAG_BIKE : 0) | (this.tourist[i] ? PED_FLAG_TOURIST | (a === Act.Hotel ? PED_FLAG_LUGGAGE : 0) : 0), this.colorOf(i), 0, wp3.ys);
       if (slot >= 0) { this.state[i] = ST_WALK; this.slot[i] = slot; return; }
     }
     this.virtualArrive(i, refLen / speed);
@@ -615,8 +615,8 @@ export class Citizens {
     // always route along sidewalks & crosswalks (never spawn a 2-point straight-line walk through buildings)
     const wp = activePlanFromPoint(w.roads, x, z, dest, 1600);
     if (!wp) return false;
-    const pts = walkPoints(w.roads, wp, { x, z }, door);
-    const slot = w.peds.spawn(pts, i, speed, this.tourist[i] ? PED_FLAG_TOURIST : 0, this.colorOf(i));
+    const wp3 = walkPath(w.roads, wp, { x, z }, door);
+    const slot = w.peds.spawn(wp3.pts, i, speed, this.tourist[i] ? PED_FLAG_TOURIST : 0, this.colorOf(i), 0, wp3.ys);
     if (slot < 0) return false;
     // return abandoned household car cleanly to home garage (never clone or strand it)
     const h = this.households.get(this.hh[i]);
@@ -1011,7 +1011,7 @@ export class Citizens {
     const st = this.state[i];
     const s = this.slot[i];
     if (st === ST_CAR && s >= 0 && w.traffic.active[s]) { w.traffic.computePose(s); return { x: w.traffic.x[s], y: w.traffic.y[s], z: w.traffic.z[s], h: w.traffic.h[s], inside: false, building: -1 }; }
-    if (st === ST_WALK && s >= 0 && w.peds.active[s]) { w.peds.pose(s); return { x: w.peds.x[s], y: w.pedElevation(w.peds.x[s], w.peds.z[s]), z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
+    if (st === ST_WALK && s >= 0 && w.peds.active[s]) { w.peds.pose(s); return { x: w.peds.x[s], y: w.peds.y[s], z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     if (st === ST_TRANSIT) { const p = w.transit2?.position(i); if (p) return p; }
     if (st === ST_VIRTUAL) {
       const dest = w.buildings.byId.get(this.tripDest[i]);

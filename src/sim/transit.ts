@@ -5,7 +5,7 @@ import type { Building } from './buildings';
 import { Act, ST_IN, ST_TRANSIT } from './citizens';
 import { projSeg, type REdge } from './roads';
 import { P_BUS } from './traffic';
-import { activePlanEdges, activePlanFromEdge, activePlanFromPoint, activePlanToEdge, activePlanToPoint, doorOf, walkPoints } from './trips';
+import { activePlanEdges, activePlanFromEdge, activePlanFromPoint, activePlanToEdge, activePlanToPoint, doorOf, walkPath } from './trips';
 import type { World } from './world';
 import { KINDS } from '../shared/catalog';
 
@@ -298,8 +298,8 @@ export class Transit {
       // Always route via real sidewalks & crosswalks — never spawn a 2-point straight-line cut through buildings
       const wp = this.planWalkToStop(from, st);
       if (wp) {
-        const pts = walkPoints(w.roads, wp, door, st);
-        const slot = w.peds.spawn(pts, i, 1.35, 0, 0);
+        const wp3 = walkPath(w.roads, wp, door, st);
+        const slot = w.peds.spawn(wp3.pts, i, 1.35, 0, 0, 0, wp3.ys);
         if (slot >= 0) { w.citizens.slot[i] = slot; w.citizens.state[i] = ST_TRANSIT; return true; }
       }
     }
@@ -433,8 +433,8 @@ export class Transit {
         }
       }
       if (wp && w.peds.capacityLeft > 40) {
-        const pts = walkPoints(w.roads, wp, { x: fx, z: fz }, st);
-        const ns = w.peds.spawn(pts, cid, 1.35, 0, 0);
+        const wp3 = walkPath(w.roads, wp, { x: fx, z: fz }, st);
+        const ns = w.peds.spawn(wp3.pts, cid, 1.35, 0, 0, 0, wp3.ys);
         if (ns >= 0) { w.citizens.slot[cid] = ns; continue; }
       }
       this.giveUp(cid);
@@ -459,7 +459,8 @@ export class Transit {
     // stand in an orderly FIFO queue on the sidewalk beside the shelter, facing the road
     if (w.peds.capacityLeft > 60) {
       const [px, pz, h] = this.queuePose(st, idx);
-      const slot = w.peds.spawn([px, pz, px + Math.cos(h) * 0.05, pz + Math.sin(h) * 0.05], i, 0.01, PED_FLAG_WAITING, 0);
+      const stopY = Math.max(0.2, w.terrain.meshY(px, pz), w.terrain.heightAt(px, pz)) + 0.27;
+      const slot = w.peds.spawn([px, pz, px + Math.cos(h) * 0.05, pz + Math.sin(h) * 0.05], i, 0.01, PED_FLAG_WAITING, 0, 4, [stopY, stopY]);
       if (slot >= 0) { w.peds.hold(slot); w.citizens.slot[i] = slot; }
     } else w.citizens.slot[i] = -1;
   }
@@ -501,8 +502,8 @@ export class Transit {
           const door = doorOf(w.roads, dest);
           const wp = this.planWalkFromStop(st, dest);
           if (wp) {
-            const pts = walkPoints(w.roads, wp, st, door);
-            const slot = w.peds.spawn(pts, i, 1.35, 0, 0);
+            const wp3 = walkPath(w.roads, wp, st, door);
+            const slot = w.peds.spawn(wp3.pts, i, 1.35, 0, 0, 0, wp3.ys);
             if (slot >= 0) { w.citizens.slot[i] = slot; continue; }
           }
         }
@@ -954,7 +955,7 @@ export class Transit {
     const r = this.rides.get(i);
     if (!r) return null;
     const s = w.citizens.slot[i];
-    if (s >= 0 && w.peds.active[s] && w.peds.citizen[s] === i) { w.peds.pose(s); return { x: w.peds.x[s], y: w.pedElevation(w.peds.x[s], w.peds.z[s]), z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
+    if (s >= 0 && w.peds.active[s] && w.peds.citizen[s] === i) { w.peds.pose(s); return { x: w.peds.x[s], y: w.peds.y[s], z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     const l = this.lines.find((x) => x.id === r.line);
     if (!l) return null;
     if (r.phase === 2) {

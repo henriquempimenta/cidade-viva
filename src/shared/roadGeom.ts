@@ -3,6 +3,8 @@ import { LANE_WIDTH, RoadClass } from './constants';
 export const SIDEWALK_WIDTH = 2.6;
 export const SIDEWALK_CENTER = SIDEWALK_WIDTH * 0.5; // 1.3 m outside carriageway edge
 export const CROSSWALK_INSET = 2.2;
+export const CROSSWALK_HALF_LEN = 1.4;
+export const STOP_LINE_GAP = 0.25;
 export const CURB_WAIT_OFFSET = 1.35;
 export const QUEUE_OFFSET = 1.0;
 export const SHELTER_OFFSET = 2.1;
@@ -55,6 +57,22 @@ export function hasEndCrosswalk(
   if (e.cls >= RoadClass.Local && e.cls <= RoadClass.Avenue) return true;
   if (e.cls === RoadClass.Highway && nodeDeg >= 3 && !nodeInterchange && nodeHasUrban) return true;
   return false;
+}
+
+/**
+ * Exact distance from a junction node center to the outer (approaching-traffic) edge of the painted
+ * zebra crosswalk plus stop-line buffer. Shared identically by Traffic.stopTrim() and RoadsLayer stop bars.
+ */
+export function crosswalkStopBack(
+  e: { cls: number; bridge?: boolean; elevated?: boolean; tunnel?: boolean; deck?: number },
+  len: number,
+  renderR: number,
+  nodeDeg: number,
+  nodeHasUrban: boolean,
+  nodeInterchange: boolean,
+): number {
+  if (renderR <= 0 || !hasEndCrosswalk(e, len, nodeDeg, nodeHasUrban, nodeInterchange)) return 0;
+  return renderR * 0.92 + CROSSWALK_INSET + CROSSWALK_HALF_LEN + STOP_LINE_GAP;
 }
 
 /**

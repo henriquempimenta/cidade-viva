@@ -199,6 +199,20 @@ export class Terrain {
     return this.sample(this.heights, x, z);
   }
 
+  /** Height matching the exact planar triangles of Three.js PlaneGeometry (same diagonal as TerrainView.meshY). */
+  meshY(x: number, z: number): number {
+    const { hres, step, heights } = this;
+    const fx = clamp(x / step, 0, hres - 1.0001);
+    const fz = clamp(z / step, 0, hres - 1.0001);
+    const i = Math.floor(fx), j = Math.floor(fz);
+    const u = fx - i, v = fz - j;
+    const ha = heights[j * hres + i];
+    const hd = heights[j * hres + i + 1];
+    const hb = heights[(j + 1) * hres + i];
+    const hc = heights[(j + 1) * hres + i + 1];
+    return u + v <= 1 ? ha + (hd - ha) * u + (hb - ha) * v : hc + (hb - hc) * (1 - u) + (hd - hc) * (1 - v);
+  }
+
   slopeAt(x: number, z: number): number {
     const e = 6;
     const dx = (this.heightAt(x + e, z) - this.heightAt(x - e, z)) / (2 * e);

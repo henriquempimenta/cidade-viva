@@ -13,7 +13,13 @@ export function laneOffset(e: REdge, lane: number): number {
   return med + (lane + 0.5) * LANE_WIDTH + (e.lat ?? 0);
 }
 
-/** Vehicles on the road graph, car-following by the Intelligent Driver Model. */
+/**
+ * Vehicles on the road graph, car-following by the Intelligent Driver Model.
+ *
+ * Coordinate convention: `s[i]` is the vehicle's longitudinal CENTER along its directed edge,
+ * matching the centered 3D meshes (`[-len/2, +len/2]`). Front bumper = `s[i] + len[i] / 2`,
+ * rear bumper = `s[i] - len[i] / 2`.
+ */
 export class Traffic {
   max = 0;
   active = new Uint8Array(0);
@@ -41,13 +47,18 @@ export class Traffic {
   origin = new Int32Array(0);
   dest = new Int32Array(0);
   dwell = new Float32Array(0);
+  /** last bus stop index served on the current edge (prevents re-triggering the same stop) */
+  lastStopKey = new Int32Array(0);
   path: (number[] | null)[] = [];
   private free: number[] = [];
   count = 0;
   virtualTrips = 0;
   onArrive: (slot: number) => void = () => {};
   onStuck: (slot: number) => void = () => {};
-  onStop: (slot: number, node: number) => boolean = () => false; // buses: return true to dwell
+  /** bus next stop lookup along current directed edge; returns stop index & center s if demand exists */
+  nextStop: (slot: number, edge: number, dir: number, curS: number, lastStopIdx: number) => { stopIdx: number; s: number } | null = () => null;
+  /** bus curb stop callback: returns dwell seconds (> 0 only if someone boarded or alighted) */
+  onStop: (slot: number, stopIdx: number) => number = () => 0;
   private laneArr: number[][] = [];
   private usedKeys: number[] = [];
   rain = 0;
@@ -68,6 +79,7 @@ export class Traffic {
       const C = (a as unknown as { constructor: new (n: number) => Float32Array }).constructor;
       const b = new C(n); b.set(a as Float32Array); self[k] = b;
     }
+    this.lastStopKey.fill(-1, old);
     const jp = new Float32Array(n * 6); jp.set(this.jp); this.jp = jp;
     for (let i = old; i < n; i++) this.path.push(null);
     for (let i = n - 1; i >= old; i--) this.free.push(i);
@@ -93,7 +105,9 @@ export class Traffic {
     const lanes = e.lanes;
     const vlen = VTYPE_LEN[type] ?? 4.5;
     const pref = type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus ? lanes - 1 : Math.max(0, lanes - 1 - (e.busLane && lanes > 1 ? 1 : 0));
-    const s0 = Math.max(this.sStart(e, de & 1), Math.min(startS, this.sEnd(e, de & 1) - 1));
+    const lo = this.sStart(e, de & 1) + vlen * 0.5;
+    const hi = Math.max(lo, this.sEnd(e, de & 1) - vlen * 0.5 - 0.5);
+    const s0 = Math.max(lo, Math.min(startS, hi));
     // reserve real road space: a vehicle never materialises on top of another one
     const place = this.findRoom(e, de & 1, pref, s0, vlen);
     if (!place) { this.spawnRefused++; return -1; }
@@ -109,7 +123,7 @@ export class Traffic {
     // compliance with the posted limit: drivers choose 88–100 % of it (nobody exceeds it except sirens, see step())
     const vf = 0.88 + ((slot * 2654435761 + this.gen[slot] * 97) >>> 0) % 1000 / 1000 * 0.12;
     this.v0f[slot] = vf;
-    this.len[slot] = VTYPE_LEN[type] ?? 4.5;
+    this.len[slot] = vlen;
     this.lat[slot] = 0;
     this.stuck[slot] = 0;
     this.flags[slot] = flags;
@@ -121,6 +135,7 @@ export class Traffic {
     this.pKind[slot] = payload.kind; this.pId[slot] = payload.id; this.pAux[slot] = payload.aux;
     this.origin[slot] = origin; this.dest[slot] = dest;
     this.dwell[slot] = 0;
+    this.lastStopKey[slot] = -1;
     this.count++;
     this.occupy(slot);
     e.count[de & 1]++;
@@ -139,26 +154,30 @@ export class Traffic {
     return arr ?? [];
   }
 
-  /** does [s-len, s] on this lane overlap another vehicle (with the entry gap)? */
+  /** does centered footprint [s - len/2, s + len/2] on this lane overlap another vehicle (with entry gap)? */
   laneFree(e: REdge, dir: number, lane: number, s: number, len: number, self = -1): boolean {
     const G = Traffic.ENTRY_GAP;
     const ss = this.sStart(e, dir);
+    const myLo = s - len * 0.5;
+    const myHi = s + len * 0.5;
     for (const o of this.occupants(e, dir, lane)) {
       if (o === self || !this.active[o] || this.edge[o] !== e.id || this.dir[o] !== dir || this.lane[o] !== lane) continue;
       const so = this.s[o];
+      const hlo = this.len[o] * 0.5;
       // a vehicle still crossing the junction box has already reserved [sStart, sStart + len] on this exit lane
-      const lo = so < ss ? ss : so - this.len[o];
-      const hi = so < ss ? ss + this.len[o] : so;
-      if (s + G > lo && s - len - G < hi) return false;
+      const lo = so - hlo < ss ? ss : so - hlo;
+      const hi = so - hlo < ss ? Math.max(ss + this.len[o], so + hlo) : so + hlo;
+      if (myHi + G > lo && myLo - G < hi) return false;
     }
     return true;
   }
 
-  /** a free lane position at or near s0 (moving back towards the entrance, then forward), or null */
+  /** a free centered lane position at or near s0 (moving back towards the entrance, then forward), or null */
   findRoom(e: REdge, dir: number, pref: number, s0: number, len: number): [number, number] | null {
     const lanes: number[] = [pref];
     for (let l = 0; l < e.lanes; l++) if (l !== pref) lanes.push(l);
-    const lo = this.sStart(e, dir) + len, hi = this.sEnd(e, dir) - 1;
+    const lo = this.sStart(e, dir) + len * 0.5;
+    const hi = Math.max(lo, this.sEnd(e, dir) - len * 0.5 - 0.5);
     const offs = [0, -6, 6, -12, 12, -20, 20];
     for (const d of offs) for (const l of lanes) {
       const s = s0 + d;
@@ -177,10 +196,21 @@ export class Traffic {
     arr.push(i);
   }
 
+  private releaseJunction(slot: number) {
+    const j = this.jnode[slot];
+    if (j < 0) return;
+    const node = this.R.nodes[j];
+    if (node) {
+      const idx = node.jSlots.indexOf(slot);
+      if (idx >= 0) node.jSlots.splice(idx, 1);
+      node.inJunction = node.jSlots.length;
+    }
+    this.jnode[slot] = -1;
+  }
+
   despawn(slot: number) {
     if (!this.active[slot]) return;
-    const j = this.jnode[slot];
-    if (j >= 0) this.R.nodes[j].inJunction = Math.max(0, this.R.nodes[j].inJunction - 1);
+    this.releaseJunction(slot);
     this.active[slot] = 0;
     this.path[slot] = null;
     this.free.push(slot);
@@ -196,6 +226,48 @@ export class Traffic {
     let t = 0;
     for (let i = this.pidx[slot]; i < p.length; i++) { const e = this.R.edges[p[i] >> 1]; if (e?.alive) t += this.R.travelTime(e, p[i] & 1); }
     return t;
+  }
+
+  /** check whether entering `node` from (inEdge, inDir) toward (outEdge, outDir, outLane) conflicts with any vehicle currently inside `node` */
+  private junctionConflict(node: RNode, inEdge: REdge, inDir: number, outEdge: REdge, outDir: number, outLane: number, self: number): boolean {
+    if (!node.jSlots.length) return false;
+    const R = this.R;
+    let majorCls = -1;
+    if (node.interchange) {
+      for (const id of node.edges) majorCls = Math.max(majorCls, R.edges[id]?.cls ?? 0);
+    }
+    const [u1x, u1z] = this.dirVec(inEdge, inDir);
+    const [v1x, v1z] = this.dirVec(outEdge, outDir);
+    const cross1 = u1x * v1z - u1z * v1x; // > 0 right turn, < 0 left turn
+    for (let k = node.jSlots.length - 1; k >= 0; k--) {
+      const o = node.jSlots[k];
+      if (o === self) continue;
+      if (!this.active[o] || this.jnode[o] !== node.id) {
+        node.jSlots.splice(k, 1);
+        node.inJunction = node.jSlots.length;
+        continue;
+      }
+      const op = this.path[o];
+      const opi = this.pidx[o];
+      const oInDe = op && opi > 0 ? op[opi - 1] : -1;
+      const oInEdge = oInDe >= 0 ? R.edges[oInDe >> 1] : null;
+      const oOutEdge = R.edges[this.edge[o]];
+      if (!oInEdge || !oOutEdge) return true;
+      // grade-separated interchange: viaduct major road does not conflict with surface minor road
+      if (node.interchange && (inEdge.cls === majorCls) !== (oInEdge.cls === majorCls)) continue;
+      // same incoming edge & parallel lanes heading onto the same exit edge
+      if (oInEdge.id === inEdge.id && oOutEdge.id === outEdge.id && this.lane[o] !== outLane) continue;
+      // opposing straight or right-turn movements do not cross each other
+      const [u2x, u2z] = this.dirVec(oInEdge, oInDe & 1);
+      const [v2x, v2z] = this.dirVec(oOutEdge, this.dir[o]);
+      const dotIn = u1x * u2x + u1z * u2z;
+      if (dotIn < -0.7 && oOutEdge.id !== outEdge.id) {
+        const cross2 = u2x * v2z - u2z * v2x;
+        if (cross1 > -0.35 && cross2 > -0.35) continue;
+      }
+      return true;
+    }
+    return false;
   }
 
   step(dt: number, nodesSignal: (n: RNode, inEdge: REdge, dir: number, distToStop: number, waited: number) => boolean) {
@@ -231,6 +303,7 @@ export class Traffic {
       const eid = (k >> 2) >> 1, dir = (k >> 2) & 1;
       const e = R.edges[eid];
       if (!e || !e.alive) { for (const i of arr) this.despawn(i); continue; }
+      const sStart = this.sStart(e, dir);
       const sEnd = this.sEnd(e, dir);
       const vmax = R.speedLimit(e) * rainF;
       const sirenS = sirens.get(eid * 2 + dir);
@@ -239,62 +312,105 @@ export class Traffic {
         const i = arr[idx];
         if (!this.active[i]) continue;
         const emergency = (this.flags[i] & VEH_FLAG_SIREN) !== 0;
+        const hli = this.len[i] * 0.5;
         // yield to sirens approaching from behind
         let yieldNow = false;
         if (!emergency && sirenS !== undefined && sirenS < this.s[i] && this.s[i] - sirenS < 60) yieldNow = true;
         if (yieldNow) this.flags[i] |= VEH_FLAG_YIELD; else this.flags[i] &= ~VEH_FLAG_YIELD;
-        // dwell (bus stops, deliveries)
-        if (this.dwell[i] > 0) { this.dwell[i] -= dt; this.v[i] = 0; continue; }
+        // dwell (bus stops on the curb, deliveries)
+        if (this.dwell[i] > 0) {
+          this.dwell[i] -= dt;
+          this.v[i] = 0;
+          if (this.pKind[i] === P_BUS) this.lat[i] += (0.6 - this.lat[i]) * Math.min(1, dt * 3);
+          continue;
+        }
         const ty0 = this.type[i];
         const cap = MODE_CAP[ty0] ?? Infinity;
         // desired speed = posted limit × compliance, capped per mode; sirens get a declared, bounded exception
         const v0 = emergency ? Math.min(EMERGENCY_CAP, vmax + EMERGENCY_EXCESS) : Math.min(vmax * this.v0f[i], cap * rainF) * (yieldNow ? 0.3 : 1);
         let gap = 1e9, vl = 0;
-        // leader in lane
+        let vehGap = 1e9;
+        // leader in lane: exact bumper-to-bumper clearance using both vehicles' half-lengths
         for (let j = idx + 1; j < arr.length; j++) {
           const o = arr[j];
           // overtake only a vehicle that has actually pulled over to the curb
           if (emergency && this.flags[o] & VEH_FLAG_YIELD && this.lat[o] > 1.0) continue;
-          gap = this.s[o] - this.s[i] - this.len[o];
+          gap = this.s[o] - this.s[i] - hli - this.len[o] * 0.5;
+          vehGap = gap;
           vl = this.v[o];
           break;
+        }
+        // bus stop along the current edge (strictly outside intersections)
+        let busStopLat = 0;
+        let stopTarget: { stopIdx: number; s: number } | null = null;
+        let stopLimiting = false;
+        let dsStopLim = Infinity;
+        if (this.pKind[i] === P_BUS && this.jnode[i] < 0) {
+          const ns = this.nextStop(i, eid, dir, this.s[i], this.lastStopKey[i]);
+          if (ns && ns.s > sStart + 1 && ns.s < sEnd - 2) {
+            const dsStop = ns.s - this.s[i];
+            if (dsStop > -1.5 && dsStop < 48) {
+              stopTarget = ns;
+              if (dsStop < 24) busStopLat = 0.6;
+              // Compensate IDM_S0 so equilibrium (v=0, a=0) lands at dsStop = 0 instead of stalling at 2.2 m
+              const stopGapIdm = Math.max(0.1, dsStop + IDM_S0);
+              if (dsStop > -0.5 && stopGapIdm < gap) {
+                gap = stopGapIdm;
+                vl = 0;
+                stopLimiting = true;
+                dsStopLim = Math.max(0, dsStop);
+              }
+            }
+          }
         }
         const path = this.path[i]!;
         const pi = this.pidx[i];
         const last = pi >= path.length - 1;
-        const distEnd = sEnd - this.s[i];
+        // unified stop-line / transition reference: front bumper reaches sEnd when center reaches sEntry = sEnd - hli
+        const sEntry = Math.max(sStart + 0.5, sEnd - hli);
+        const distEnd = sEntry - this.s[i];
+        let blockedAtNode = false;
         if (gap > distEnd) {
           if (last) {
             const dg = this.destS[i] - this.s[i] + 3;
-            if (dg < gap) { gap = dg; vl = 0; }
+            if (dg < gap) { gap = dg; vl = 0; stopLimiting = false; }
           } else {
             const nde = path[pi + 1];
             const ne = R.edges[nde >> 1];
             const node = R.nodes[dir === 0 ? e.b : e.a];
             let ok = !!ne && ne.alive && ne.progress >= 1;
+            const nl = ok ? this.chooseLane(e, dir, ne, nde & 1, i) : 0;
             if (ok && !emergency) ok = nodesSignal(node, e, dir, distEnd, this.stuck[i]);
+            if (ok && node.edges.length >= 3) {
+              if (this.junctionConflict(node, e, dir, ne, nde & 1, nl, i)) ok = false;
+            }
             if (ok) {
               // room on next lane? (don't block the box)
-              const nl = this.chooseLane(e, dir, ne, nde & 1, i);
               const narr = this.laneArr[this.key(ne.id, nde & 1, nl)];
               if (narr && narr.length) {
                 const o = narr[0];
                 const ns = this.sStart(ne, nde & 1);
-                const room = this.s[o] < ns ? -1 : this.s[o] - ns - this.len[o];
+                const rearO = this.s[o] - this.len[o] * 0.5;
+                const room = rearO < ns ? -1 : rearO - ns;
                 // never squeeze into space shorter than the vehicle + entry gap ("don't block the box")
                 if (room < this.len[i] + Traffic.ENTRY_GAP) ok = false;
-                else { const g2 = distEnd + room + 6; if (g2 < gap) { gap = g2; vl = this.v[o]; } }
+                else { const g2 = Math.max(0, distEnd) + room + 4; if (g2 < gap) { gap = g2; vl = this.v[o]; stopLimiting = false; } }
               }
             }
-            if (!ok) { const g2 = distEnd - 1; if (g2 < gap) { gap = g2; vl = 0; } node.waitAcc += dt; }
+            if (!ok) {
+              blockedAtNode = true;
+              const g2 = Math.max(0.05, distEnd);
+              if (g2 < gap) { gap = g2; vl = 0; stopLimiting = false; }
+              node.waitAcc += dt;
+            }
           }
         }
-        // closed level crossing: a physical barrier, sirens included (they get no preemption from a train)
+        // closed level crossing: a physical barrier, sirens included (front bumper stops well before the track)
         if (crossing) {
           for (const ct of crossing) {
             const cs = dir === 0 ? ct * e.len : (1 - ct) * e.len;
-            const g2 = cs - 7 - this.s[i];
-            if (g2 > -2 && g2 < gap) { gap = Math.max(0.1, g2); vl = 0; }
+            const g2 = (cs - 5) - (this.s[i] + hli);
+            if (g2 > -2 && g2 < gap) { gap = Math.max(0.05, g2); vl = 0; stopLimiting = false; }
             if (g2 > -2 && g2 < 140 && this.v[i] < 1.5) this.crossWait.set(eid, (this.crossWait.get(eid) ?? 0) + dt);
           }
         }
@@ -308,20 +424,41 @@ export class Traffic {
         let nv = v + a * dt;
         if (nv < 0) nv = 0;
         let ds = (v + nv) * 0.5 * dt;
-        if (ds > gap - 0.5 && gap < 1e8) ds = Math.max(0, gap - 0.5);
+        // strict anti-overlap guard: keeps bumper-to-bumper spacing >= 0.85 m to any vehicle ahead
+        if (vehGap < 1e8 && ds > vehGap - 0.85) ds = Math.max(0, vehGap - 0.85);
+        if (stopLimiting) {
+          // brake cleanly right up to stopTarget.s without stalling 2.2 m short
+          if (ds > dsStopLim) ds = dsStopLim;
+        } else if (blockedAtNode) {
+          // keep front bumper strictly behind the stop line (never overhanging the crosswalk)
+          if (ds > Math.max(0, distEnd - 0.2)) ds = Math.max(0, distEnd - 0.2);
+        } else if (gap < 1e8 && ds > gap - 0.85) {
+          ds = Math.max(0, gap - 0.85);
+        }
         this.v[i] = nv;
         this.s[i] += ds;
+        // did a bus arrive at its curb stop on this edge?
+        if (stopTarget) {
+          const rem = stopTarget.s - this.s[i];
+          if (rem <= 1.2 && (this.v[i] < 2.8 || rem <= 0.35)) {
+            this.v[i] = 0;
+            this.lat[i] = 0.6;
+            this.lastStopKey[i] = stopTarget.stopIdx;
+            const dwellSecs = this.onStop(i, stopTarget.stopIdx);
+            if (dwellSecs > 0) this.dwell[i] = dwellSecs;
+          }
+        }
         if (a < -1.2) this.flags[i] |= VEH_FLAG_BRAKE; else this.flags[i] &= ~VEH_FLAG_BRAKE;
-        if (nv < 0.5) { e.stopped[dir]++; this.stuck[i] += dt; } else this.stuck[i] = Math.max(0, this.stuck[i] - dt * 2);
+        if (nv < 0.5 && this.dwell[i] <= 0) { e.stopped[dir]++; this.stuck[i] += dt; } else this.stuck[i] = Math.max(0, this.stuck[i] - dt * 2);
         // acoustics: what this vehicle adds to the street's noise right now
         const snd = e.snd ?? (e.snd = new Float32Array(5));
         const ty = this.type[i];
         const sc = ty === VType.Moto ? 1 : ty === VType.Car || ty === VType.Taxi || ty === VType.Ambulance || ty === VType.Police || ty === VType.Van || ty === VType.Hearse ? 0 : 2;
         snd[sc] += vehicleSound(sc, nv, a, e.cls === RoadClass.Dirt);
         snd[3] += nv; snd[4]++;
-        // lateral offset (yield to the curb)
-        const latT = yieldNow ? 1.4 : 0;
-        this.lat[i] += (latT - this.lat[i]) * Math.min(1, dt * 1.5);
+        // lateral offset (yield to curb or pull into bus stop)
+        const latT = yieldNow ? 1.4 : busStopLat;
+        this.lat[i] += (latT - this.lat[i]) * Math.min(1, dt * 1.8);
       }
     }
     // 3. transitions
@@ -330,10 +467,10 @@ export class Traffic {
       const e = R.edges[this.edge[i]];
       const dir = this.dir[i];
       if (!e?.alive) { this.onStuck(i); this.despawn(i); continue; }
-      // left the junction?
-      if (this.jnode[i] >= 0 && this.s[i] >= this.sStart(e, dir)) {
-        R.nodes[this.jnode[i]].inJunction = Math.max(0, R.nodes[this.jnode[i]].inJunction - 1);
-        this.jnode[i] = -1;
+      // left the junction once the body clears sStart?
+      if (this.jnode[i] >= 0) {
+        const releaseS = Math.min(this.sStart(e, dir) + this.len[i] * 0.4, this.sEnd(e, dir) - 0.5);
+        if (this.s[i] >= releaseS) this.releaseJunction(i);
       }
       const path = this.path[i]!;
       const pi = this.pidx[i];
@@ -343,28 +480,45 @@ export class Traffic {
         continue;
       }
       const sEnd = this.sEnd(e, dir);
-      if (this.s[i] >= sEnd - 0.05) {
+      const vlen = this.len[i];
+      const sEntry = Math.max(this.sStart(e, dir) + 0.5, sEnd - vlen * 0.5);
+      if (this.s[i] >= sEntry - 0.05) {
         const nde = path[pi + 1];
         const ne = R.edges[nde >> 1];
         if (!ne || !ne.alive) { this.onStuck(i); this.despawn(i); continue; }
         const node = R.nodes[dir === 0 ? e.b : e.a];
-        if (this.pKind[i] === P_BUS && this.onStop(i, node.id)) { this.dwell[i] = 14; }
+        const emergency = (this.flags[i] & VEH_FLAG_SIREN) !== 0;
         let nl = this.chooseLane(e, dir, ne, nde & 1, i);
-        // the exit lane must have physical room for the whole vehicle before it commits to the junction
-        const vlen = this.len[i];
-        const entryS = this.sStart(ne, nde & 1) + vlen;
+        // keep signal & conflict checks unified at the stop line sEntry (front bumper never overhangs crosswalk)
+        if (!emergency && !nodesSignal(node, e, dir, Math.max(0, sEntry - this.s[i]), this.stuck[i])) {
+          this.s[i] = Math.min(this.s[i], sEntry - 0.06);
+          this.v[i] = 0;
+          if (this.stuck[i] > 50) { this.onStuck(i); this.despawn(i); }
+          continue;
+        }
+        // block transition if a conflicting vehicle is actively inside the junction box
+        if (node.edges.length >= 3 && this.junctionConflict(node, e, dir, ne, nde & 1, nl, i)) {
+          this.s[i] = Math.min(this.s[i], sEntry - 0.06);
+          this.v[i] = 0;
+          if (this.stuck[i] > 50) { this.onStuck(i); this.despawn(i); }
+          continue;
+        }
+        // the exit lane must have physical room for the whole centered vehicle before it commits to the junction
+        const entryS = this.sStart(ne, nde & 1) + vlen * 0.5;
         if (!this.laneFree(ne, nde & 1, nl, entryS, vlen, i)) {
           let alt = -1;
           for (let l = 0; l < ne.lanes; l++) if (l !== nl && this.laneFree(ne, nde & 1, l, entryS, vlen, i)) { alt = l; break; }
-          if (alt < 0) { this.s[i] = sEnd - 0.06; this.v[i] = 0; if (this.stuck[i] > 50) { this.onStuck(i); this.despawn(i); } continue; }
+          if (alt < 0) { this.s[i] = Math.min(this.s[i], sEntry - 0.06); this.v[i] = 0; if (this.stuck[i] > 50) { this.onStuck(i); this.despawn(i); } continue; }
           nl = alt;
         }
-        this.setJunction(i, e, dir, this.lane[i], ne, nde & 1, nl, node);
+        this.setJunction(i, e, dir, this.lane[i], ne, nde & 1, nl, node, sEntry);
         this.edge[i] = ne.id; this.dir[i] = nde & 1; this.lane[i] = nl;
-        this.s[i] = this.sStart(ne, nde & 1) - this.jlen[i] + Math.max(0, this.s[i] - sEnd);
+        this.s[i] = this.sStart(ne, nde & 1) - this.jlen[i] + Math.max(0, this.s[i] - sEntry);
         this.pidx[i] = pi + 1;
+        this.lastStopKey[i] = -1;
         this.jnode[i] = node.id;
-        node.inJunction++;
+        node.jSlots.push(i);
+        node.inJunction = node.jSlots.length;
         ne.count[nde & 1]++;
         this.occupy(i);
         if (this.origin[i] >= 0) R.logOD(ne, this.origin[i], this.dest[i]);
@@ -389,6 +543,7 @@ export class Traffic {
           const cut = d === 0 ? cut0 : cut1;
           if (this.s[i] < cut) this.edge[i] = pair[0] >> 1;
           else { this.edge[i] = pair[1] >> 1; this.s[i] -= cut; this.pidx[i]++; }
+          this.lastStopKey[i] = -1;
         }
         if (k === p.length - 2 && this.pidx[i] <= k + 1) {
           // destination offset was measured on the old edge
@@ -397,7 +552,7 @@ export class Traffic {
           else p.pop(); // the door is on the first half: the trip ends there
         }
       }
-      if (this.edge[i] === old.id) { this.edge[i] = (this.dir[i] === 0 ? e1 : e2).id; }
+      if (this.edge[i] === old.id) { this.edge[i] = (this.dir[i] === 0 ? e1 : e2).id; this.lastStopKey[i] = -1; }
     }
   }
 
@@ -443,7 +598,7 @@ export class Traffic {
     const L = ne.lanes;
     if (L <= 1) return 0;
     const bus = t === VType.Bus || t === VType.TourBus || t === VType.SchoolBus;
-    if (bus && ne.busLane) return L - 1;
+    if (bus) return L - 1; // buses stay in the rightmost curb/bus lane for stops
     // turn direction at the next-next junction
     const path = this.path[slot]!;
     const pi = this.pidx[slot] + 1;
@@ -487,8 +642,8 @@ export class Traffic {
     return [x0 + (x1 - x0) * u - tz * off, y0 + (y1 - y0) * u, z0 + (z1 - z0) * u + tx * off, Math.atan2(tz, tx)];
   }
 
-  private setJunction(i: number, e: REdge, dir: number, lane: number, ne: REdge, ndir: number, nl: number, node: RNode) {
-    const p0 = this.point(e, dir, lane, this.sEnd(e, dir));
+  private setJunction(i: number, e: REdge, dir: number, lane: number, ne: REdge, ndir: number, nl: number, node: RNode, fromS = this.sEnd(e, dir)) {
+    const p0 = this.point(e, dir, lane, fromS);
     const p2 = this.point(ne, ndir, nl, this.sStart(ne, ndir));
     const [hx, hz] = this.dirVec(e, dir), [nx, nz] = this.dirVec(ne, ndir);
     // intersection of the incoming and outgoing tangents
@@ -505,7 +660,7 @@ export class Traffic {
     void node;
   }
 
-  /** compute world positions for snapshot / follow */
+  /** compute world positions for snapshot / follow (s[i] is vehicle center) */
   computePose(i: number) {
     const e = this.R.edges[this.edge[i]];
     if (!e) return;

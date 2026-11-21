@@ -36,8 +36,16 @@ export class Overlays {
   private stopGroup = new THREE.Group();
   private arcGroup = new THREE.Group();
   private odGroup = new THREE.Group();
-  private shelterGeo = new THREE.BoxGeometry(3, 2.6, 1.4);
-  private shelterMat = new THREE.MeshStandardMaterial({ color: 0x4a6a8a, transparent: true, opacity: 0.85 });
+  private shelterRoofGeo = new THREE.BoxGeometry(3.2, 0.14, 1.15);
+  private shelterBackGeo = new THREE.BoxGeometry(3.0, 2.15, 0.08);
+  private shelterSideGeo = new THREE.BoxGeometry(0.08, 2.15, 0.95);
+  private shelterBenchGeo = new THREE.BoxGeometry(2.1, 0.42, 0.36);
+  private shelterPostGeo = new THREE.CylinderGeometry(0.055, 0.055, 2.5, 6);
+  private shelterPoleGeo = new THREE.CylinderGeometry(0.06, 0.06, 2.85, 6);
+  private shelterSignGeo = new THREE.CylinderGeometry(0.38, 0.38, 0.12, 12).rotateX(Math.PI / 2);
+  private shelterFrameMat = new THREE.MeshStandardMaterial({ color: 0x3b4856, roughness: 0.55, metalness: 0.35 });
+  private shelterGlassMat = new THREE.MeshStandardMaterial({ color: 0x8fb8d8, transparent: true, opacity: 0.45, roughness: 0.25 });
+  private shelterBenchMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3c, roughness: 0.85 });
 
   constructor(private app: App) {
     this.G = app.init.fieldRes;
@@ -159,15 +167,38 @@ export class Overlays {
         this.lineGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: l.color, linewidth: 3 })));
       }
       for (let i = 0; i < l.stops.length; i += 2) {
+        const stopIdx = i / 2;
         const x = l.stops[i], z = l.stops[i + 1];
         const y = Math.max(0, this.app.terrain.heightAt(x, z));
         if (l.kind === 'bus' || l.kind === 'brt') {
-          // bus shelter on the sidewalk + colored sign
-          const sh = new THREE.Mesh(this.shelterGeo, this.shelterMat);
-          sh.position.set(x + 7, y + 1.3, z + 7);
-          const sign = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.15, 10).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: l.color }));
-          sign.position.set(x + 8.8, y + 2.9, z + 7);
-          this.stopGroup.add(sh, sign);
+          // bus shelter aligned on the back of the sidewalk, facing the carriageway (-Z local)
+          const poseIdx = stopIdx * 3;
+          const sx = l.stopPoses && poseIdx + 2 < l.stopPoses.length ? l.stopPoses[poseIdx] : x;
+          const sz = l.stopPoses && poseIdx + 2 < l.stopPoses.length ? l.stopPoses[poseIdx + 1] : z;
+          const angle = l.stopPoses && poseIdx + 2 < l.stopPoses.length ? l.stopPoses[poseIdx + 2] : 0;
+          const sy = Math.max(0.15, this.app.terrain.heightAt(sx, sz)) + 0.12;
+          const shelter = new THREE.Group();
+          shelter.position.set(sx, sy, sz);
+          shelter.rotation.y = -angle;
+          // open-front canopy shelter: local +X along road travel dir, local -Z facing road, local +Z back wall
+          const roof = new THREE.Mesh(this.shelterRoofGeo, this.shelterFrameMat);
+          roof.position.set(0, 2.45, 0);
+          const back = new THREE.Mesh(this.shelterBackGeo, this.shelterGlassMat);
+          back.position.set(0, 1.22, 0.46);
+          const sideL = new THREE.Mesh(this.shelterSideGeo, this.shelterGlassMat);
+          sideL.position.set(-1.5, 1.22, 0.02);
+          const bench = new THREE.Mesh(this.shelterBenchGeo, this.shelterBenchMat);
+          bench.position.set(-0.2, 0.25, 0.22);
+          const p1 = new THREE.Mesh(this.shelterPostGeo, this.shelterFrameMat);
+          p1.position.set(-1.5, 1.25, 0.46);
+          const p2 = new THREE.Mesh(this.shelterPostGeo, this.shelterFrameMat);
+          p2.position.set(1.5, 1.25, 0.46);
+          const pole = new THREE.Mesh(this.shelterPoleGeo, this.shelterFrameMat);
+          pole.position.set(1.85, 1.42, -0.32);
+          const sign = new THREE.Mesh(this.shelterSignGeo, new THREE.MeshBasicMaterial({ color: l.color }));
+          sign.position.set(1.85, 2.75, -0.32);
+          shelter.add(roof, back, sideL, bench, p1, p2, pole, sign);
+          this.stopGroup.add(shelter);
         }
         const mk = new THREE.Mesh(new THREE.SphereGeometry(3, 8, 6), new THREE.MeshBasicMaterial({ color: l.color }));
         mk.position.set(x, y + 12, z);

@@ -621,7 +621,10 @@ export class Rail {
     main.stations.push({ s: this.projectS(main, b.x, b.z).s, b: b.id, name, stop: main.stations.length });
     main.stations.sort((a, c) => a.s - c.s);
     // register as a transit line (citizens can ride between stations)
-    const stops: Stop[] = main.stations.map((st) => { const p = this.at(main, st.s); return { x: p[0], z: p[2], node: -1, s: st.s, name: st.name }; });
+    const stops: Stop[] = main.stations.map((st) => {
+      const p = this.at(main, st.s);
+      return { x: p[0], z: p[2], node: -1, edge: -1, dir: 0, s: st.s, curbX: p[0], curbZ: p[2], ux: Math.cos(p[3]), uz: Math.sin(p[3]), name: st.name };
+    });
     if (!main.transit) main.transit = w.transitSys.addRailLine('rail', 'Trem Regional', stops, [], HOUR_SECONDS * 1.5);
     else w.transitSys.replaceStops(main.transit, stops); // keeps riders bound to their stations, not to old indices
     main.transit.pts = main.x.flatMap((x, i) => [x, main.y[i], main.z[i]]);
@@ -686,7 +689,7 @@ export class Rail {
       const name = 'Metrô ' + w.districtName(b.x, b.z);
       b.name = name;
       l.stations.push({ s: stS, b: b.id, name, stop: stops.length });
-      stops.push({ x: p[0], z: p[2], node: -1, s: stS, name });
+      stops.push({ x: p[0], z: p[2], node: -1, edge: -1, dir: 0, s: stS, curbX: p[0], curbZ: p[2], ux: Math.cos(p[3]), uz: Math.sin(p[3]), name });
     }
     if (stops.length < 2) {
       // rollback: remove line and any single station placed

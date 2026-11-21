@@ -1,6 +1,7 @@
 import { segRectDist } from './geom';
 import { KINDS } from '../shared/catalog';
 import { DAY_SECONDS, DAYS_PER_SEASON, DAYS_PER_YEAR, ERA_POP, ERAS, HOUR_SECONDS, RoadClass, SEASONS } from '../shared/constants';
+import { edgeHalfWidth } from '../shared/roadGeom';
 import type { SimParams } from '../shared/params';
 import type { BuildingView, EdgeView, NodeView, RailEdgeView, WorldDiff, WorldInit } from '../shared/protocol';
 import { RNG, clamp } from '../shared/rng';
@@ -128,6 +129,7 @@ export class World {
     this.fields = new Fields(this.terrain);
     this.roads = new RoadNetwork(this.terrain, this.occ, this.rng.fork(11));
     this.buildings = new Buildings(this.occ, this.terrain, this.rng.fork(12));
+    this.roads.onEdgeAdded = (e) => this.clearTreesForEdge(e);
     this.market = new Market(this);
     this.growth = new RoadGrowth(this);
     this.events = new EventBus(() => ({ t: this.t, day: this.day }));
@@ -265,11 +267,7 @@ export class World {
     };
     this.roads.onSplit = (o, e1, e2, t) => {
       this.traffic.splitEdge(o, e1, e2, t);
-      for (const l of this.transitSys?.lines ?? []) {
-        if (!l.edges.has(o.id)) continue;
-        l.path = l.path.flatMap((de) => de >> 1 !== o.id ? [de] : (de & 1) === 0 ? [e1.id * 2, e2.id * 2] : [e2.id * 2 + 1, e1.id * 2 + 1]);
-        l.edges = new Set(l.path.map((d) => d >> 1));
-      }
+      this.transitSys?.onEdgeSplit(o, e1, e2, t);
     };
     this.peds = new Peds(this.terrain);
     this.hasCitizens = true;
@@ -296,7 +294,8 @@ export class World {
       describe: (i) => T.describe(i),
       position: (i) => T.position(i),
     };
-    this.traffic.onStop = T.onBusNode;
+    this.traffic.nextStop = T.nextBusStop;
+    this.traffic.onStop = T.onBusStop;
     this.crossingsSnapshot = this.rail2.crossingsSnapshot;
     this.tourismSys = new Tourism(this);
     this.tourism = this.tourismSys;
@@ -403,29 +402,34 @@ export class World {
 
   /** junction control: may a vehicle coming from edge e (direction dir) enter the node now? */
   nodeAllow = (n: RNode, e: REdge, dir: number, distToStop: number, waited = 0): boolean => {
+    void dir;
+    void waited;
     const deg = n.edges.length;
     if (deg < 3) return true;
     if (n.interchange) {
       let major = 0;
       for (const id of n.edges) major = Math.max(major, this.roads.edges[id].cls);
       if (e.cls === major) return true; // passes over the viaduct
-      return n.inJunction < 2 || waited > 5;
+      return n.inJunction === 0;
     }
     if (n.control === 2 || n.control === 4) {
       if (!n.phases.length) this.computePhases(n);
-      const ph = n.phases[Math.floor(n.phase / 2) % n.phases.length];
+      const sub = n.phase % 3;
+      if (sub === 2) return false; // all-red clearance interval
+      const ph = n.phases[Math.floor(n.phase / 3) % n.phases.length];
       const green = ph.includes(e.id);
       if (!green) return false;
-      if (n.phase % 2 === 1) return distToStop < 10; // yellow
+      if (sub === 1) return distToStop < 8 && distToStop > -1; // yellow
       return true;
     }
-    if (n.control === 3) return n.inJunction < 4 || waited > 12;
+    if (n.control === 3) return n.inJunction < 3;
     if (n.control === 1) {
       let major = 0;
       for (const id of n.edges) major = Math.max(major, this.roads.edges[id].cls);
-      return e.cls < major ? n.inJunction === 0 || waited > 9 : n.inJunction < 3;
+      return e.cls < major ? n.inJunction === 0 : n.inJunction < 2;
     }
-    return n.inJunction < 2 || waited > 6;
+    // uncontrolled junction: non-conflicting movements are filtered strictly by Traffic.junctionConflict
+    return n.inJunction < 2;
   };
 
   computePhases(n: RNode) {
@@ -452,26 +456,30 @@ export class World {
     }
     for (const n of this.signalNodes) {
       n.phaseT += dt;
-      const yellow = n.phase % 2 === 1;
+      const sub = n.phase % 3; // 0 green, 1 yellow (3s), 2 all-red clearance (2s)
       let green = 20;
       if (n.control === 4) {
         // smart signal: green proportional to queues of the current group
-        const grp = n.phases[Math.floor(n.phase / 2) % n.phases.length];
+        const grp = n.phases[Math.floor(n.phase / 3) % n.phases.length];
         let q = 0, qo = 0;
         for (const id of n.edges) { const e = this.roads.edges[id]; const s = e.stopped[0] + e.stopped[1]; if (grp.includes(id)) q += s; else qo += s; }
         green = Math.max(8, Math.min(40, 14 + (q - qo) * 2.5));
       }
-      if (n.phaseT > (yellow ? 3 : green)) { n.phaseT = 0; n.phase = (n.phase + 1) % (n.phases.length * 2); }
+      const dur = sub === 1 ? 3 : sub === 2 ? 2 : green;
+      if (n.phaseT > dur) { n.phaseT = 0; n.phase = (n.phase + 1) % (n.phases.length * 3); }
     }
   }
   signalsSnapshot = (): Int32Array => {
     const out: number[] = [];
     for (const n of this.signalNodes) {
       const sorted = [...n.edges].filter((id) => this.roads.edges[id].alive && this.roads.edges[id].progress >= 1).sort((a, b) => a - b);
-      const grp = n.phases[Math.floor(n.phase / 2) % n.phases.length] ?? [];
+      const sub = n.phase % 3;
       let mask = 0;
-      sorted.forEach((id, k) => { if (grp.includes(id)) mask |= 1 << k; });
-      if (n.phase % 2 === 1) mask |= 1 << 16;
+      if (sub !== 2) {
+        const grp = n.phases[Math.floor(n.phase / 3) % n.phases.length] ?? [];
+        sorted.forEach((id, k) => { if (grp.includes(id)) mask |= 1 << k; });
+        if (sub === 1) mask |= 1 << 16;
+      }
       out.push(n.id, mask);
     }
     return new Int32Array(out);
@@ -671,8 +679,28 @@ export class World {
   clearTreesAlong(path: P2[], hw: number) {
     for (let i = 0; i < path.length - 1; i++) {
       const a = path[i], b = path[i + 1];
-      this.buildings.clearTrees({ x: (a.x + b.x) / 2, z: (a.z + b.z) / 2, angle: Math.atan2(b.z - a.z, b.x - a.x), w: Math.hypot(b.x - a.x, b.z - a.z) + 6, d: hw * 2 });
+      this.buildings.clearTrees({ x: (a.x + b.x) / 2, z: (a.z + b.z) / 2, angle: Math.atan2(b.z - a.z, b.x - a.x), w: Math.hypot(b.x - a.x, b.z - a.z) + Math.max(6, hw * 2), d: hw * 2 });
     }
+  }
+
+  /** Clear trees along a newly created or widened road edge (carriageway + sidewalks + clearance). */
+  clearTreesForEdge(e: REdge) {
+    if (!e || !e.alive) return;
+    if (e.deck !== undefined && e.deck >= 0) return; // elevated/tunnel bypass over existing street
+    const a = this.roads.nodes[e.a], b = this.roads.nodes[e.b];
+    if (!a || !b) return;
+    const hw = edgeHalfWidth(e) + 3.2;
+    if (e.tunnel && e.deck !== undefined && e.deck < 0) {
+      // hill bore: clear only the open approaches, keep forest over the buried hill
+      const pts: P2[] = [];
+      for (let i = 0; i < e.pts.length; i += 3) {
+        if (e.pts[i + 1] < this.terrain.heightAt(e.pts[i], e.pts[i + 2]) - 6) continue;
+        pts.push({ x: e.pts[i], z: e.pts[i + 2] });
+      }
+      if (pts.length >= 2) this.clearTreesAlong(pts, hw);
+      return;
+    }
+    this.clearTreesAlong([{ x: a.x, z: a.z }, { x: b.x, z: b.z }], hw);
   }
 
   /** place a public building immediately (founding) or via the city hall (later) */
@@ -755,12 +783,14 @@ export class World {
       for (const m of h.members) this.citizens.addBio(m, `Foi despejad${this.citizens.sex[m] ? 'a' : 'o'}: ${b.name} será demolido`);
       this.economy.wantsToMove(h, 'despejo por demolição');
     }
+    this.citizens.onBuildingDemolished(b.id);
     b.households.length = 0;
     for (const x of [...b.workers]) this.economy.leaveJob(x);
     for (const x of [...b.students]) { this.economy.leaveSchool(x); this.economy.findSchool(x); }
   }
 
   onRoadStarted(e: REdge, motive: string) {
+    this.clearTreesForEdge(e);
     this.roadWorks.set(e.id, { motive, speed: 0.45 + this.rng.next() * 0.2, kind: 'new' });
     if (e.deck !== undefined && e.deckTot !== undefined) { this.roadWorks.get(e.id)!.speed = 0.55; return; } // structures announce themselves
     const a = this.roads.nodes[e.a], b = this.roads.nodes[e.b];
@@ -838,6 +868,7 @@ export class World {
     if (e.upgradeTo) Object.assign(e, e.upgradeTo);
     e.upgradeTo = undefined;
     this.roads.computePts(e);
+    this.clearTreesForEdge(e);
     this.roads.updateNodeGeom(this.roads.nodes[e.a]);
     this.roads.updateNodeGeom(this.roads.nodes[e.b]);
     this.roads.topoVer++;

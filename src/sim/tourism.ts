@@ -80,8 +80,16 @@ export class Tourism {
     const size = w.rng.int(1, 3);
     
     const h = C.newHousehold(hotel.id, 2, true);
-    h.car = w.rng.chance(0.3);
+    const station = w.buildings.list.find((b) => b.kind === 'railStation' && b.state === 'done');
+    const byTrain = !!station && w.rng.chance(0.4);
+    const byCar = !byTrain && w.rng.chance(0.3);
+    h.car = byCar;
+    h.carLoc = byCar ? hotel.id : -1;
+    h.carUser = -1;
+    h.carDriver = -1;
     h.money = 3000;
+    const until = w.day + w.rng.int(2, 4);
+    h.leaveDay = until;
     for (let k = 0; k < size; k++) {
       const i = C.add({ age: w.rng.range(18, 70), edu: 2, hh: h.id, tourist: true });
       if (i < 0) break;
@@ -90,16 +98,15 @@ export class Tourism {
       C.addBio(i, `Turista hospedado(a) no ${hotel.name}`);
       C.tripDest[i] = hotel.id; C.tripAct[i] = Act.Hotel; C.tripDur[i] = HOUR_SECONDS * 2; C.act[i] = Act.Hotel;
     }
-    this.stays.set(h.id, { hh: h.id, until: w.day + w.rng.int(2, 4), visited: new Set() });
+    this.stays.set(h.id, { hh: h.id, until, visited: new Set() });
     this.count += h.members.length;
     if (!this.firstGuest && h.members.length) {
       this.firstGuest = true;
       w.events.emit('tourists', hotel.x, hotel.z, 1, `Primeiros hóspedes no ${hotel.name}: ${h.members.length} turista(s) fazem check-in`, { headline: 'Chegam os primeiros turistas: cidade entra no roteiro regional', entity: { kind: 'building', id: hotel.id }, ref: hotel.id, visual: 0.9 });
     }
-    // arrival: by tour bus / car from the highway, or by train at the station
-    const station = w.buildings.list.find((b) => b.kind === 'railStation' && b.state === 'done');
+    // arrival: by car or tour bus from the highway, or by train at the station
     const entry = w.entryNode();
-    const plan = station && w.rng.chance(0.4) ? carPlan(w.roads, station, hotel) : entry >= 0 ? carPlanFromNode(w.roads, entry, hotel) : null;
+    const plan = byTrain && station ? carPlan(w.roads, station, hotel) : entry >= 0 ? carPlanFromNode(w.roads, entry, hotel) : null;
     if (plan && w.traffic.capacityLeft > 80 && w.t - this.lastTourBus > 60) {
       const slot = w.traffic.spawn(h.car ? VType.Car : VType.TourBus, plan.path, plan.startS, plan.destS, { kind: P_TOURBUS, id: -1, aux: 0 }, -1, hotel.id);
       this.lastTourBus = w.t;
@@ -121,11 +128,11 @@ export class Tourism {
     if (hour >= 22 || hour < 7.5) { C.perform(i, Act.Sleep, here, hotel, h, hour); return; }
     if ((hour > 12 && hour < 14) || (hour > 19 && hour < 21)) {
       const eat = w.places.pick('eat', here.x, here.z, () => r.next());
-      if (eat) { this.spend(eat, 45); C.startTrip(i, here, eat, Act.Eat, HOUR_SECONDS * 1.2); return; }
+      if (eat) { this.spend(eat, 45); C.pushAgenda(i, hour, Act.Eat); C.startTrip(i, here, eat, Act.Eat, HOUR_SECONDS * 1.2); return; }
     }
     if (w.beachOk() && w.season === 1 && r.chance(0.3)) {
       const b = w.beachPlace(here);
-      if (b) { C.startTrip(i, here, b, Act.Beach, HOUR_SECONDS * 2.5); return; }
+      if (b) { C.pushAgenda(i, hour, Act.Beach); C.startTrip(i, here, b, Act.Beach, HOUR_SECONDS * 2.5); return; }
     }
     const sights = (w.places.lists.get('tourism') ?? []).filter((b) => !stay.visited.has(b.id));
     if (sights.length) {
@@ -133,13 +140,14 @@ export class Tourism {
       for (const b of sights.slice(0, 40)) { const s = b.def.tourism * 3 + (b.heritage ? 1 : 0) - Math.hypot(b.x - here.x, b.z - here.z) / 800 + r.next(); if (s > bs) { bs = s; best = b; } }
       stay.visited.add(best.id);
       this.spend(best, 30);
+      C.pushAgenda(i, hour, Act.Sightsee);
       C.startTrip(i, here, best, Act.Sightsee, HOUR_SECONDS * r.range(1, 2));
       if (r.chance(0.04)) w.events.emit('tourists', best.x, best.z, 0.4, `Turistas fotografam ${best.name}`, { entity: { kind: 'citizen', id: i } });
       return;
     }
     const shop = w.places.pick('shop', here.x, here.z, () => r.next());
-    if (shop) { this.spend(shop, 35); C.startTrip(i, here, shop, Act.Shop, HOUR_SECONDS); return; }
-    C.perform(i, Act.Home, here, hotel, h, hour);
+    if (shop) { this.spend(shop, 35); C.pushAgenda(i, hour, Act.Shop); C.startTrip(i, here, shop, Act.Shop, HOUR_SECONDS); return; }
+    C.perform(i, Act.Hotel, here, hotel, h, hour);
   }
 
   private spend(b: Building, amount: number) {

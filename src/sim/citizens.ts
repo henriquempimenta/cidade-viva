@@ -19,7 +19,25 @@ const COURSES = ['engenharia', 'medicina', 'direito', 'arquitetura', 'computaç�
 export const MODE_LABEL = ['a pé', 'bicicleta', 'carro', 'ônibus', 'trem/metrô', '—'];
 export const ST_IN = 0, ST_WALK = 1, ST_CAR = 2, ST_TRANSIT = 3, ST_VIRTUAL = 4, ST_AWAY = 7;
 
-export interface Household { id: number; members: number[]; home: number; car: boolean; wealth: number; money: number; movedDay: number; searching: boolean; unhappyDays: number; tourist: boolean; leaveDay: number }
+export interface Household {
+  id: number;
+  members: number[];
+  home: number;
+  car: boolean;
+  /** building id where the household car is currently parked (-1 if no car or currently in use) */
+  carLoc: number;
+  /** citizen id currently driving the household car (-1 if parked or no car) */
+  carUser: number;
+  /** citizen id who last drove the car away from home (keeps return priority), or -1 */
+  carDriver: number;
+  wealth: number;
+  money: number;
+  movedDay: number;
+  searching: boolean;
+  unhappyDays: number;
+  tourist: boolean;
+  leaveDay: number;
+}
 
 export class Citizens {
   max = 0;
@@ -62,7 +80,7 @@ export class Citizens {
   tourist = new Uint8Array(0);
   modeCount = [0, 0, 0, 0, 0];
   bio: { year: number; text: string }[][] = [];
-  agenda: { h: number; act: Act; done: boolean }[][] = [];
+  agenda: { day: number; h: number; act: Act; done: boolean }[][] = [];
   households = new Map<number, Household>();
   private nextHH = 1;
   private free: number[] = [];
@@ -172,6 +190,11 @@ export class Citizens {
     this.w.economy.leaveSchool(i);
     const h = this.households.get(this.hh[i]);
     if (h) {
+      if (h.car && (h.carUser === i || h.carDriver === i)) {
+        h.carLoc = h.home;
+        h.carUser = -1;
+        h.carDriver = -1;
+      }
       h.members = h.members.filter((m) => m !== i);
       if (!h.members.length) this.removeHousehold(h);
     }
@@ -183,7 +206,7 @@ export class Citizens {
   }
 
   newHousehold(home: number, wealth: number, tourist = false): Household {
-    const h: Household = { id: this.nextHH++, members: [], home, car: false, wealth, money: 0, movedDay: this.w.day, searching: false, unhappyDays: 0, tourist, leaveDay: -1 };
+    const h: Household = { id: this.nextHH++, members: [], home, car: false, carLoc: -1, carUser: -1, carDriver: -1, wealth, money: 0, movedDay: this.w.day, searching: false, unhappyDays: 0, tourist, leaveDay: -1 };
     this.households.set(h.id, h);
     const b = this.w.buildings.byId.get(home);
     if (b) b.households.push(h.id);
@@ -195,12 +218,27 @@ export class Citizens {
     this.households.delete(h.id);
   }
   moveHousehold(h: Household, home: number) {
-    const old = this.w.buildings.byId.get(h.home);
+    const oldHome = h.home;
+    const old = this.w.buildings.byId.get(oldHome);
     if (old) old.households = old.households.filter((x) => x !== h.id);
     h.home = home;
     h.movedDay = this.w.day;
+    if (h.car && h.carUser < 0 && (h.carLoc === oldHome || h.carLoc < 0 || home < 0)) {
+      h.carLoc = home >= 0 ? home : -1;
+      h.carDriver = -1;
+    }
     const b = this.w.buildings.byId.get(home);
     if (b) b.households.push(h.id);
+  }
+
+  /** Relocate any household cars parked at a building about to be demolished. */
+  onBuildingDemolished(bid: number) {
+    for (const h of this.households.values()) {
+      if (h.car && h.carUser < 0 && h.carLoc === bid) {
+        h.carLoc = h.home >= 0 && h.home !== bid ? h.home : -1;
+        h.carDriver = -1;
+      }
+    }
   }
 
   /** a family arrives in town (immigration) */
@@ -210,6 +248,9 @@ export class Citizens {
     if (this.free.length < size) this.grow(this.max * 2 + size);
     const h = this.newHousehold(home.id, wealth);
     h.car = r.next() < [0.25, 0.65, 0.95][wealth] * (this.w.era >= 1 ? 1 : 0.6);
+    h.carLoc = h.car ? home.id : -1;
+    h.carUser = -1;
+    h.carDriver = -1;
     h.money = [200, 800, 3000][wealth] * r.range(0.5, 1.5);
     const last = r.int(0, 39);
     const p = this.w.params;
@@ -298,9 +339,21 @@ export class Citizens {
 
   private hourOf(t: number) { return ((t % DAY_SECONDS) / DAY_SECONDS) * 24; }
 
+  pushAgenda(i: number, hour: number, act: Act) {
+    const day = this.w.day;
+    const ag = this.agenda[i] ?? (this.agenda[i] = []);
+    while (ag.length && ag[0].day !== day) ag.shift();
+    if (ag.length && !ag[ag.length - 1].done) ag[ag.length - 1].done = true;
+    ag.push({ day, h: hour, act, done: false });
+    if (ag.length > 16) ag.shift();
+  }
+
   decide(i: number) {
     const w = this.w;
     this.decayNeeds(i);
+    // mark previous stationary activity as done
+    const agPrev = this.agenda[i];
+    if (agPrev?.length && !agPrev[agPrev.length - 1].done) agPrev[agPrev.length - 1].done = true;
     const r = this.rng;
     const now = w.t;
     const hour = this.hourOf(now);
@@ -379,9 +432,8 @@ export class Citizens {
       case Act.Game: dest = cat('stadium'); dur = HOUR_SECONDS * 2.5; break;
       default: dest = home;
     }
-    if (!dest) { dest = home; a = Act.Home; }
-    this.agenda[i].push({ h: hour, act: a, done: false });
-    if (this.agenda[i].length > 12) this.agenda[i].shift();
+    if (!dest) { dest = home; a = this.tourist[i] ? Act.Hotel : Act.Home; }
+    this.pushAgenda(i, hour, a);
     dest.visitors++;
     if (dest.def.cat === 'com' || dest.kind === 'restaurant') w.economy.spend(i, dest, a === Act.Eat ? 18 : a === Act.Shop ? 25 : 12);
     if (dest.id === this.loc[i]) {
@@ -398,25 +450,44 @@ export class Citizens {
     const r = this.rng;
     const h = this.households.get(this.hh[i])!;
     const d = Math.hypot(to.x - from.x, to.z - from.z) * 1.3;
-    const canDrive = h.car && this.age[i] >= 18;
+    // strict physical car ownership & parking check: car must be parked at `from` and not in use by another member
+    const hasCarHere = h.car
+      && this.age[i] >= 18
+      && h.carLoc === from.id
+      && (h.carUser < 0 || h.carUser === i)
+      && (h.carLoc === h.home || h.carDriver < 0 || h.carDriver === i || !this.alive[h.carDriver]);
     // active modes route independently (ignoring one-way car restrictions and avoiding highways)
     const walkP = d < 4600 ? activePlan(w.roads, from, to, 4800) : null;
-    const carP = canDrive || !walkP ? carPlan(w.roads, from, to) : null;
+    const carP = hasCarHere || !walkP ? carPlan(w.roads, from, to) : null;
     this.tripDest[i] = to.id; this.tripAct[i] = a; this.tripDur[i] = dur;
     this.act[i] = a;
     const activeLen = walkP ? walkP.len : Infinity;
     const carLen = carP ? pathLength(w.roads, carP) : Infinity;
     const refLen = Number.isFinite(activeLen) ? activeLen : Number.isFinite(carLen) ? carLen : d;
     w.transitSys?.recordTrip(from, to, refLen);
-    const tr = w.transit2?.transitOption(from, to, refLen) ?? null;
+    const trRaw = w.transit2?.transitOption(from, to, refLen) ?? null;
+    // transit only available when household can pay the fare
+    const tr = trRaw && h.money >= trRaw.fare ? trRaw : null;
     if (!walkP && !carP && !tr) { this.virtualArrive(i, d / 6 + 30); return; }
     const tp = w.params.transitPriority;
     const vot = 0.3 + this.income[i] / 80; // value of time
     const rain = w.weather.rain;
+    // real driving operational cost (fuel + central parking)
+    const fuelCost = Number.isFinite(carLen) ? Math.max(0.5, carLen * 0.004) : 2;
+    const parkCost = to.id === h.home ? 0 : w.fields.sample('landValue', to.x, to.z) * 6;
+    const carOpCost = (fuelCost + parkCost) * w.economy.priceIndex;
+    const returningCar = hasCarHere && from.id !== h.home;
+    const canDrive = hasCarHere && (returningCar || h.money >= carOpCost);
+
     const costs: number[] = [Infinity, Infinity, Infinity, Infinity, Infinity];
     if (walkP && activeLen < 1800) costs[0] = (activeLen / 1.35) * vot * (1 + rain * 1.5);
-    if (walkP && (this.traits[i] & T_SPORT || this.age[i] < 30 && h.wealth === 0) && activeLen < 4500 && this.age[i] > 10 && this.age[i] < 65) costs[1] = (activeLen / 4.5) * vot * (1 + rain * 2) + 20;
-    if (canDrive && carP) costs[2] = (carP.time + 60) * vot + carLen * 0.012 * (1 + tp * 1.5) + w.fields.sample('landValue', to.x, to.z) * 15 * (1 + tp);
+    if (walkP && (this.traits[i] & T_SPORT || (this.age[i] < 30 && h.wealth === 0)) && activeLen < 4500 && this.age[i] > 10 && this.age[i] < 65) costs[1] = (activeLen / 4.5) * vot * (1 + rain * 2) + 20;
+    if (canDrive && carP) {
+      let c2 = (carP.time + 60) * vot + carOpCost * (1 + tp * 0.5) + w.fields.sample('landValue', to.x, to.z) * 10 * (1 + tp);
+      // natural return preference when citizen's own car is parked away from home
+      if (returningCar) c2 *= 0.4;
+      costs[2] = c2;
+    }
     if (tr) costs[tr.mode] = tr.time * vot * (1 - tp * 0.35) + tr.fare;
     let mode = 0, mc = Infinity;
     for (let m = 0; m < 5; m++) if (costs[m] < mc) { mc = costs[m]; mode = m; }
@@ -426,17 +497,30 @@ export class Citizens {
     if (mode === 3 || mode === 4) {
       if (tr && w.transit2?.board(i, from, to, tr)) { this.state[i] = ST_TRANSIT; return; }
       mode = walkP ? 0 : canDrive && carP ? 2 : 0;
+      this.tripMode[i] = mode;
     }
-    if (mode === 2 && carP) {
-      const vt = this.income[i] > 200 && r.chance(0.25) ? VType.Car : r.chance(0.08) ? VType.Moto : r.chance(0.05) && w.era >= 1 ? VType.Taxi : VType.Car;
+    if (mode === 2 && canDrive && carP) {
+      const vt = this.income[i] > 200 && r.chance(0.25) ? VType.Car : r.chance(0.08) ? VType.Moto : VType.Car;
       if (w.traffic.capacityLeft > 60 && w.lodAllowsVehicle(i)) {
         const slot = w.traffic.spawn(vt, carP.path, carP.startS, carP.destS, { kind: P_CITIZEN, id: i, aux: 0 }, from.id, to.id);
-        if (slot >= 0) { this.state[i] = ST_CAR; this.slot[i] = slot; return; }
-        // no room to pull out onto the street: a short trip changes mode to walking instead of teleporting
+        if (slot >= 0) {
+          h.carUser = i;
+          h.carLoc = -1;
+          h.carDriver = i;
+          h.money -= Math.min(Math.max(0, h.money), carOpCost);
+          this.state[i] = ST_CAR;
+          this.slot[i] = slot;
+          return;
+        }
+        // no room to pull out onto the street: a short trip changes mode to walking instead of teleporting (car stays parked!)
         if (walkP && activeLen < 1500) { mode = 0; this.modeCount[2]--; this.modeCount[0]++; this.tripMode[i] = 0; }
       }
       if (mode === 2) {
-        // virtual car trip still loads the network
+        // virtual car trip still claims the car exclusively, pays operational cost, and loads the network
+        h.carUser = i;
+        h.carLoc = -1;
+        h.carDriver = i;
+        h.money -= Math.min(Math.max(0, h.money), carOpCost);
         for (const de of carP.path) w.roads.loadVirtual(de, from.id, to.id, vt === VType.Moto ? 1 : 0);
         this.virtualArrive(i, carP.time + 30);
         return;
@@ -483,10 +567,19 @@ export class Citizens {
     const dist = Math.hypot(door.x - x, door.z - z);
     if (dist > 600 || w.peds.capacityLeft <= 30) return false;
     const speed = 1.35 * (this.age[i] > 70 ? 0.75 : 1);
-    const wp = dist > 35 ? activePlanFromPoint(w.roads, x, z, dest, 900) : null;
-    const pts = wp ? walkPoints(w.roads, wp, { x, z }, door) : [x, z, door.x, door.z];
+    // always route along sidewalks & crosswalks (never spawn a 2-point straight-line walk through buildings)
+    const wp = activePlanFromPoint(w.roads, x, z, dest, 1600);
+    if (!wp) return false;
+    const pts = walkPoints(w.roads, wp, { x, z }, door);
     const slot = w.peds.spawn(pts, i, speed, this.tourist[i] ? PED_FLAG_TOURIST : 0, this.colorOf(i));
     if (slot < 0) return false;
+    // return abandoned household car cleanly to home garage (never clone or strand it)
+    const h = this.households.get(this.hh[i]);
+    if (h && h.car && h.carUser === i) {
+      h.carLoc = h.home;
+      h.carUser = -1;
+      h.carDriver = -1;
+    }
     this.tripMode[i] = 0;
     this.state[i] = ST_WALK;
     this.slot[i] = slot;
@@ -507,6 +600,12 @@ export class Citizens {
       return;
     }
     this.loc[i] = b ? dest : h?.home ?? -1;
+    // park household car at the destination where the driver arrived
+    if (h && h.car && h.carUser === i) {
+      h.carLoc = this.loc[i];
+      h.carUser = -1;
+      if (h.carLoc === h.home) h.carDriver = -1;
+    }
     const ag = this.agenda[i];
     if (ag.length) ag[ag.length - 1].done = true;
     this.lastUpd[i] = w.t;
@@ -618,6 +717,18 @@ export class Citizens {
     const w = this.w;
     this.partner[a] = b; this.partner[b] = a;
     const ha = this.households.get(this.hh[a])!, hb = this.households.get(this.hh[b])!;
+    // Release b's old household car before moving b out of hb (prevents permanent car leak)
+    if (hb.car && (hb.carUser === b || hb.carDriver === b)) {
+      if (this.state[b] === ST_CAR) {
+        this.endTrip(b);
+        this.state[b] = ST_IN;
+        this.loc[b] = hb.home;
+        this.schedule(b, w.t + HOUR_SECONDS * 0.5);
+      }
+      hb.carLoc = hb.home;
+      hb.carUser = -1;
+      hb.carDriver = -1;
+    }
     // b moves into a's household (and leaves the old one)
     hb.members = hb.members.filter((m) => m !== b);
     if (!hb.members.length) this.removeHousehold(hb);
@@ -674,17 +785,26 @@ export class Citizens {
     const plan: CarPlan | null = carPlanFromNode(w.roads, entry, home);
     if (!plan) return;
     const driver = h.members.find((m) => this.age[m] >= 18) ?? h.members[0];
-    const vt = h.car ? VType.Car : VType.Bus;
     for (const m of h.members) {
       this.loc[m] = -1;
       this.tripDest[m] = home.id; this.tripAct[m] = Act.Home; this.tripDur[m] = HOUR_SECONDS; this.act[m] = Act.Home;
     }
-    const slot = w.traffic.capacityLeft > 40 ? w.traffic.spawn(vt === VType.Bus ? VType.Car : vt, plan.path, plan.startS, plan.destS, { kind: P_CITIZEN, id: driver, aux: 1 }, -1, home.id) : -1;
+    const slot = w.traffic.capacityLeft > 40
+      ? h.car
+        ? w.traffic.spawn(VType.Car, plan.path, plan.startS, plan.destS, { kind: P_CITIZEN, id: driver, aux: 1 }, -1, home.id)
+        : w.traffic.spawn(VType.Taxi, plan.path, plan.startS, plan.destS, { kind: P_MOVING, id: -1, aux: 0 }, -1, home.id)
+      : -1;
+    if (h.car && driver !== undefined) {
+      h.carUser = driver;
+      h.carLoc = -1;
+      h.carDriver = driver;
+      this.tripMode[driver] = 2;
+    }
     if (h.members.length >= 3 && w.traffic.capacityLeft > 40) {
       w.traffic.spawn(VType.Van, plan.path, plan.startS, plan.destS, { kind: P_MOVING, id: -1, aux: 0 }, -1, home.id); // caminhão de mudança
     }
     for (const m of h.members) {
-      if (m === driver && slot >= 0) { this.state[m] = ST_CAR; this.slot[m] = slot; }
+      if (h.car && m === driver && slot >= 0) { this.state[m] = ST_CAR; this.slot[m] = slot; }
       else this.virtualArrive(m, plan.time + 20);
     }
     if (slot >= 0 && this.rng.chance(0.12)) w.events.emit('immigration', home.x, home.z, 0.35, `Família ${LAST[this.last[driver] % 40]} chega à cidade pela rodovia`, { entity: { kind: 'vehicle', id: slot, gen: w.traffic.gen[slot] } });
@@ -708,8 +828,22 @@ export class Citizens {
       const how = st === ST_CAR ? 'dirigindo' : st === ST_WALK ? (this.tripMode[i] === 1 ? 'pedalando' : 'caminhando') : st === ST_TRANSIT ? w.transit2?.describe(i) ?? 'no transporte público' : 'a caminho';
       state = `${how} para ${dest?.name ?? 'casa'} (${ACT_LABEL[this.tripAct[i]]})`;
     }
+    // read-only real-time projection of needs since lastUpd[i], clamped strictly to [0, 1]
+    const hours = Math.max(0, Math.min(48, (w.t - this.lastUpd[i]) / HOUR_SECONDS));
+    const at = st === ST_IN;
+    const o = i * 8;
+    const proj = [
+      this.needs[o] - 0.055 * hours + ((a === Act.Eat || a === Act.Home) && at ? 0.25 * hours : 0),
+      this.needs[o + 1] + (a === Act.Sleep && at ? 0.13 * hours : -0.04 * hours),
+      this.needs[o + 2] + (a === Act.Home || a === Act.Sleep || a === Act.Gym ? 0.08 * hours : -0.035 * hours),
+      this.needs[o + 3] + (a === Act.Visit || a === Act.Bar || a === Act.Church || a === Act.Park || a === Act.Game ? 0.15 * hours : a === Act.Work || a === Act.Study ? 0.02 * hours : -0.03 * hours),
+      this.needs[o + 4] + (a === Act.Park || a === Act.Culture || a === Act.Beach || a === Act.Bar || a === Act.Gym || a === Act.Sightsee || a === Act.Game ? 0.16 * hours : -0.03 * hours),
+      this.health[i],
+      Math.max(0, 1 - w.fields.sample('crime', home?.x ?? 0, home?.z ?? 0)),
+      (h?.money ?? 0) / 2000,
+    ];
     const needs: Record<string, number> = {};
-    NEEDS.forEach((k, idx) => (needs[k] = idx === 7 ? Math.min(1, (h?.money ?? 0) / 2000) : idx === 6 ? Math.max(0, 1 - w.fields.sample('crime', home?.x ?? 0, home?.z ?? 0)) : this.needs[i * 8 + idx]));
+    NEEDS.forEach((k, idx) => (needs[k] = Math.max(0, Math.min(1, proj[idx]))));
     const traits: string[] = [];
     TRAITS.forEach((t, k) => { if (this.traits[i] & (1 << k)) traits.push(t); });
     const fmtH = (x: number) => `${String(Math.floor(x)).padStart(2, '0')}:${String(Math.floor((x % 1) * 60)).padStart(2, '0')}`;
@@ -719,13 +853,28 @@ export class Citizens {
       : st === ST_WALK && s >= 0 && w.peds.active[s]
         ? w.peds.speed[s] * 3.6
         : null;
+    const isTourist = !!this.tourist[i];
+    const leaveDay = h ? (w.tourismSys?.stays.get(h.id)?.until ?? h.leaveDay) : -1;
+    const jobLabel = isTourist
+      ? (leaveDay >= 0 ? `Turista (até dia ${leaveDay + 1})` : 'Turista')
+      : job
+        ? `${job.name}${this.job[i] >= 0 ? '' : ' (estudante)'}`
+        : this.age[i] >= 65
+          ? 'aposentado(a)'
+          : this.age[i] < 6
+            ? '—'
+            : 'desempregado(a)';
+    const todayAgenda = (this.agenda[i] ?? [])
+      .filter((g) => g.day === w.day)
+      .sort((a1, a2) => a1.h - a2.h)
+      .map((g) => ({ h: fmtH(g.h), act: ACT_LABEL[g.act], done: g.done }));
     return {
       id: i, name: this.name(i), age: Math.floor(this.age[i]), sex: this.sex[i] ? 'mulher' : 'homem', traits, edu: EDU_LABEL[this.edu[i]] + (this.studying[i] ? ` (estudando: ${['', 'creche', 'escola', 'ensino médio', 'universidade'][this.studying[i]]})` : ''),
-      job: job ? `${job.name}${this.job[i] >= 0 ? '' : ' (estudante)'}` : this.age[i] >= 65 ? 'aposentado(a)' : this.age[i] < 6 ? '—' : 'desempregado(a)',
+      job: jobLabel,
       home: home ? `${home.name} · ${w.districtName(home.x, home.z)}` : '—', income: this.income[i], money: h?.money ?? 0, needs, state, activity: ACT_LABEL[a],
-      agenda: this.agenda[i].map((g) => ({ h: fmtH(g.h), act: ACT_LABEL[g.act], done: g.done })), bio: this.bio[i] ?? [],
+      agenda: todayAgenda, bio: this.bio[i] ?? [],
       family: h ? h.members.filter((m) => m !== i).map((m) => `${this.name(m)} (${Math.floor(this.age[m])})`) : [],
-      mode: MODE_LABEL[this.tripMode[i]], speedKmh, happiness: this.happiness[i], tourist: !!this.tourist[i], insideBuilding: st === ST_IN ? this.loc[i] : -1,
+      mode: MODE_LABEL[this.tripMode[i]], speedKmh, happiness: this.happiness[i], tourist: isTourist, insideBuilding: st === ST_IN ? this.loc[i] : -1,
     };
   }
 

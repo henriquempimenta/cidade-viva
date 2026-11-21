@@ -95,6 +95,20 @@ export class Peds {
   }
   /** keep a walker standing where it is until explicitly removed (queues at stops) */
   hold(i: number) { if (this.active[i]) this.arrive[i] = Infinity; }
+  /** reposition a held pedestrian (e.g. FIFO bus-stop queue shifting forward) without despawning */
+  setHeldPose(i: number, x: number, z: number, h: number) {
+    if (!this.active[i]) return;
+    const x2 = x + Math.cos(h) * 0.05;
+    const z2 = z + Math.sin(h) * 0.05;
+    const P = this.pts[i];
+    if (P && P.length >= 4) {
+      P[0] = x; P[1] = z; P[2] = x2; P[3] = z2;
+    }
+    this.minX[i] = Math.min(x, x2); this.maxX[i] = Math.max(x, x2);
+    this.minZ[i] = Math.min(z, z2); this.maxZ[i] = Math.max(z, z2);
+    this.x[i] = x; this.z[i] = z; this.h[i] = h;
+    this.t0[i] = this.time;
+  }
   despawn(i: number) {
     if (!this.active[i]) return;
     this.active[i] = 0;

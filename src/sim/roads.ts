@@ -1,4 +1,5 @@
 import { HOUR_SECONDS, LOT_SETBACK, ROAD_HALF_WIDTH, ROAD_LANES, ROAD_SPEED, RoadClass } from '../shared/constants';
+import { nodeRenderRadius } from '../shared/roadGeom';
 import type { EdgeView, NodeView } from '../shared/protocol';
 import { MinHeap } from './heap';
 import { dijkstraTree, InlineBackend, runTreeJob, type RouteBackend, type RouteGraph } from './routeKernel';
@@ -18,6 +19,8 @@ export interface RNode {
   /** a joint of an elevated/tunnel structure: not part of the street network, nothing attaches to it */
   deck?: boolean;
   inJunction: number; // vehicles currently crossing
+  /** vehicle slots currently inside this junction box (for directional conflict checks) */
+  jSlots: number[];
   delay: number; // EMA of waiting seconds at node
   waitAcc: number;
   alive: boolean;
@@ -115,6 +118,8 @@ export class RoadNetwork {
   time = 0;
   /** external hook: the railway vetoes segments that would cross it badly (returns the reason) */
   railCheck?: (ax: number, az: number, bx: number, bz: number, cls: RoadClass) => string | null;
+  /** observer called whenever a new road edge is added (e.g. tree clearing along road + sidewalks) */
+  onEdgeAdded: ((e: REdge) => void) | null = null;
 
   constructor(public terrain: Terrain, public occ: Occupancy, private rng: RNG) {}
 
@@ -187,7 +192,7 @@ export class RoadNetwork {
   addNode(x: number, z: number): RNode {
     const n: RNode = {
       id: this.nodes.length, x, z, y: Math.max(this.terrain.heightAt(x, z), 0.3) + 0.1,
-      edges: [], control: 0, phase: 0, phaseT: 0, phases: [], interchange: false, inJunction: 0, delay: 0, waitAcc: 0, alive: true, radius: 4,
+      edges: [], control: 0, phase: 0, phaseT: 0, phases: [], interchange: false, inJunction: 0, jSlots: [], delay: 0, waitAcc: 0, alive: true, radius: 4,
     };
     this.nodes.push(n);
     this.hashInsert(this.nodeHash, n.id, x, z, x, z);
@@ -212,9 +217,31 @@ export class RoadNetwork {
     this.hashInsert(this.edgeHash, e.id, na.x, na.z, nb.x, nb.z);
     this.rasterize(e);
     this.updateNodeGeom(na); this.updateNodeGeom(nb);
+    this.onEdgeAdded?.(e);
     this.dirtyEdges.add(e.id);
     this.topoVer++;
     return e;
+  }
+
+  /** incident completed surface edges at node nid (matches RoadsLayer.edgesAt / nodeR) */
+  surfaceEdgesAt(nid: number): REdge[] {
+    const n = this.nodes[nid];
+    if (!n || !n.alive) return [];
+    const out: REdge[] = [];
+    for (const id of n.edges) {
+      const e = this.edges[id];
+      if (!e || !e.alive || e.progress < 1) continue;
+      if (e.deck !== undefined && e.tunnel) continue;
+      out.push(e);
+    }
+    return out;
+  }
+
+  /** exact junction fillet radius used by RoadsLayer.nodeR() */
+  nodeRenderR(nid: number): number {
+    const n = this.nodes[nid];
+    if (!n || !n.alive) return 0;
+    return nodeRenderRadius(n.control, this.surfaceEdgesAt(nid));
   }
 
   streetName(cls: RoadClass): string {

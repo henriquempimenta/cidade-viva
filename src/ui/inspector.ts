@@ -162,7 +162,7 @@ export class Inspector {
     let html = this.head(d.tourist ? 'Visitante · observação individual' : 'Observação individual', `${d.tourist ? '🧳 ' : ''}${d.name}`, `${d.age} anos · ${d.sex} · ${d.edu}`) + `
       <div style="margin:2px 0 4px">${d.traits.map((t) => `<span class="tag">${t}</span>`).join('')}</div>
       <div class="state-pill">${d.state}</div>
-      <div class="kv"><span>Casa</span><span>${d.home}</span><span>${d.tourist ? 'Hotel' : 'Trabalho/escola'}</span><span>${d.job}</span>
+      <div class="kv">${d.tourist ? `<span>Hotel</span><span>${d.home}</span><span>Situação</span><span>${d.job}</span>` : `<span>Casa</span><span>${d.home}</span><span>Trabalho/escola</span><span>${d.job}</span>`}
       <span>Renda/dia</span><span>$${d.income.toFixed(0)}</span><span>Economias</span><span>$${d.money.toFixed(0)}</span><span>Transporte</span><span>${d.mode}</span>${d.speedKmh != null ? `<span>Velocidade atual</span><span>${d.speedKmh.toFixed(0)} km/h</span>` : ''}<span>Felicidade</span><span>${Math.round(d.happiness * 100)}%</span></div>`;
     html += `<h4>Necessidades</h4>`;
     for (const [k, v] of Object.entries(d.needs)) html += `<div class="term"><span>${NEED_LABEL[k] ?? k}</span><div class="tb"><i style="left:0;width:${Math.round(v * 100)}%;background:${v > 0.6 ? 'var(--good)' : v > 0.3 ? 'var(--warn)' : 'var(--bad)'}"></i></div><span class="v">${Math.round(v * 100)}</span></div>`;

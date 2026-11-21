@@ -22,7 +22,7 @@ function longEdge(w: World, min = 120, pred: (e: REdge) => boolean = () => true)
   if (!e) throw new Error('sem via longa');
   return e;
 }
-/** pairs of vehicles that physically overlap on the same lane */
+/** pairs of vehicles that physically overlap on the same lane (centered geometry: [-len/2, +len/2]) */
 function overlaps(w: World): number {
   const T = w.traffic, lanes = new Map<number, number[]>();
   for (let i = 0; i < T.max; i++) {
@@ -33,7 +33,10 @@ function overlaps(w: World): number {
   let n = 0;
   for (const arr of lanes.values()) {
     arr.sort((a, b) => T.s[a] - T.s[b]);
-    for (let k = 0; k + 1 < arr.length; k++) if (T.s[arr[k + 1]] - T.len[arr[k + 1]] < T.s[arr[k]] - 0.05) n++;
+    for (let k = 0; k + 1 < arr.length; k++) {
+      const a = arr[k], b = arr[k + 1];
+      if (T.s[b] - T.s[a] < (T.len[a] + T.len[b]) * 0.5 - 0.05) n++;
+    }
   }
   return n;
 }
@@ -126,7 +129,7 @@ describe('relógio nunca espera para sempre por rotas', () => {
     const w = run(world(4242), 0.3);
     const R = w.roads as unknown as { pending: unknown; backend: RouteBackend };
     let guard = 0;
-    while (!R.pending && guard++ < 400) w.step(0.5);
+    while (!R.pending && guard++ < 800) w.step(0.5);
     expect(R.pending).toBeTruthy();
     R.backend = new Never(); // swap with a batch still pending (como no warmup)
     for (let k = 0; k < 40; k++) { expect(w.roads.routingReady()).toBe(true); w.step(0.5); }
@@ -215,7 +218,7 @@ describe('transporte: embarque no sentido certo', () => {
   it('no ponto B, quem vai para A não entra no trem A→B→C', () => {
     const w = world(3);
     const S = w.transitSys;
-    const stops = [0, 1, 2].map((k) => ({ x: 100 + k * 500, z: 100, node: -1, s: k * 500, name: 'E' + k }));
+    const stops = [0, 1, 2].map((k) => ({ x: 100 + k * 500, z: 100, node: -1, edge: -1, dir: 0, s: k * 500, curbX: 100 + k * 500, curbZ: 100, ux: 1, uz: 0, name: 'E' + k }));
     const l = S.addRailLine('rail', 'Teste', stops, [], 600);
     const toA = w.citizens.add({ age: 30, hh: -1 }), toC = w.citizens.add({ age: 30, hh: -1 });
     S.rides.set(toA, { line: l.id, from: 1, to: 0, phase: 1, since: 0, dest: -1 });
@@ -338,7 +341,10 @@ describe('obras transacionais: binário e BRT', () => {
     const e1 = longEdge(w, 60, (x) => x.lanes === 1);
     const line1: Line = {
       id: 901, kind: 'bus', color: '#e74c3c', name: 'Linha 901 · Teste',
-      stops: [{ x: w.center.x, z: w.center.z, node: e1.a, s: 0, name: 'A' }, { x: w.center.x + 100, z: w.center.z, node: e1.b, s: 100, name: 'B' }],
+      stops: [
+        { x: w.center.x, z: w.center.z, node: e1.a, edge: e1.id, dir: 0, s: 25, curbX: w.center.x, curbZ: w.center.z, ux: 1, uz: 0, name: 'A' },
+        { x: w.center.x + 100, z: w.center.z, node: e1.b, edge: e1.id, dir: 0, s: 55, curbX: w.center.x + 100, curbZ: w.center.z, ux: 1, uz: 0, name: 'B' },
+      ],
       path: [e1.id * 2], startS: 0, destS: e1.len - 1, fleet: 2, vehicles: new Set<number>(),
       ridersToday: 0, ridersYday: 900, waiting: new Map(), onboard: new Map(), edges: new Set([e1.id]),
       headway: 120, lastSpawn: 0, pts: [],

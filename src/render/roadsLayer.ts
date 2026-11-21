@@ -1,21 +1,18 @@
 import * as THREE from 'three';
 import { LANE_WIDTH, RoadClass } from '../shared/constants';
+import { CROSSWALK_INSET, edgeHalfWidth, hasEndCrosswalk, nodeRenderRadius, SIDEWALK_WIDTH } from '../shared/roadGeom';
 import type { EdgeView, NodeView } from '../shared/protocol';
 import { GB } from './geomBuilder';
 import { U } from './uniforms';
 import { bendLine, junction, type Arm } from './junctions';
+
+export { edgeHalfWidth };
 
 const COL = {
   asphalt: new THREE.Color(0x3d4044), asphaltOld: new THREE.Color(0x4a4c4f), dirt: new THREE.Color(0x9b7f5a), earth: new THREE.Color(0x7d6243),
   walk: new THREE.Color(0xb9b4aa), curb: new THREE.Color(0xd2cdc2), white: new THREE.Color(0xf2f2ee), yellow: new THREE.Color(0xf2c230),
   median: new THREE.Color(0x6f9e4c), bus: new THREE.Color(0x9c3b34), concrete: new THREE.Color(0xb8b3aa), tunnel: new THREE.Color(0x1d1f22), rail: new THREE.Color(0x777777),
 };
-
-export function edgeHalfWidth(e: { cls: number; lanes: number; oneway: number }): number {
-  const median = e.cls >= RoadClass.Avenue ? 1.6 : 0.15;
-  const dirs = e.oneway ? 1 : 2;
-  return (e.lanes * LANE_WIDTH * dirs) / 2 + median / (e.oneway ? 2 : 1) + 0.4;
-}
 
 interface PL { x: number[]; y: number[]; z: number[]; s: number[] }
 function toPL(pts: number[]): PL {
@@ -151,10 +148,7 @@ export class RoadsLayer {
     if (!n || this.rdeg(n) <= 2) return 0;
     let r = this.nodeRCache.get(id);
     if (r === undefined) {
-      r = 3;
-      // mouths sit beyond the widest crossing road plus room for a kerb fillet
-      for (const e of this.edgesAt(id)) r = Math.max(r, edgeHalfWidth(e) + (n.control === 3 ? 1.2 : 5.5));
-      if (n.control === 3) r += 9;
+      r = nodeRenderRadius(n.control, this.edgesAt(id));
       this.nodeRCache.set(id, r);
     }
     return r;
@@ -312,8 +306,8 @@ export class RoadsLayer {
         if (!dirt) {
           // sidewalks + curbs
           if (e.cls !== RoadClass.Highway && !e.bridge && !e.elevated) {
-            ribbon(g, pl, s0, s1, hw, hw + 2.6, 0.12, COL.walk);
-            ribbon(g, pl, s0, s1, -hw - 2.6, -hw, 0.12, COL.walk);
+            ribbon(g, pl, s0, s1, hw, hw + SIDEWALK_WIDTH, 0.12, COL.walk);
+            ribbon(g, pl, s0, s1, -hw - SIDEWALK_WIDTH, -hw, 0.12, COL.walk);
             ribbon(g, pl, s0, s1, hw, hw + 0.25, 0.14, COL.curb);
             ribbon(g, pl, s0, s1, -hw - 0.25, -hw, 0.14, COL.curb);
           }
@@ -340,16 +334,19 @@ export class RoadsLayer {
               }
             }
           }
-          // crosswalks at ends (urban roads)
-          if (e.cls >= RoadClass.Local && e.cls <= RoadClass.Avenue && len > 30) {
-            for (const [sc, dir] of [[s0 + 2.2, 1], [s1 - 2.2, -1]] as [number, number][]) {
-              for (let k = -hw + 0.6; k < hw - 0.4; k += 1.1) {
-                const a0 = at(pl, sc - 1.4 * dir), a1 = at(pl, sc + 1.4 * dir);
-                const p = (qq: [number, number, number, number, number], o: number) => [qq[0] - qq[4] * o, qq[1] + 0.035, qq[2] + qq[3] * o];
-                const lo = Math.min(k, k + 0.55), hi = Math.max(k, k + 0.55);
-                if (dir > 0) g.quad([p(a0, hi), p(a1, hi), p(a1, lo), p(a0, lo)], [0, 1, 0], COL.white);
-                else g.quad([p(a1, hi), p(a0, hi), p(a0, lo), p(a1, lo)], [0, 1, 0], COL.white);
-              }
+          // crosswalks at ends (urban roads + at-grade highway arms entering urban junctions)
+          for (const [nid, sc, dir] of [[e.a, s0 + CROSSWALK_INSET, 1], [e.b, s1 - CROSSWALK_INSET, -1]] as [number, number, number][]) {
+            const nd = this.nodes.get(nid);
+            const deg = nd ? this.rdeg(nd) : 0;
+            const inc = this.edgesAt(nid);
+            const hasUrban = inc.some((q) => q.cls >= RoadClass.Local && q.cls <= RoadClass.Avenue);
+            if (!hasEndCrosswalk(e, len, deg, hasUrban, !!nd?.interchange)) continue;
+            for (let k = -hw + 0.6; k < hw - 0.4; k += 1.1) {
+              const a0 = at(pl, sc - 1.4 * dir), a1 = at(pl, sc + 1.4 * dir);
+              const p = (qq: [number, number, number, number, number], o: number) => [qq[0] - qq[4] * o, qq[1] + 0.035, qq[2] + qq[3] * o];
+              const lo = Math.min(k, k + 0.55), hi = Math.max(k, k + 0.55);
+              if (dir > 0) g.quad([p(a0, hi), p(a1, hi), p(a1, lo), p(a0, lo)], [0, 1, 0], COL.white);
+              else g.quad([p(a1, hi), p(a0, hi), p(a0, lo), p(a1, lo)], [0, 1, 0], COL.white);
             }
           }
           // streetlights

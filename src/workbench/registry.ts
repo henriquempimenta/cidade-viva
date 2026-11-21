@@ -1,6 +1,16 @@
 import { MeshBuilder, SURF, finalizeAsset, type AssetDetail } from '../render/meshKit';
 import { VEHICLE_PRESETS, buildVehicle } from '../render/vehicleGeom';
-import type { WorkbenchFamily } from './types';
+import {
+  BIKE_COLORS,
+  LUGGAGE_COLORS,
+  PED_PRESETS,
+  UMBRELLA_COLORS,
+  buildBike,
+  buildLuggage,
+  buildPedestrian,
+  buildUmbrella,
+} from '../render/pedGeom';
+import type { WorkbenchFamily, WorkbenchVariant } from './types';
 
 /** Built-in calibration/self-test family verifying meshKit primitives, aTint, aMat, and glow alignment. */
 const kitFamily: WorkbenchFamily = {
@@ -57,10 +67,83 @@ const vehiclesFamily: WorkbenchFamily = {
   })),
 };
 
+/** Parametric People, Cyclists & Accessories family with 3-tier real-time LOD & GPU skeletal pose animation. */
+const peopleFamily: WorkbenchFamily = {
+  id: 'people',
+  title: 'Pessoas, Ciclistas & Acessórios (LOD)',
+  description: '10 arquétipos humanos paramétricos (cânone 7,5 cabeças, penteados, guarda-roupa, animação GPU Mesh2Motion) + bicicleta, guarda-chuva e mala em 3 níveis de LOD.',
+  triangleBudget: 900,
+  heroVariants: ['male-casual', 'female-dress', 'worker', 'tourist', 'cyclist', 'bike', 'umbrella', 'luggage'],
+  lodCompareVariants: ['male-casual', 'female-dress', 'worker', 'cyclist', 'bike', 'umbrella'],
+  variants: (): WorkbenchVariant[] => [
+    ...PED_PRESETS.map((p): WorkbenchVariant => ({
+      id: p.id,
+      label: p.label,
+      category: p.category,
+      defaultColor: p.defaultTop,
+      swatches: p.swatches,
+      build: (detail?: AssetDetail) => buildPedestrian(p.id, detail),
+      pedShowcase: {
+        skinColor: p.defaultSkin,
+        hairColor: p.defaultHair,
+        bottomColor: p.defaultBottom,
+        // Cyclist posed seated on bike; pedestrians shown in crisp mid-stride walk pose
+        anim: p.id === 'cyclist' ? [0.55, 1.0, 2.0, 0.0] : [0.95, 0.85, 1.0, 0.0],
+        companion: p.id === 'cyclist'
+          ? { build: (detail?: AssetDetail) => buildBike(detail), color: BIKE_COLORS[0] }
+          : undefined,
+      },
+    })),
+    {
+      id: 'bike',
+      label: 'Bicicleta Urbana',
+      category: 'accessory',
+      defaultColor: BIKE_COLORS[0],
+      swatches: [BIKE_COLORS[0], BIKE_COLORS[1], BIKE_COLORS[2], BIKE_COLORS[4]],
+      build: (detail?: AssetDetail) => buildBike(detail),
+      pedShowcase: {
+        skinColor: 0xe2b18f,
+        hairColor: 0x31231a,
+        bottomColor: 0x2c3d59,
+        anim: [0, 0, 0, 0],
+      },
+    },
+    {
+      id: 'umbrella',
+      label: 'Guarda-Chuva',
+      category: 'accessory',
+      defaultColor: UMBRELLA_COLORS[0],
+      swatches: [UMBRELLA_COLORS[0], UMBRELLA_COLORS[1], UMBRELLA_COLORS[3], UMBRELLA_COLORS[4]],
+      build: (detail?: AssetDetail) => buildUmbrella(detail),
+      pedShowcase: {
+        skinColor: 0xe2b18f,
+        hairColor: 0x31231a,
+        bottomColor: 0x2c3d59,
+        anim: [0, 0, 0, 0],
+      },
+    },
+    {
+      id: 'luggage',
+      label: 'Mala de Rodinhas',
+      category: 'accessory',
+      defaultColor: LUGGAGE_COLORS[0],
+      swatches: [LUGGAGE_COLORS[0], LUGGAGE_COLORS[1], LUGGAGE_COLORS[3], LUGGAGE_COLORS[4]],
+      build: (detail?: AssetDetail) => buildLuggage(detail),
+      pedShowcase: {
+        skinColor: 0xe2b18f,
+        hairColor: 0x31231a,
+        bottomColor: 0x2c3d59,
+        anim: [0, 0, 0, 0],
+      },
+    },
+  ],
+};
+
 /** Central registry of all 3D asset families available in the Workbench. */
 export const WORKBENCH_FAMILIES: WorkbenchFamily[] = [
   kitFamily,
   vehiclesFamily,
+  peopleFamily,
 ];
 
 export function getFamily(id?: string | null): WorkbenchFamily {

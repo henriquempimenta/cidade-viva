@@ -1,20 +1,78 @@
 import * as THREE from 'three';
 import type { App } from '../app';
-import { MAX_PEDS, MAX_VEHICLES, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, PED_FLAG_UMBRELLA, PED_FLAG_WORKER, PED_STRIDE, TRAIN_STRIDE, VEH_FLAG_BRAKE, VEH_FLAG_HAZARD, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_STRIDE, VType, VTYPE_LEN, MAX_TRAIN_CARS, PED_FLAG_FUNERAL } from '../shared/constants';
+import {
+  MAX_PEDS,
+  MAX_TRAIN_CARS,
+  MAX_VEHICLES,
+  PED_FLAG_FUNERAL,
+  PED_FLAG_LUGGAGE,
+  PED_FLAG_TOURIST,
+  PED_FLAG_UMBRELLA,
+  PED_FLAG_WAITING,
+  PED_FLAG_WORKER,
+  PED_STRIDE,
+  TRAIN_STRIDE,
+  VEH_FLAG_BRAKE,
+  VEH_FLAG_HAZARD,
+  VEH_FLAG_SIREN,
+  VEH_FLAG_YIELD,
+  VEH_STRIDE,
+  VType,
+  VTYPE_LEN,
+} from '../shared/constants';
 /** render budgets (instances drawn per frame); the simulation itself has no such cap */
 const RENDER_PED = 6000;
 import { GB } from './geomBuilder';
-import { createAssetMaterial, createGlowMaterial } from './meshKit';
+import { createAssetMaterial, createGlowMaterial, type AssetDetail } from './meshKit';
 import { buildVehicle, VEHICLE_PRESETS, type VehicleId } from './vehicleGeom';
 import { pickVehiclePreset } from '../shared/vehiclePresets';
+import {
+  BIKE_COLORS,
+  CIVILIAN_PED_IDS,
+  LUGGAGE_COLORS,
+  PED_HAIR_PALETTE,
+  PED_PRESETS,
+  PED_SKIN_PALETTE,
+  PED_TOP_PALETTE,
+  PED_BOTTOM_PALETTE,
+  UMBRELLA_COLORS,
+  UMBRELLA_HAND_GRIP,
+  buildBike,
+  buildLuggage,
+  buildPedestrian,
+  buildUmbrella,
+  type PedId,
+} from './pedGeom';
+import {
+  PED_UNIFORMS,
+  attachPedInstanceBuffers,
+  createPedDepthMaterial,
+  createPedMaterial,
+  type PedInstanceBuffers,
+} from './pedMaterial';
 import { U } from './uniforms';
 
 const PED_FLAG_BIKE = 256;
-const W = new THREE.Color(0xffffff), DARK = new THREE.Color(0x22262b), TIRE = new THREE.Color(0x1a1a1a);
+const TIRE = new THREE.Color(0x1a1a1a);
 
 const PRESET_INDEX: Record<VehicleId, number> = Object.fromEntries(
   VEHICLE_PRESETS.map((p, idx) => [p.id, idx]),
 ) as Record<VehicleId, number>;
+
+const PED_INDEX: Record<PedId, number> = Object.fromEntries(
+  PED_PRESETS.map((p, idx) => [p.id, idx]),
+) as Record<PedId, number>;
+
+const CIVILIAN_SLOTS = CIVILIAN_PED_IDS.map((id) => PED_INDEX[id]);
+const WORKER_SLOT = PED_INDEX.worker;
+const FUNERAL_SLOT = PED_INDEX.funeral;
+const TOURIST_SLOT = PED_INDEX.tourist;
+const CYCLIST_SLOT = PED_INDEX.cyclist;
+
+const LOD_LEVELS: AssetDetail[] = ['high', 'med', 'low'];
+/** Real-time distance thresholds (meters) for 3-tier pedestrian/bike/accessory LOD. */
+const LOD_HIGH_DIST_SQ = 42 * 42;
+const LOD_MED_DIST_SQ = 115 * 115;
 
 const CAR_COLORS = [0xf2f2f2, 0x262a30, 0x8f969c, 0xb5b9bd, 0xb83832, 0x2b558c, 0x2f6b4a, 0xd4c08a, 0x6d2b45, 0x3c6fb0, 0xd99b2a, 0x4a525c];
 const OLD_COLORS = [0x5ca09b, 0xd9cba0, 0x9c3d41, 0x3f6b54, 0x6b849c, 0xc8a45a, 0x9e5a38, 0xe6decb];
@@ -35,6 +93,13 @@ const TYPE_COLOR: Partial<Record<VType, number>> = {
   [VType.Tow]: 0xe8a317,
 };
 
+interface PedInstancedBucket {
+  mesh: THREE.InstancedMesh;
+  buf: PedInstanceBuffers;
+  cap: number;
+  count: number;
+}
+
 export class AgentsLayer {
   group = new THREE.Group();
   private veh: THREE.InstancedMesh[] = [];
@@ -43,11 +108,20 @@ export class AgentsLayer {
   private sirens: THREE.InstancedMesh;
   private hazards: THREE.InstancedMesh;
   private blinkers: THREE.InstancedMesh;
-  private bodies: THREE.InstancedMesh;
-  private heads: THREE.InstancedMesh;
-  private umbrellas: THREE.InstancedMesh;
-  private bikes: THREE.InstancedMesh;
-  private bags: THREE.InstancedMesh;
+
+  // 3-tier LOD buckets for pedestrians (archetype × 3 LODs) and accessories (bike, umbrella, luggage × 3 LODs)
+  private pedMat: THREE.MeshStandardMaterial;
+  private pedDepthMat: THREE.MeshDepthMaterial;
+  private pedBuckets: PedInstancedBucket[][] = []; // [archetypeSlot][lod 0..2]
+  private bikeBuckets: PedInstancedBucket[] = [];
+  private bikeGlows: THREE.InstancedMesh[] = [];
+  private bikeGlowCounts = new Int32Array(3);
+  private umbrellaBuckets: PedInstancedBucket[] = [];
+  private luggageBuckets: PedInstancedBucket[] = [];
+  private umbLocalM = new THREE.Matrix4();
+  private umbWorldM = new THREE.Matrix4();
+  private lugLocalM = new THREE.Matrix4();
+
   private trains: THREE.InstancedMesh[] = [];
   private trainGlow: (THREE.InstancedMesh | null)[] = [];
   private trainGlowMat!: THREE.MeshBasicMaterial;
@@ -57,6 +131,9 @@ export class AgentsLayer {
   private sc = new THREE.Vector3(1, 1, 1);
   private up = new THREE.Vector3(0, 1, 0);
   private col = new THREE.Color();
+  private skinCol = new THREE.Color();
+  private hairCol = new THREE.Color();
+  private bottomCol = new THREE.Color();
   private frustum = new THREE.Frustum();
   private projScreen = new THREE.Matrix4();
   private cullSphere = new THREE.Sphere(new THREE.Vector3(), 10);
@@ -67,6 +144,7 @@ export class AgentsLayer {
   private pPos = new Float32Array(MAX_PEDS * 4);
   private tPos = new Float32Array(MAX_TRAIN_CARS * 4);
   private t = 0;
+  private pedAnimT = 0;
   lineColors = new Map<number, THREE.Color>();
 
   constructor(private app: App) {
@@ -96,24 +174,65 @@ export class AgentsLayer {
     // Discrete 4-corner amber hazard flashers for disabled/crashed civilian vehicles
     this.blinkers = new THREE.InstancedMesh(new THREE.BoxGeometry(0.20, 0.14, 0.20), new THREE.MeshBasicMaterial({ toneMapped: false }), 600);
     this.blinkers.count = 0; this.blinkers.frustumCulled = false;
-    // pedestrians
-    const pb = new GB();
-    pb.box(0, 0.85, 0, 0.32, 0.65, 0.42, W); // torso
-    pb.box(0, 0, 0.11, 0.18, 0.85, 0.16, new THREE.Color(0x3a4050)); pb.box(0, 0, -0.11, 0.18, 0.85, 0.16, new THREE.Color(0x3a4050)); // legs
-    this.bodies = new THREE.InstancedMesh(pb.toGeometry(false), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 }), RENDER_PED);
-    this.bodies.count = 0; this.bodies.frustumCulled = false; this.bodies.castShadow = true;
-    this.heads = new THREE.InstancedMesh(new THREE.SphereGeometry(0.17, 6, 5).translate(0, 1.68, 0), new THREE.MeshStandardMaterial({ roughness: 0.7 }), RENDER_PED);
-    this.heads.count = 0; this.heads.frustumCulled = false;
-    const ug = new THREE.ConeGeometry(0.7, 0.35, 8).translate(0, 2.15, 0);
-    this.umbrellas = new THREE.InstancedMesh(ug, new THREE.MeshStandardMaterial({ roughness: 0.6 }), 2000);
-    this.umbrellas.count = 0; this.umbrellas.frustumCulled = false;
-    const bk = new GB();
-    bk.box(0, 0, 0, 1.6, 0.6, 0.06, DARK); bk.box(0.6, 0, 0, 0.6, 0.6, 0.08, TIRE); bk.box(-0.6, 0, 0, 0.6, 0.6, 0.08, TIRE);
-    this.bikes = new THREE.InstancedMesh(bk.toGeometry(false), new THREE.MeshStandardMaterial({ vertexColors: true }), 1500);
-    this.bikes.count = 0; this.bikes.frustumCulled = false;
-    this.bags = new THREE.InstancedMesh(new THREE.BoxGeometry(0.3, 0.45, 0.2).translate(-0.35, 0.22, 0.3), new THREE.MeshStandardMaterial({ color: 0x8a3fb0 }), 1500);
-    this.bags.count = 0; this.bags.frustumCulled = false;
-    this.group.add(this.sirens, this.hazards, this.blinkers, this.bodies, this.heads, this.umbrellas, this.bikes, this.bags);
+
+    // ---- Parametric Pedestrians, Cyclists & Accessories with 3-tier Real-Time LOD ----
+    this.pedMat = createPedMaterial();
+    this.pedDepthMat = createPedDepthMaterial();
+
+    const makeBucket = (geo: THREE.BufferGeometry, cap: number, castShadow: boolean, receiveShadow: boolean): PedInstancedBucket => {
+      const mesh = new THREE.InstancedMesh(geo, this.pedMat, cap);
+      mesh.count = 0;
+      mesh.frustumCulled = false;
+      mesh.castShadow = castShadow;
+      mesh.receiveShadow = receiveShadow;
+      if (castShadow) mesh.customDepthMaterial = this.pedDepthMat;
+      const buf = attachPedInstanceBuffers(mesh, cap);
+      this.group.add(mesh);
+      return { mesh, buf, cap, count: 0 };
+    };
+
+    for (const preset of PED_PRESETS) {
+      const isSpecial = preset.id === 'worker' || preset.id === 'funeral' || preset.id === 'tourist' || preset.id === 'cyclist';
+      const caps = isSpecial ? [320, 600, 1200] : [350, 750, 1600];
+      const lods: PedInstancedBucket[] = [];
+      for (let l = 0; l < 3; l++) {
+        const built = buildPedestrian(preset.id, LOD_LEVELS[l]);
+        lods.push(makeBucket(built.body, caps[l], l < 2, l === 0));
+      }
+      this.pedBuckets.push(lods);
+    }
+
+    // Bicycles (+ paired night headlight/taillight glow)
+    const bikeCaps = [250, 500, 1200];
+    for (let l = 0; l < 3; l++) {
+      const built = buildBike(LOD_LEVELS[l]);
+      this.bikeBuckets.push(makeBucket(built.body, bikeCaps[l], l < 2, l === 0));
+      const gm = new THREE.InstancedMesh(built.glow!, this.vehGlowMat, bikeCaps[l]);
+      gm.count = 0; gm.frustumCulled = false;
+      this.bikeGlows.push(gm);
+      this.group.add(gm);
+    }
+
+    // Umbrellas (anchored to raised right hand) & Rolling Luggage (resting on ground beside tourist)
+    const umbCaps = [300, 600, 1500];
+    const lugCaps = [250, 500, 1000];
+    for (let l = 0; l < 3; l++) {
+      const uBuilt = buildUmbrella(LOD_LEVELS[l]);
+      this.umbrellaBuckets.push(makeBucket(uBuilt.body, umbCaps[l], l === 0, false));
+      const lBuilt = buildLuggage(LOD_LEVELS[l]);
+      this.luggageBuckets.push(makeBucket(lBuilt.body, lugCaps[l], l < 2, l === 0));
+    }
+
+    // Precompute local umbrella hand-grip matrix (places gripY inside right hand & tilts canopy over head)
+    const uDir = new THREE.Vector3(...UMBRELLA_HAND_GRIP.dir).normalize();
+    const uQ = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), uDir);
+    const uPos = new THREE.Vector3(...UMBRELLA_HAND_GRIP.offset).addScaledVector(uDir, -UMBRELLA_HAND_GRIP.gripY);
+    this.umbLocalM.compose(uPos, uQ, new THREE.Vector3(1, 1, 1));
+    // Precompute local rolling luggage offset (beside tourist's left side, wheels at Y = 0.00)
+    this.lugLocalM.makeTranslation(-0.14, 0, -0.36);
+
+    this.group.add(this.sirens, this.hazards, this.blinkers);
+
     // trains: 0 loco, 1 passenger coach, 2 container flat, 3 hopper, 4 tank, 5 metro
     // (rolling stock with bogies and wheels, after the v14 build; lit windows/headlamps live in a glow twin)
     const C = (h: number) => new THREE.Color(h);
@@ -265,6 +384,9 @@ export class AgentsLayer {
   /** stage 2 (after camera & environment update): cull against the exact rendered camera + projected sun shadows, and upload GPU instances */
   syncMeshes(dt: number) {
     this.t += dt;
+    if (this.app.speed > 0) this.pedAnimT += dt;
+    PED_UNIFORMS.uPedTime.value = this.pedAnimT;
+
     const cur = this.app.curSnap;
     if (!cur) return;
     const night = U.uNight.value;
@@ -409,55 +531,178 @@ export class AgentsLayer {
       if (this.blinkers.instanceColor) this.blinkers.instanceColor.needsUpdate = true;
     }
 
-    // ---- pedestrians ----
+    // ---- pedestrians, cyclists & accessories (3-tier real-time distance LOD) ----
+    for (let a = 0; a < this.pedBuckets.length; a++) {
+      const row = this.pedBuckets[a];
+      row[0].count = 0; row[1].count = 0; row[2].count = 0;
+    }
+    for (let l = 0; l < 3; l++) {
+      this.bikeBuckets[l].count = 0;
+      this.bikeGlowCounts[l] = 0;
+      this.umbrellaBuckets[l].count = 0;
+      this.luggageBuckets[l].count = 0;
+    }
+
     const cp = cur.ped;
-    let nb = 0, nu = 0, nbk = 0, nbag = 0;
+    let totalDrawnPeds = 0;
     const farCull = Math.max(450, camP.y * 4);
+    const followedCid = this.app.followedCitizen;
+    const followedPedSlot = this.app.follow?.kind === 'ped' ? this.app.follow.id : -1;
     const NP = cp.length / PED_STRIDE;
+
     for (let i = 0; i < NP; i++) {
       const o = i * PED_STRIDE;
       if (cp[o + 4] < 0) continue;
+      if (totalDrawnPeds >= RENDER_PED) break;
       const x = this.pPos[i * 4], y = this.pPos[i * 4 + 1], z = this.pPos[i * 4 + 2], h = this.pPos[i * 4 + 3];
-      if (nb >= RENDER_PED || Math.abs(x - camP.x) > farCull || Math.abs(z - camP.z) > farCull) continue;
+      const dxC = x - camP.x, dzC = z - camP.z;
+      if (Math.abs(dxC) > farCull || Math.abs(dzC) > farCull) continue;
       sphere.center.set(x + sOffPX, y + 1, z + sOffPZ);
       sphere.radius = rPed;
       if (!this.frustum.intersectsSphere(sphere)) continue;
+
       const flags = cp[o + 5];
       const cid = cp[o + 6];
-      const bike = (flags & PED_FLAG_BIKE) !== 0;
-      const bob = bike ? 0.55 : Math.abs(Math.sin(this.t * 7 + i)) * 0.06;
+      const seed = (cid >= 0 ? cid : i + 7777) >>> 0;
+      const isBike = (flags & PED_FLAG_BIKE) !== 0;
+      const isWorker = (flags & PED_FLAG_WORKER) !== 0;
+      const isFuneral = (flags & PED_FLAG_FUNERAL) !== 0;
+      const isTourist = (flags & PED_FLAG_TOURIST) !== 0;
+      const isWaiting = (flags & PED_FLAG_WAITING) !== 0;
+      const hasUmbrella = !isBike && (flags & PED_FLAG_UMBRELLA) !== 0;
+      const hasLuggage = !isBike && (flags & PED_FLAG_LUGGAGE) !== 0;
+
+      // Distance-based LOD selection (force `high` for followed citizen when reasonably close)
+      const dyC = y - camP.y;
+      const distSq = dxC * dxC + dyC * dyC + dzC * dzC;
+      const isFollowed = (cid >= 0 && cid === followedCid) || i === followedPedSlot;
+      let lod = distSq < LOD_HIGH_DIST_SQ ? 0 : distSq < LOD_MED_DIST_SQ ? 1 : 2;
+      if (isFollowed && distSq < 120 * 120) lod = 0;
+
+      // Archetype selection
+      const archSlot = isBike
+        ? CYCLIST_SLOT
+        : isWorker
+          ? WORKER_SLOT
+          : isFuneral
+            ? FUNERAL_SLOT
+            : isTourist
+              ? TOURIST_SLOT
+              : CIVILIAN_SLOTS[seed % CIVILIAN_SLOTS.length];
+
+      // Pick LOD bucket (fall back to coarser LOD if fine bucket reaches capacity)
+      let bucket = this.pedBuckets[archSlot][lod];
+      if (bucket.count >= bucket.cap && lod < 2) {
+        lod = Math.min(2, lod + 1);
+        bucket = this.pedBuckets[archSlot][lod];
+      }
+      if (bucket.count >= bucket.cap) continue;
+
+      const idx = bucket.count;
       this.q.setFromAxisAngle(this.up, -h);
-      this.v.set(x, y + bob, z);
+      this.v.set(x, y, z);
       this.m.compose(this.v, this.q, this.sc);
-      this.bodies.setMatrixAt(nb, this.m);
-      this.heads.setMatrixAt(nb, this.m);
-      const seed = cid >= 0 ? cid : i + 7777;
-      if (flags & PED_FLAG_WORKER) this.col.setHex(0xff8a1a);
-      else if (flags & PED_FLAG_FUNERAL) this.col.setHex(0x151515);
-      else this.col.setHSL(((seed * 0.61803) % 1), 0.45 + ((seed * 7) % 10) / 30, 0.38 + ((seed * 13) % 10) / 40);
-      this.bodies.setColorAt(nb, this.col);
-      if (flags & PED_FLAG_WORKER) this.col.setHex(0xffd21a);
-      else this.col.setHSL(0.07, 0.4 + ((seed * 3) % 10) / 40, 0.25 + ((seed * 11) % 10) / 22);
-      this.heads.setColorAt(nb, this.col);
-      nb++;
-      if (bike && nbk < 1500) { this.v.y = y; this.m.compose(this.v, this.q, this.sc); this.bikes.setMatrixAt(nbk++, this.m); }
-      if (flags & PED_FLAG_UMBRELLA && nu < 2000) {
-        this.v.y = y + bob;
-        this.m.compose(this.v, this.q, this.sc);
-        this.umbrellas.setMatrixAt(nu, this.m);
-        this.col.setHSL(((seed * 0.31) % 1), 0.6, 0.45);
-        this.umbrellas.setColorAt(nu, this.col);
-        nu++;
+      bucket.mesh.setMatrixAt(idx, this.m);
+
+      // Multi-zone realistic colors per citizen
+      const h1 = ((seed * 2654435761) >>> 0);
+      const h2 = ((seed * 2246822519 + 17) >>> 0);
+      if (isWorker) {
+        this.col.setHex(0xe67319);
+        this.bottomCol.setHex(0x2d3440);
+      } else if (isFuneral) {
+        this.col.setHex(0x1e2126);
+        this.bottomCol.setHex(0x181a1f);
+      } else {
+        this.col.setHex(PED_TOP_PALETTE[h1 % PED_TOP_PALETTE.length]);
+        this.bottomCol.setHex(PED_BOTTOM_PALETTE[(h2 >>> 4) % PED_BOTTOM_PALETTE.length]);
       }
-      if ((flags & (PED_FLAG_LUGGAGE | PED_FLAG_TOURIST)) && nbag < 1500) { this.v.y = y; this.m.compose(this.v, this.q, this.sc); this.bags.setMatrixAt(nbag++, this.m); }
+      this.skinCol.setHex(PED_SKIN_PALETTE[(h1 >>> 8) % PED_SKIN_PALETTE.length]);
+      this.hairCol.setHex(PED_HAIR_PALETTE[(h2 >>> 12) % PED_HAIR_PALETTE.length]);
+
+      bucket.mesh.setColorAt(idx, this.col);
+      const i3 = idx * 3;
+      const bBuf = bucket.buf;
+      bBuf.skin[i3] = this.skinCol.r; bBuf.skin[i3 + 1] = this.skinCol.g; bBuf.skin[i3 + 2] = this.skinCol.b;
+      bBuf.hair[i3] = this.hairCol.r; bBuf.hair[i3 + 1] = this.hairCol.g; bBuf.hair[i3 + 2] = this.hairCol.b;
+      bBuf.bottom[i3] = this.bottomCol.r; bBuf.bottom[i3 + 1] = this.bottomCol.g; bBuf.bottom[i3 + 2] = this.bottomCol.b;
+
+      // GPU vertex animation parameters: (phase, strideAmp, mode, umbrellaLift)
+      const i4 = idx * 4;
+      const phase = ((seed * 1.6180339) % 1) * Math.PI * 2;
+      const mode = isBike ? 2.0 : isWaiting ? 0.0 : 1.0;
+      const amp = isWaiting ? 0.0 : isBike ? 1.0 : 0.88 + ((seed % 5) * 0.04);
+      bBuf.anim[i4] = phase;
+      bBuf.anim[i4 + 1] = amp;
+      bBuf.anim[i4 + 2] = mode;
+      bBuf.anim[i4 + 3] = hasUmbrella ? 1.0 : 0.0;
+
+      bucket.count++;
+      totalDrawnPeds++;
+
+      // Paired bicycle (+ night headlight/taillight glow)
+      if (isBike) {
+        const bk = this.bikeBuckets[lod];
+        if (bk.count < bk.cap) {
+          const bi = bk.count;
+          bk.mesh.setMatrixAt(bi, this.m);
+          this.col.setHex(BIKE_COLORS[(h2 >>> 2) % BIKE_COLORS.length]);
+          bk.mesh.setColorAt(bi, this.col);
+          const bi4 = bi * 4;
+          bk.buf.anim[bi4] = phase;
+          bk.buf.anim[bi4 + 1] = isWaiting ? 0.0 : 1.0;
+          bk.buf.anim[bi4 + 2] = 0.0;
+          bk.buf.anim[bi4 + 3] = 0.0;
+          bk.count++;
+          if (night > 0.05 && this.bikeGlowCounts[lod] < bk.cap) {
+            this.bikeGlows[lod].setMatrixAt(this.bikeGlowCounts[lod]++, this.m);
+          }
+        }
+      }
+
+      // Paired umbrella positioned inside the raised right hand
+      if (hasUmbrella) {
+        const ub = this.umbrellaBuckets[lod];
+        if (ub.count < ub.cap) {
+          const ui = ub.count;
+          this.umbWorldM.multiplyMatrices(this.m, this.umbLocalM);
+          ub.mesh.setMatrixAt(ui, this.umbWorldM);
+          this.col.setHex(UMBRELLA_COLORS[(h1 >>> 3) % UMBRELLA_COLORS.length]);
+          ub.mesh.setColorAt(ui, this.col);
+          const ui4 = ui * 4;
+          ub.buf.anim[ui4] = 0; ub.buf.anim[ui4 + 1] = 0; ub.buf.anim[ui4 + 2] = 0; ub.buf.anim[ui4 + 3] = 0;
+          ub.count++;
+        }
+      }
+
+      // Paired rolling suitcase beside tourist (wheels flush on ground Y = 0)
+      if (hasLuggage) {
+        const lb = this.luggageBuckets[lod];
+        if (lb.count < lb.cap) {
+          const li = lb.count;
+          this.umbWorldM.multiplyMatrices(this.m, this.lugLocalM);
+          lb.mesh.setMatrixAt(li, this.umbWorldM);
+          this.col.setHex(LUGGAGE_COLORS[(h2 >>> 6) % LUGGAGE_COLORS.length]);
+          lb.mesh.setColorAt(li, this.col);
+          const li4 = li * 4;
+          lb.buf.anim[li4] = 0; lb.buf.anim[li4 + 1] = 0; lb.buf.anim[li4 + 2] = 0; lb.buf.anim[li4 + 3] = 0;
+          lb.count++;
+        }
+      }
     }
-    for (const [im, n] of [[this.bodies, nb], [this.heads, nb], [this.umbrellas, nu], [this.bikes, nbk], [this.bags, nbag]] as [THREE.InstancedMesh, number][]) {
-      const prevC = im.count;
-      im.count = n;
-      if (n > 0 || prevC > 0) {
-        im.instanceMatrix.needsUpdate = true;
-        if (im.instanceColor) im.instanceColor.needsUpdate = true;
-      }
+
+    for (let a = 0; a < this.pedBuckets.length; a++) {
+      const row = this.pedBuckets[a];
+      this.flushBucket(row[0]); this.flushBucket(row[1]); this.flushBucket(row[2]);
+    }
+    for (let l = 0; l < 3; l++) {
+      this.flushBucket(this.bikeBuckets[l]);
+      this.flushBucket(this.umbrellaBuckets[l]);
+      this.flushBucket(this.luggageBuckets[l]);
+      const gm = this.bikeGlows[l];
+      const prevG = gm.count;
+      gm.count = this.bikeGlowCounts[l];
+      if (gm.count > 0 || prevG > 0) gm.instanceMatrix.needsUpdate = true;
     }
 
     // ---- trains ----
@@ -491,6 +736,16 @@ export class AgentsLayer {
       gm.count = nc;
       if (nc > 0 || prevC > 0) gm.instanceMatrix.needsUpdate = true;
     });
+  }
+
+  private flushBucket(b: PedInstancedBucket) {
+    const prevC = b.mesh.count;
+    b.mesh.count = b.count;
+    if (b.count > 0 || prevC > 0) {
+      b.mesh.instanceMatrix.needsUpdate = true;
+      if (b.mesh.instanceColor) b.mesh.instanceColor.needsUpdate = true;
+      b.buf.markUpdated();
+    }
   }
 
   update(dt: number, alpha: number) {

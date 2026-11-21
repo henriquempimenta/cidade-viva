@@ -34,5 +34,6 @@ Este arquivo registra ressalvas aprovadas para iteração futura e o backlog de 
 ## Próximas Frentes 3D *(agendadas para a entrega depois da próxima — cada frente em um loop distinto: agente dedicado + bancada + avaliador independente com notas ≥ 7)*
 - [ ] **Frente 2 — Material Rodante Ferroviário e Metrô** (`src/render/railGeom.ts`): locomotiva, carros de passageiros, metrô, contêiner, hopper e vagão-tanque cilíndrico real + truques/pantógrafos + janelas emissivas.
 - [ ] **Frente 3 — Árvores e Vegetação** (`src/render/trees.ts`): gerador paramétrico de troncos, galhos e copas em camadas compatível com `swayMaterial()` e chunks 400×400 m.
-- [ ] **Frente 4 — Pedestres, Ciclistas e Mobiliário Urbano**: corpos proporcionais, bicicletas com quadro/guidão, postes, semáforos de 3 lentes, cancelas listradas e máquinas de obra.
+- [x] **Frente 4a — Pedestres, Ciclistas & Acessórios com LOD em Tempo Real** (`src/render/pedGeom.ts`, `src/render/pedMaterial.ts`, `src/render/agentsLayer.ts`): 10 arquétipos humanos paramétricos (cânone 7,5 cabeças, penteados 3D, guarda-roupa, animação GPU Mesh2Motion + IK 2-ossos para pedalada), bicicleta tubular com farol/lanterna `glow`, guarda-chuva recortado ancorado na mão e mala de rodinhas em 3 níveis de LOD (`high` / `med` / `low`).
+- [ ] **Frente 4b — Mobiliário Urbano**: postes, semáforos de 3 lentes, cancelas listradas e máquinas de obra.
 - [ ] **Frente 5 — Edificações e Marcos** (`src/render/buildingGeom.ts`): módulos arquitetônicos paramétricos preservando `aWin`, degradação e chunks 300×300 m.

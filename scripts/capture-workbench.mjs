@@ -125,11 +125,13 @@ async function main() {
     await runChromium(`${baseUrl}?family=${encodeURIComponent(args.family)}&mode=lineup&time=night`, lineupNight, args.width, 900, profileDir);
     shots.push({ file: lineupNight, kind: 'lineup-night' });
 
-    // Discover how many variants exist from lineup DOM banner
+    // Discover how many variants & default hero/LOD lists exist from lineup DOM
     const dom = await dumpMeta(`${baseUrl}?family=${encodeURIComponent(args.family)}&mode=lineup&time=day`, profileDir);
     const countMatch = dom.match(/\((\d+)\s+variantes/);
     const totalVariants = countMatch ? Number(countMatch[1]) : 1;
     const pages = Math.max(1, Math.ceil(totalVariants / 6));
+    const heroAttrMatch = dom.match(/data-hero-variants="([^"]+)"/);
+    const lodAttrMatch = dom.match(/data-lod-variants="([^"]+)"/);
 
     // 2. Close-up grids covering every variant in the family
     for (let p = 0; p < pages; p++) {
@@ -138,8 +140,9 @@ async function main() {
       shots.push({ file: f, kind: `closeup-grid-p${p + 1}` });
     }
 
-    // 3. Multi-angle 2x3 hero sheets for requested variants (or default first variant if none given)
-    const heroIds = args.variants ? args.variants.split(',').map((s) => s.trim()).filter(Boolean) : [''];
+    // 3. Multi-angle 2x3 hero sheets for requested variants (or family's heroVariants if defined)
+    const defaultHeroes = heroAttrMatch ? heroAttrMatch[1].split(',').map((s) => s.trim()).filter(Boolean) : [''];
+    const heroIds = args.variants ? args.variants.split(',').map((s) => s.trim()).filter(Boolean) : defaultHeroes;
     for (let i = 0; i < heroIds.length; i++) {
       const vid = heroIds[i];
       const suffix = vid || 'default';
@@ -147,6 +150,13 @@ async function main() {
       const q = vid ? `&variant=${encodeURIComponent(vid)}` : '';
       await runChromium(`${baseUrl}?family=${encodeURIComponent(args.family)}&mode=sheet${q}`, f, args.width, args.height, profileDir);
       shots.push({ file: f, kind: `sheet-${suffix}` });
+    }
+
+    // 4. Real-time LOD side-by-side comparison sheet (high | med | low) when family defines lodCompareVariants
+    if (lodAttrMatch) {
+      const lodFile = resolve(outDir, '05-lod-compare.png');
+      await runChromium(`${baseUrl}?family=${encodeURIComponent(args.family)}&mode=lod-compare&time=day`, lodFile, args.width, args.height, profileDir);
+      shots.push({ file: lodFile, kind: 'lod-compare' });
     }
 
     const manifest = {

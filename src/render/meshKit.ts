@@ -137,13 +137,18 @@ export class MeshBuilder {
     if (prev) this.xf = prev;
   }
 
-  private pushVertex(x: number, y: number, z: number, nx: number, ny: number, nz: number, r: number, g: number, b: number, s: SurfMat) {
+  protected onPushVertex() {
+    // Subclasses (e.g. PedMeshBuilder) can append extra per-vertex attributes in lockstep.
+  }
+
+  protected pushVertex(x: number, y: number, z: number, nx: number, ny: number, nz: number, r: number, g: number, b: number, s: SurfMat) {
     const { tx, ty, tz, ca, sa } = this.xf;
     this.pos.push(tx + x * ca - z * sa, ty + y, tz + x * sa + z * ca);
     this.nor.push(nx * ca - nz * sa, ny, nx * sa + nz * ca);
     this.col.push(r, g, b);
     this.tint.push(s.tint);
     this.mat.push(s.roughness, s.metalness);
+    this.onPushVertex();
   }
 
   /** Emit one triangle with auto-computed flat outward normal (CCW winding). */

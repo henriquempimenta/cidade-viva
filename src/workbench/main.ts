@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { createAssetMaterial, createGlowMaterial, type AssetBuildResult, type AssetDetail } from '../render/meshKit';
+import { attachPedInstanceBuffers, createPedDepthMaterial, createPedMaterial } from '../render/pedMaterial';
 import { getFamily, WORKBENCH_FAMILIES } from './registry';
-import type { WorkbenchFamily, WorkbenchVariant } from './types';
+import type { PedShowcaseConfig, WorkbenchFamily, WorkbenchVariant } from './types';
 
 type TimeOfDay = 'day' | 'dawn' | 'night';
-type CaptureMode = 'interactive' | 'sheet' | 'lineup' | 'closeup-grid';
+type CaptureMode = 'interactive' | 'sheet' | 'lineup' | 'closeup-grid' | 'lod-compare';
 
 interface WorkbenchWindow extends Window {
   __WORKBENCH_META__?: Record<string, unknown>;
@@ -33,7 +34,10 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 
+const wbPedTime = { value: 0 };
 const bodyMat = createAssetMaterial();
+const pedMat = createPedMaterial({ timeUniform: wbPedTime });
+const pedDepthMat = createPedDepthMaterial(wbPedTime);
 const glowMat = createGlowMaterial();
 
 interface StudioRig {
@@ -128,17 +132,38 @@ function createStudio(): StudioRig {
   return { scene, sun, fill, hemi, ground, grid, content, setTime };
 }
 
-/** Place one or more instances of a built asset using the exact InstancedMesh + aTint path used in-game. */
+interface Placement {
+  x: number;
+  y: number;
+  z: number;
+  yaw?: number;
+  color: number;
+  anim?: [number, number, number, number];
+}
+
+/** Place one or more instances of a built asset using the exact InstancedMesh path used in-game. */
 function makeAssetInstances(
   built: AssetBuildResult,
-  placements: { x: number; y: number; z: number; yaw?: number; color: number }[],
+  placements: Placement[],
   showGlow: boolean,
+  pedShowcase?: PedShowcaseConfig,
+  detail: AssetDetail = detailParam,
 ): THREE.Group {
   const grp = new THREE.Group();
   const n = placements.length;
-  const im = new THREE.InstancedMesh(built.body, bodyMat, n);
+  const isPed = Boolean(pedShowcase) && Boolean(built.body.getAttribute('aPedMeta'));
+  const mat = isPed ? pedMat : bodyMat;
+  const im = new THREE.InstancedMesh(built.body, mat, n);
   im.castShadow = true;
   im.receiveShadow = true;
+  if (isPed) im.customDepthMaterial = pedDepthMat;
+
+  const pedBuf = isPed ? attachPedInstanceBuffers(im, n) : null;
+  const skinC = new THREE.Color(pedShowcase?.skinColor ?? 0xe2b18f);
+  const hairC = new THREE.Color(pedShowcase?.hairColor ?? 0x31231a);
+  const botC = new THREE.Color(pedShowcase?.bottomColor ?? 0x2c3d59);
+  const defAnim = pedShowcase?.anim ?? [0, 0, 0, 0];
+
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(1, 1, 1);
   const up = new THREE.Vector3(0, 1, 0), col = new THREE.Color();
   for (let i = 0; i < n; i++) {
@@ -147,9 +172,19 @@ function makeAssetInstances(
     m.compose(p.set(pl.x, pl.y, pl.z), q, s);
     im.setMatrixAt(i, m);
     im.setColorAt(i, col.setHex(pl.color));
+    if (pedBuf) {
+      const i3 = i * 3;
+      pedBuf.skin[i3] = skinC.r; pedBuf.skin[i3 + 1] = skinC.g; pedBuf.skin[i3 + 2] = skinC.b;
+      pedBuf.hair[i3] = hairC.r; pedBuf.hair[i3 + 1] = hairC.g; pedBuf.hair[i3 + 2] = hairC.b;
+      pedBuf.bottom[i3] = botC.r; pedBuf.bottom[i3 + 1] = botC.g; pedBuf.bottom[i3 + 2] = botC.b;
+      const a = pl.anim ?? defAnim;
+      const i4 = i * 4;
+      pedBuf.anim[i4] = a[0]; pedBuf.anim[i4 + 1] = a[1]; pedBuf.anim[i4 + 2] = a[2]; pedBuf.anim[i4 + 3] = a[3];
+    }
   }
   im.instanceMatrix.needsUpdate = true;
   if (im.instanceColor) im.instanceColor.needsUpdate = true;
+  pedBuf?.markUpdated();
   grp.add(im);
 
   if (built.glow && showGlow) {
@@ -163,6 +198,29 @@ function makeAssetInstances(
     gm.instanceMatrix.needsUpdate = true;
     grp.add(gm);
   }
+
+  // Optional companion asset (e.g. bicycle directly under mounted cyclist, synced crank phase)
+  if (pedShowcase?.companion) {
+    const compBuilt = pedShowcase.companion.build(detail);
+    const compPlacements = placements.map((pl) => {
+      const baseAnim = pl.anim ?? defAnim;
+      return {
+        ...pl,
+        color: pedShowcase.companion!.color,
+        anim: [baseAnim[0], baseAnim[1], 0, 0] as [number, number, number, number],
+      };
+    });
+    grp.add(
+      makeAssetInstances(
+        compBuilt,
+        compPlacements,
+        showGlow,
+        { skinColor: 0xe2b18f, hairColor: 0x31231a, bottomColor: 0x2c3d59, anim: [defAnim[0], defAnim[1], 0, 0] },
+        detail,
+      ),
+    );
+  }
+
   return grp;
 }
 
@@ -191,8 +249,17 @@ function addBanner(left: string, right: string) {
   overlayEl.appendChild(el);
 }
 
+function effectiveSize(built: AssetBuildResult, variant: WorkbenchVariant): [number, number, number] {
+  const s = built.meta.size;
+  if (variant.pedShowcase?.companion) {
+    // Cyclist mounted on bike spans ~1.74m along X and ~1.68m along Y
+    return [Math.max(s[0], 1.75), Math.max(s[1], 1.68), Math.max(s[2], 0.62)];
+  }
+  return s;
+}
+
 function frameDistance(size: [number, number, number], fovDeg: number, aspect: number, fill = 0.62): number {
-  const radius = Math.max(0.8, Math.hypot(size[0], size[1], size[2]) * 0.5);
+  const radius = Math.max(0.65, Math.hypot(size[0], size[1], size[2]) * 0.5);
   const vFov = THREE.MathUtils.degToRad(fovDeg);
   const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
   const minFov = Math.min(vFov, hFov);
@@ -206,8 +273,10 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
   overlayEl.innerHTML = '';
 
   const built = variant.build(detailParam);
-  const { size, triangles, glowTriangles, minY } = built.meta;
-  const targetY = Math.max(0.45, size[1] * 0.45);
+  const { triangles, glowTriangles, minY } = built.meta;
+  const size = effectiveSize(built, variant);
+  const isSmallAsset = size[0] < 2.2 && size[1] < 2.2;
+  const targetY = Math.max(0.38, size[1] * 0.48);
   const W = window.innerWidth, H = window.innerHeight;
   const bannerH = 34;
   const gridH = H - bannerH;
@@ -217,7 +286,7 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
 
   addBanner(
     `${family.title} — ${variant.label} [${variant.id}]`,
-    `tris: ${triangles} (glow: ${glowTriangles}) | L×H×W: ${size[0]}×${size[1]}×${size[2]}m | minY: ${minY}m`,
+    `tris: ${triangles} (glow: ${glowTriangles}) | L×H×W: ${built.meta.size[0]}×${built.meta.size[1]}×${built.meta.size[2]}m | minY: ${minY}m`,
   );
 
   // Dividers
@@ -234,7 +303,8 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
 
   renderer.setScissorTest(true);
   const cam = new THREE.PerspectiveCamera(36, aspect, 0.1, 500);
-  const baseDist = frameDistance(size, 36, aspect, 0.68);
+  const baseDist = frameDistance(size, 36, aspect, isSmallAsset ? 0.56 : 0.68);
+  const swatchGap = isSmallAsset ? Math.max(size[2] * 1.9, 1.15) : Math.max(size[2] + 1.1, 2.8);
 
   const cells: {
     col: number; row: number; label: string; tod: TimeOfDay;
@@ -243,58 +313,57 @@ function renderHeroSheet(studio: StudioRig, family: WorkbenchFamily, variant: Wo
   }[] = [
     {
       col: 0, row: 0, label: '1. Close-Up 3/4 Frente (Dia)', tod: 'day',
-      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true)),
-      camPos: [baseDist * 0.82, targetY + baseDist * 0.36, baseDist * 0.62],
+      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true, variant.pedShowcase)),
+      camPos: [baseDist * 0.84, targetY + baseDist * 0.28, baseDist * 0.64],
       lookAt: [0, targetY, 0],
     },
     {
       col: 1, row: 0, label: '2. Close-Up 3/4 Traseira (Dia)', tod: 'day',
-      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true)),
-      camPos: [-baseDist * 0.84, targetY + baseDist * 0.38, -baseDist * 0.60],
+      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true, variant.pedShowcase)),
+      camPos: [-baseDist * 0.84, targetY + baseDist * 0.30, -baseDist * 0.62],
       lookAt: [0, targetY, 0],
     },
     {
       col: 2, row: 0, label: '3. Perfil Lateral (Escala & Solo Y=0)', tod: 'day',
-      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true)),
-      camPos: [0, targetY + 0.15, baseDist * 1.48],
+      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true, variant.pedShowcase)),
+      camPos: [0, targetY + 0.08, baseDist * 1.52],
       lookAt: [0, targetY, 0],
       fov: 24,
     },
     {
       col: 0, row: 1, label: '4. Close-Up 3/4 Frente (Noite + Emissivos)', tod: 'night',
-      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true)),
-      camPos: [baseDist * 0.84, targetY + baseDist * 0.34, baseDist * 0.62],
+      setup: () => studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: variant.defaultColor }], true, variant.pedShowcase)),
+      camPos: [baseDist * 0.84, targetY + baseDist * 0.28, baseDist * 0.64],
       lookAt: [0, targetY, 0],
     },
     {
-      col: 1, row: 1, label: '5. Distância de Cidade (~35m, 34°)', tod: 'day',
+      col: 1, row: 1, label: isSmallAsset ? '5. Distância de Cidade (~24m, 34°)' : '5. Distância de Cidade (~35m, 34°)', tod: 'day',
       setup: () => {
-        const sp = Math.max(size[2] * 2.2, 3.6);
+        const sp = isSmallAsset ? Math.max(size[2] * 2.4, 1.8) : Math.max(size[2] * 2.2, 3.6);
         const sw = variant.swatches;
         studio.content.add(makeAssetInstances(built, [
           { x: 0, y: 0, z: 0, color: variant.defaultColor },
-          { x: size[0] * 1.4, y: 0, z: -sp, color: sw[1 % sw.length] },
-          { x: -size[0] * 1.3, y: 0, z: sp, color: sw[2 % sw.length] },
-        ], true));
+          { x: Math.max(size[0] * 1.4, 1.4), y: 0, z: -sp, color: sw[1 % sw.length] },
+          { x: -Math.max(size[0] * 1.3, 1.3), y: 0, z: sp, color: sw[2 % sw.length] },
+        ], true, variant.pedShowcase));
       },
-      camPos: [26, 22, 24],
+      camPos: isSmallAsset ? [14, 13, 14] : [26, 22, 24],
       lookAt: [0, targetY, 0],
       fov: 40,
     },
     {
-      col: 2, row: 1, label: '6. Variação de Cores (aTint × 4)', tod: 'dawn',
+      col: 2, row: 1, label: '6. Variação de Cores (aZone/aTint × 4)', tod: 'dawn',
       setup: () => {
         const sw = variant.swatches;
-        const gap = Math.max(size[2] + 1.1, 2.8);
         const pls = sw.slice(0, 4).map((color, idx) => ({
-          x: (idx - 1.5) * 0.7,
+          x: (idx - 1.5) * (isSmallAsset ? 0.28 : 0.7),
           y: 0,
-          z: (idx - 1.5) * gap,
+          z: (idx - 1.5) * swatchGap,
           color,
         }));
-        studio.content.add(makeAssetInstances(built, pls, true));
+        studio.content.add(makeAssetInstances(built, pls, true, variant.pedShowcase));
       },
-      camPos: [baseDist * 1.45, targetY + baseDist * 0.78, baseDist * 1.35],
+      camPos: [baseDist * (isSmallAsset ? 1.55 : 1.45), targetY + baseDist * 0.62, baseDist * (isSmallAsset ? 1.40 : 1.35)],
       lookAt: [0, targetY, 0],
     },
   ];
@@ -335,42 +404,45 @@ function renderLineup(studio: StudioRig, family: WorkbenchFamily, variants: Work
   const bannerH = 34;
   const builtList = variants.map((v) => ({ v, built: v.build(detailParam) }));
 
-  // Lay out in 2 neat rows along Z if > 7 variants, else 1 row
+  const maxLen = Math.max(...builtList.map((b) => effectiveSize(b.built, b.v)[0]));
+  const isCompact = maxLen < 2.5;
   const perRow = builtList.length > 7 ? Math.ceil(builtList.length / 2) : builtList.length;
-  const rowDepth = Math.max(...builtList.map((b) => b.built.meta.size[0])) + 3.2;
+  const rowDepth = maxLen + (isCompact ? 1.85 : 3.2);
 
   clearGroup(studio.content);
   studio.setTime(tod);
 
-  let minZ = Infinity, maxZ = -Infinity, maxH = 2;
+  let minZ = Infinity, maxZ = -Infinity, maxH = 1.6;
   const rowOffsets = new Array<number>(Math.ceil(builtList.length / perRow)).fill(0);
   const placements: { built: AssetBuildResult; v: WorkbenchVariant; x: number; z: number }[] = [];
 
   for (let i = 0; i < builtList.length; i++) {
     const r = Math.floor(i / perRow);
     const { v, built } = builtList[i];
-    const w = Math.max(built.meta.size[2], 1.6);
+    const sz = effectiveSize(built, v);
+    const w = Math.max(sz[2], isCompact ? 0.92 : 1.6);
     const z = rowOffsets[r] + w * 0.5;
-    rowOffsets[r] += w + 1.5;
+    rowOffsets[r] += w + (isCompact ? 0.65 : 1.5);
     const x = (r - (rowOffsets.length - 1) * 0.5) * -rowDepth;
     placements.push({ built, v, x, z });
-    maxH = Math.max(maxH, built.meta.size[1]);
+    maxH = Math.max(maxH, sz[1]);
   }
   // Center each row along Z
   for (const p of placements) {
     const r = Math.floor(placements.indexOf(p) / perRow);
     p.z -= rowOffsets[r] * 0.5;
-    minZ = Math.min(minZ, p.z - p.built.meta.size[2] * 0.5);
-    maxZ = Math.max(maxZ, p.z + p.built.meta.size[2] * 0.5);
-    studio.content.add(makeAssetInstances(p.built, [{ x: p.x, y: 0, z: p.z, color: p.v.defaultColor }], true));
+    const sz = effectiveSize(p.built, p.v);
+    minZ = Math.min(minZ, p.z - sz[2] * 0.5);
+    maxZ = Math.max(maxZ, p.z + sz[2] * 0.5);
+    studio.content.add(makeAssetInstances(p.built, [{ x: p.x, y: 0, z: p.z, color: p.v.defaultColor }], true, p.v.pedShowcase));
   }
 
-  const spanZ = Math.max(8, maxZ - minZ + 3);
-  const spanX = Math.max(6, rowOffsets.length * rowDepth);
+  const spanZ = Math.max(isCompact ? 5.5 : 8, maxZ - minZ + (isCompact ? 1.8 : 3));
+  const spanX = Math.max(isCompact ? 3.5 : 6, rowOffsets.length * rowDepth);
   const cam = new THREE.PerspectiveCamera(34, W / (H - bannerH), 0.2, 600);
-  const dist = Math.max(spanZ * 0.92, spanX * 1.15);
-  cam.position.set(dist * 0.85, maxH * 1.6 + dist * 0.36, dist * 0.62);
-  cam.lookAt(0, maxH * 0.32, 0);
+  const dist = Math.max(spanZ * (isCompact ? 0.85 : 0.92), spanX * 1.15);
+  cam.position.set(dist * 0.85, maxH * 1.25 + dist * 0.30, dist * 0.58);
+  cam.lookAt(0, maxH * 0.42, 0);
 
   renderer.setViewport(0, 0, W, H - bannerH);
   renderer.render(studio.scene, cam);
@@ -382,6 +454,10 @@ function renderLineup(studio: StudioRig, family: WorkbenchFamily, variants: Work
     `max tris: ${maxTris} (orçamento: ${family.triangleBudget}) | soma: ${totalTris}`,
   );
   addLabel(12, bannerH + 10, `Escala relativa 1:1 | Grade = 1 m | Frente = +X`);
+
+  // Expose family automation hints in DOM data attributes for capture-workbench.mjs
+  if (family.heroVariants?.length) overlayEl.dataset.heroVariants = family.heroVariants.join(',');
+  if (family.lodCompareVariants?.length) overlayEl.dataset.lodVariants = family.lodCompareVariants.join(',');
 
   const win = window as WorkbenchWindow;
   win.__WORKBENCH_META__ = {
@@ -432,10 +508,11 @@ function renderCloseupGrid(studio: StudioRig, family: WorkbenchFamily, variants:
     const col = idx % cols, row = Math.floor(idx / cols);
     clearGroup(studio.content);
     studio.setTime(tod);
-    studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: v.defaultColor }], true));
-    const d = frameDistance(built.meta.size, 36, aspect, 0.72);
-    const ty = Math.max(0.45, built.meta.size[1] * 0.45);
-    cam.position.set(d * 0.82, ty + d * 0.36, d * 0.62);
+    studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: v.defaultColor }], true, v.pedShowcase));
+    const sz = effectiveSize(built, v);
+    const d = frameDistance(sz, 36, aspect, sz[0] < 2.2 ? 0.58 : 0.72);
+    const ty = Math.max(0.38, sz[1] * 0.48);
+    cam.position.set(d * 0.84, ty + d * 0.28, d * 0.64);
     cam.lookAt(0, ty, 0);
     const vx = col * cw, vy = (rows - 1 - row) * ch;
     renderer.setViewport(vx, vy, cw, ch);
@@ -450,6 +527,85 @@ function renderCloseupGrid(studio: StudioRig, family: WorkbenchFamily, variants:
   win.__WORKBENCH_READY__ = true;
 }
 
+/** Render a 3x2 LOD comparison sheet: each cell places high | med | low side-by-side. */
+function renderLodCompare(studio: StudioRig, family: WorkbenchFamily, variants: WorkbenchVariant[], tod: TimeOfDay) {
+  uiEl.style.display = 'none';
+  metricsEl.style.display = 'none';
+  overlayEl.innerHTML = '';
+
+  const pickIds = family.lodCompareVariants ?? variants.slice(0, 6).map((v) => v.id);
+  const slice = pickIds
+    .map((id) => variants.find((v) => v.id === id))
+    .filter((v): v is WorkbenchVariant => Boolean(v))
+    .slice(0, 6);
+
+  const W = window.innerWidth, H = window.innerHeight;
+  const bannerH = 34;
+  const gridH = H - bannerH;
+  const cols = 3, rows = 2;
+  const cw = Math.floor(W / cols), ch = Math.floor(gridH / rows);
+  const aspect = cw / ch;
+
+  addBanner(
+    `${family.title} — Comparativo de LOD em Tempo Real (HIGH | MED | LOW)`,
+    `Distâncias na cidade: HIGH < 42m | MED 42–115m | LOW > 115m`,
+  );
+  const dh = document.createElement('div');
+  dh.className = 'sheet-divider-h';
+  dh.style.top = `${bannerH + ch}px`;
+  overlayEl.appendChild(dh);
+  for (let c = 1; c < cols; c++) {
+    const dv = document.createElement('div');
+    dv.className = 'sheet-divider-v';
+    dv.style.left = `${c * cw}px`;
+    overlayEl.appendChild(dv);
+  }
+
+  renderer.setScissorTest(true);
+  const cam = new THREE.PerspectiveCamera(34, aspect, 0.1, 400);
+  const lodLevels: AssetDetail[] = ['high', 'med', 'low'];
+  const summary = [];
+
+  for (let idx = 0; idx < slice.length; idx++) {
+    const v = slice[idx];
+    const col = idx % cols, row = Math.floor(idx / cols);
+    clearGroup(studio.content);
+    studio.setTime(tod);
+
+    const builds = lodLevels.map((d) => ({ d, built: v.build(d) }));
+    const refSize = effectiveSize(builds[0].built, v);
+    const gap = Math.max(refSize[2] * 1.85, 1.12);
+
+    // Place HIGH (left in +X camera view = +Z), MED (center = 0), LOW (right = -Z) to match HIGH | MED | LOW banner
+    builds.forEach((entry, k) => {
+      const z = (1 - k) * gap;
+      studio.content.add(
+        makeAssetInstances(entry.built, [{ x: 0, y: 0, z, color: v.defaultColor }], true, v.pedShowcase, entry.d),
+      );
+    });
+
+    const spanSize: [number, number, number] = [refSize[0], refSize[1], gap * 2.5 + refSize[2]];
+    const dist = frameDistance(spanSize, 34, aspect, 0.72);
+    const ty = Math.max(0.38, refSize[1] * 0.48);
+    cam.position.set(dist * 0.94, ty + dist * 0.24, dist * 0.32);
+    cam.lookAt(0, ty, 0);
+
+    const vx = col * cw, vy = (rows - 1 - row) * ch;
+    renderer.setViewport(vx, vy, cw, ch);
+    renderer.setScissor(vx, vy, cw, ch);
+    renderer.render(studio.scene, cam);
+
+    const [tH, tM, tL] = builds.map((b) => b.built.meta.triangles);
+    summary.push({ id: v.id, high: tH, med: tM, low: tL });
+    addLabel(vx + 10, bannerH + row * ch + 10, `${v.label} — HIGH: ${tH} | MED: ${tM} | LOW: ${tL} tris`);
+  }
+  renderer.setScissorTest(false);
+
+  const win = window as WorkbenchWindow;
+  win.__WORKBENCH_META__ = { mode: 'lod-compare', family: family.id, lods: summary };
+  win.__WORKBENCH_READY__ = true;
+}
+
 /** Interactive studio mode for human exploration. */
 function runInteractive(studio: StudioRig, initialFamily: WorkbenchFamily) {
   let family = initialFamily;
@@ -457,22 +613,25 @@ function runInteractive(studio: StudioRig, initialFamily: WorkbenchFamily) {
   let curVariant = variants.find((v) => v.id === variantParam) ?? variants[0];
   let curColor = curVariant.defaultColor;
   let curTime: TimeOfDay = timeParam;
+  let curDetail: AssetDetail = detailParam;
   let wireframe = false;
+  let liveAnim = false;
 
   const cam = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 600);
-  cam.position.set(8, 4.5, 7);
+  cam.position.set(4.5, 2.4, 4.2);
   const controls = new OrbitControls(cam, canvas);
   controls.enableDamping = true;
-  controls.target.set(0, 1, 0);
+  controls.target.set(0, 0.95, 0);
 
   const rebuild = () => {
     clearGroup(studio.content);
     studio.setTime(curTime);
     bodyMat.wireframe = wireframe;
-    const built = curVariant.build(detailParam);
-    studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: curColor }], true));
+    pedMat.wireframe = wireframe;
+    const built = curVariant.build(curDetail);
+    studio.content.add(makeAssetInstances(built, [{ x: 0, y: 0, z: 0, color: curColor }], true, curVariant.pedShowcase, curDetail));
     const m = built.meta;
-    metricsEl.textContent = `${m.label} | tris: ${m.triangles} (glow: ${m.glowTriangles}) | L×H×W: ${m.size[0]}×${m.size[1]}×${m.size[2]} m | minY: ${m.minY} m`;
+    metricsEl.textContent = `${m.label} [${curDetail}] | tris: ${m.triangles} (glow: ${m.glowTriangles}) | L×H×W: ${m.size[0]}×${m.size[1]}×${m.size[2]} m | minY: ${m.minY} m`;
   };
 
   const renderUI = () => {
@@ -505,6 +664,14 @@ function runInteractive(studio: StudioRig, initialFamily: WorkbenchFamily) {
     };
     uiEl.appendChild(varSel);
 
+    for (const d of ['high', 'med', 'low'] as AssetDetail[]) {
+      const b = document.createElement('button');
+      b.textContent = d.toUpperCase();
+      if (d === curDetail) b.classList.add('active');
+      b.onclick = () => { curDetail = d; renderUI(); rebuild(); };
+      uiEl.appendChild(b);
+    }
+
     for (const sw of curVariant.swatches) {
       const b = document.createElement('button');
       b.style.background = `#${sw.toString(16).padStart(6, '0')}`;
@@ -520,6 +687,12 @@ function runInteractive(studio: StudioRig, initialFamily: WorkbenchFamily) {
       b.onclick = () => { curTime = tod; renderUI(); rebuild(); };
       uiEl.appendChild(b);
     }
+
+    const animBtn = document.createElement('button');
+    animBtn.textContent = liveAnim ? 'Anim: ON' : 'Anim: Pose';
+    if (liveAnim) animBtn.classList.add('active');
+    animBtn.onclick = () => { liveAnim = !liveAnim; if (!liveAnim) wbPedTime.value = 0; renderUI(); };
+    uiEl.appendChild(animBtn);
 
     const wfBtn = document.createElement('button');
     wfBtn.textContent = 'Wireframe';
@@ -537,8 +710,11 @@ function runInteractive(studio: StudioRig, initialFamily: WorkbenchFamily) {
     renderer.setSize(window.innerWidth, window.innerHeight, false);
   });
 
+  const clock = new THREE.Clock();
   const tick = () => {
     requestAnimationFrame(tick);
+    const dt = Math.min(clock.getDelta(), 0.05);
+    if (liveAnim) wbPedTime.value += dt;
     controls.update();
     renderer.render(studio.scene, cam);
   };
@@ -556,6 +732,8 @@ if (mode === 'sheet') {
   renderLineup(studio, family, variants, timeParam);
 } else if (mode === 'closeup-grid') {
   renderCloseupGrid(studio, family, variants, pageParam, timeParam);
+} else if (mode === 'lod-compare') {
+  renderLodCompare(studio, family, variants, timeParam);
 } else {
   runInteractive(studio, family);
 }

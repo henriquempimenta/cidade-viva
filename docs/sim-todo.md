@@ -24,3 +24,12 @@
 ## Ressalvas Pontuais do Ciclo 2 (`APPROVED_WITH_RESERVATIONS`, média 8,90 / 10)
 - [ ] **Aproximação do guincho/viatura na mesma pista em vias com canteiro central (`src/sim/incidents.ts:621-656`)**: `syncBlockage(inc)` aplica `+900 s` de `incidentPenalty` em `inc.edge * 2 + inc.dir` antes de `dispatchUnits(inc)` rotear as viaturas, fazendo `carPlanEdges` às vezes encaminhar guincho/polícia para a pista contrária do canteiro central em avenidas/rodovias (`cls >= RoadClass.Avenue`). Desconsiderar temporariamente a penalidade da própria ocorrência em `planToIncident` para que a viatura aproxime-se a montante na mesma mão.
 - [ ] **Recuo do cavalete a montante para veículos longos (`src/render/overlays.ts:362-368`)**: ajustar `lx = -7.2` para `~-8.5` (ou proporcional ao comprimento do veículo sinistrado) para ampliar a folga visual atrás de ônibus/caminhões de 10–12 m.
+
+---
+
+## Entrega Futura — Revisão Completa de Estradas, Ferrovias & Conformação de Terreno (Terraforming)
+*Planejada para uma entrega dedicada posterior, resolvendo pela raiz os bugs visuais de malha viária/ferroviária e sobreposição com o relevo:*
+- [ ] **Conformação automática do terreno (*terraforming* / terraplenagem)** ao construir ou atualizar estradas, junções, ferrovias e edifícios: nivelamento suave do heightmap sob o leito da via/trilho/lote com taludes (*cut/fill embankments*) ou muros de arrimo nas bordas, eliminando afloramento de grama/terreno sobre asfalto, calçadas em encosta transversal, abrigos de ônibus e fundações de prédios.
+- [ ] **Geometria limpa de junções e esquinas viárias (`src/render/roadsLayer.ts`, `src/shared/roadGeom.ts`)**: eliminar falhas de costura em cruzamentos, lábios de calçada invadindo vias em ângulo agudo, degraus de altura em nós com múltiplas declividades e desalinhamento entre linha de parada (`Traffic.trim`) e faixa de pedestres pintada.
+- [ ] **Revisão visual e geométrica das ferrovias (`src/render/railLayer.ts`, `src/sim/rail.ts`)**: corrigir leito/lastro em encostas, transições de pontes/viadutos/trincheiras, passagens em nível (cancelas/cruzamentos rodoferroviários) e conexões limpas com estações e pátios.
+- [ ] **Sincronização do terreno modificado (`WorldDiff.heights`) e determinismo**: garantir que a terraplenagem seja 100% determinística, eficiente para o heightmap/chunks em tempo real e coberta por capturas em terrenos acidentados (`terrain=vale`, encostas e cruzamentos agudos) + revisão independente.

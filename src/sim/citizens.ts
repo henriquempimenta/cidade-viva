@@ -30,6 +30,16 @@ export interface Household {
   carUser: number;
   /** citizen id who last drove the car away from home (keeps return priority), or -1 */
   carDriver: number;
+  /** car age in simulation days */
+  carAge: number;
+  /** cumulative kilometers driven by the current household car */
+  carKm: number;
+  /** mechanical wear (0 = new .. 1 = critical) */
+  carWear: number;
+  /** visual preset variant (0 = Era 0 vintage, 1..11 = modern pool index) */
+  carVariant: number;
+  /** sim time until car returns from workshop repair (0 = ready) */
+  carRepairUntil: number;
   wealth: number;
   money: number;
   movedDay: number;
@@ -66,6 +76,8 @@ export class Citizens {
   tripAct = new Uint8Array(0);
   tripDur = new Float32Array(0);
   tripMode = new Uint8Array(0);
+  tripDist = new Float32Array(0);
+  tripDirt = new Float32Array(0);
   vFromX = new Float32Array(0);
   vFromZ = new Float32Array(0);
   vStartT = new Float32Array(0);
@@ -91,6 +103,9 @@ export class Citizens {
   followed = -1;
   deathsToday = 0;
   birthsToday = 0;
+  carMaintenances = 0;
+  carRenewals = 0;
+  carRetirements = 0;
 
   constructor(private w: World) { this.grow(MAX_CITIZENS); }
 
@@ -123,6 +138,8 @@ export class Citizens {
     { const b = new Uint8Array(n * 1); b.set(this.tripAct);  this.tripAct = b; }
     { const b = new Float32Array(n * 1); b.set(this.tripDur);  this.tripDur = b; }
     { const b = new Uint8Array(n * 1); b.set(this.tripMode);  this.tripMode = b; }
+    { const b = new Float32Array(n * 1); b.set(this.tripDist);  this.tripDist = b; }
+    { const b = new Float32Array(n * 1); b.set(this.tripDirt);  this.tripDirt = b; }
     { const b = new Float32Array(n * 1); b.set(this.vFromX);  this.vFromX = b; }
     { const b = new Float32Array(n * 1); b.set(this.vFromZ);  this.vFromZ = b; }
     { const b = new Float32Array(n * 1); b.set(this.vStartT);  this.vStartT = b; }
@@ -211,7 +228,11 @@ export class Citizens {
   }
 
   newHousehold(home: number, wealth: number, tourist = false): Household {
-    const h: Household = { id: this.nextHH++, members: [], home, car: false, carLoc: -1, carUser: -1, carDriver: -1, wealth, money: 0, movedDay: this.w.day, searching: false, unhappyDays: 0, tourist, leaveDay: -1 };
+    const h: Household = {
+      id: this.nextHH++, members: [], home, car: false, carLoc: -1, carUser: -1, carDriver: -1,
+      carAge: 0, carKm: 0, carWear: 0, carVariant: 1, carRepairUntil: 0,
+      wealth, money: 0, movedDay: this.w.day, searching: false, unhappyDays: 0, tourist, leaveDay: -1,
+    };
     this.households.set(h.id, h);
     const b = this.w.buildings.byId.get(home);
     if (b) b.households.push(h.id);
@@ -256,6 +277,13 @@ export class Citizens {
     h.carLoc = h.car ? home.id : -1;
     h.carUser = -1;
     h.carDriver = -1;
+    if (h.car) {
+      h.carAge = r.range(0, this.w.era === 0 ? 12 : 24);
+      h.carKm = h.carAge * r.range(10, 26);
+      h.carWear = Math.min(0.62, h.carAge * 0.012 + r.range(0, 0.14));
+      h.carVariant = this.w.era === 0 ? (r.chance(0.75) ? 0 : 1 + r.int(0, 10)) : 1 + r.int(0, 10);
+      h.carRepairUntil = 0;
+    }
     h.money = [200, 800, 3000][wealth] * r.range(0.5, 1.5);
     const last = r.int(0, 39);
     const p = this.w.params;
@@ -455,8 +483,9 @@ export class Citizens {
     const r = this.rng;
     const h = this.households.get(this.hh[i])!;
     const d = Math.hypot(to.x - from.x, to.z - from.z) * 1.3;
-    // strict physical car ownership & parking check: car must be parked at `from` and not in use by another member
+    // strict physical car ownership, repair & parking check: car must be available, parked at `from`, and not in use
     const hasCarHere = h.car
+      && h.carRepairUntil <= w.t
       && this.age[i] >= 18
       && h.carLoc === from.id
       && (h.carUser < 0 || h.carUser === i)
@@ -506,13 +535,22 @@ export class Citizens {
     }
     if (mode === 2 && canDrive && carP) {
       const vt = this.income[i] > 200 && r.chance(0.25) ? VType.Car : r.chance(0.08) ? VType.Moto : VType.Car;
+      let dirtLen = 0;
+      for (const de of carP.path) {
+        const re = w.roads.edges[de >> 1];
+        if (re && re.cls === RoadClass.Dirt) dirtLen += re.len;
+      }
+      const tripKm = Number.isFinite(carLen) ? carLen / 1000 : d / 1000;
+      const dirtFrac = Number.isFinite(carLen) && carLen > 0 ? Math.min(1, dirtLen / carLen) : 0;
       if (w.traffic.capacityLeft > 60 && w.lodAllowsVehicle(i)) {
-        const slot = w.traffic.spawn(vt, carP.path, carP.startS, carP.destS, { kind: P_CITIZEN, id: i, aux: 0 }, from.id, to.id);
+        const slot = w.traffic.spawn(vt, carP.path, carP.startS, carP.destS, { kind: P_CITIZEN, id: i, aux: 0 }, from.id, to.id, 0, vt === VType.Car ? h.carVariant : -1);
         if (slot >= 0) {
           h.carUser = i;
           h.carLoc = -1;
           h.carDriver = i;
           h.money -= Math.min(Math.max(0, h.money), carOpCost);
+          this.tripDist[i] = tripKm;
+          this.tripDirt[i] = dirtFrac;
           this.state[i] = ST_CAR;
           this.slot[i] = slot;
           return;
@@ -526,6 +564,8 @@ export class Citizens {
         h.carLoc = -1;
         h.carDriver = i;
         h.money -= Math.min(Math.max(0, h.money), carOpCost);
+        this.tripDist[i] = tripKm;
+        this.tripDirt[i] = dirtFrac;
         for (const de of carP.path) w.roads.loadVirtual(de, from.id, to.id, vt === VType.Moto ? 1 : 0);
         this.virtualArrive(i, carP.time + 30);
         return;
@@ -606,8 +646,15 @@ export class Citizens {
       return;
     }
     this.loc[i] = b ? dest : h?.home ?? -1;
-    // park household car at the destination where the driver arrived
+    // park household car at the destination where the driver arrived & accumulate real mileage/wear
     if (h && h.car && h.carUser === i) {
+      const km = this.tripDist[i];
+      if (km > 0) {
+        h.carKm += km;
+        h.carWear = Math.min(1, h.carWear + km * (0.0038 + this.tripDirt[i] * 0.006));
+      }
+      this.tripDist[i] = 0;
+      this.tripDirt[i] = 0;
       h.carLoc = this.loc[i];
       h.carUser = -1;
       if (h.carLoc === h.home) h.carDriver = -1;
@@ -674,6 +721,60 @@ export class Citizens {
       if (a === b || this.hh[a] === this.hh[b] || this.partner[a] >= 0 || this.partner[b] >= 0) continue;
       if (Math.abs(this.age[a] - this.age[b]) > 10) continue;
       this.marry(a, b);
+    }
+    // private vehicle lifecycle: aging, periodic maintenance & gradual fleet renewal
+    const workshops = w.buildings.list.filter((b) => b.alive && b.state === 'done' && !b.abandoned && (b.def.cat === 'com' || b.kind === 'warehouse' || b.kind === 'factory'));
+    for (const h of this.households.values()) {
+      if (h.tourist || !h.car) continue;
+      h.carAge += 1;
+      h.carWear = Math.min(1, h.carWear + 0.007);
+      // Periodic preventive maintenance (families with savings pay local workshops to reduce wear)
+      const needsService = h.carWear >= 0.52 || ((w.day + h.id) % 12 === 0 && h.carWear >= 0.36);
+      if (needsService) {
+        const maintCost = (22 + h.carWear * 50) * w.economy.priceIndex;
+        if (h.money >= maintCost + 40) {
+          h.money -= maintCost;
+          h.carWear = Math.max(0.08, h.carWear - 0.34);
+          this.carMaintenances++;
+          if (workshops.length) {
+            const shop = workshops[(h.id + w.day) % workshops.length];
+            shop.revenue += maintCost * 0.55;
+          }
+          w.economy.gdpToday += maintCost * 0.5;
+        } else {
+          // Deferred maintenance accelerates wear and breakdown risk
+          h.carWear = Math.min(1, h.carWear + 0.018);
+        }
+      }
+      // Gradual fleet renewal (only while car is parked and not in active repair)
+      if (h.carUser < 0 && h.carRepairUntil <= w.t) {
+        const dueRenewal = h.carWear >= 0.80 || h.carAge >= 42 || (w.era >= 1 && h.carVariant === 0 && h.carAge >= 18);
+        if (dueRenewal) {
+          const renewCost = [420, 680, 1100][h.wealth] * w.economy.priceIndex;
+          if (h.money >= renewCost + 120) {
+            h.money -= renewCost;
+            h.carAge = 0;
+            h.carKm = 0;
+            h.carWear = 0;
+            h.carRepairUntil = 0;
+            h.carVariant = w.era === 0 ? (r.chance(0.5) ? 0 : 1 + r.int(0, 10)) : 1 + r.int(0, 10);
+            if (h.carLoc < 0) h.carLoc = h.home;
+            w.economy.gdpToday += renewCost * 0.45;
+            this.carRenewals++;
+          } else if (h.carWear >= 0.96) {
+            // End-of-life vehicle retired until household recovers savings to buy another
+            h.car = false;
+            h.carLoc = -1;
+            h.carUser = -1;
+            h.carDriver = -1;
+            h.carAge = 0;
+            h.carKm = 0;
+            h.carWear = 0;
+            h.carRepairUntil = 0;
+            this.carRetirements++;
+          }
+        }
+      }
     }
   }
 
@@ -802,7 +903,7 @@ export class Citizens {
     }
     const slot = w.traffic.capacityLeft > 40
       ? h.car
-        ? w.traffic.spawn(VType.Car, plan.path, plan.startS, plan.destS, { kind: P_CITIZEN, id: driver, aux: 1 }, -1, home.id)
+        ? w.traffic.spawn(VType.Car, plan.path, plan.startS, plan.destS, { kind: P_CITIZEN, id: driver, aux: 1 }, -1, home.id, 0, h.carVariant)
         : w.traffic.spawn(VType.Taxi, plan.path, plan.startS, plan.destS, { kind: P_MOVING, id: -1, aux: 0 }, -1, home.id)
       : -1;
     if (h.car && driver !== undefined) {
@@ -879,6 +980,19 @@ export class Citizens {
       .filter((g) => g.day === w.day)
       .sort((a1, a2) => a1.h - a2.h)
       .map((g) => ({ h: fmtH(g.h), act: ACT_LABEL[g.act], done: g.done }));
+    const carInfo = h && h.car ? {
+      wearPct: Math.round(h.carWear * 100),
+      km: Math.round(h.carKm),
+      ageDays: Math.round(h.carAge),
+      vintage: h.carVariant === 0,
+      status: h.carRepairUntil > w.t
+        ? 'em oficina (reparo)'
+        : h.carUser >= 0
+          ? `em uso (${this.name(h.carUser)})`
+          : h.carLoc >= 0
+            ? `estacionado (${w.buildings.byId.get(h.carLoc)?.name ?? 'garagem'})`
+            : 'indisponível',
+    } : null;
     return {
       id: i, name: this.name(i), age: Math.floor(this.age[i]), sex: this.sex[i] ? 'mulher' : 'homem', traits, edu: EDU_LABEL[this.edu[i]] + (this.studying[i] ? ` (estudando: ${['', 'creche', 'escola', 'ensino médio', 'universidade'][this.studying[i]]})` : ''),
       job: jobLabel,
@@ -886,6 +1000,7 @@ export class Citizens {
       agenda: todayAgenda, bio: this.bio[i] ?? [],
       family: h ? h.members.filter((m) => m !== i).map((m) => `${this.name(m)} (${Math.floor(this.age[m])})`) : [],
       mode: MODE_LABEL[this.tripMode[i]], speedKmh, happiness: this.happiness[i], tourist: isTourist, insideBuilding: st === ST_IN ? this.loc[i] : -1,
+      car: carInfo,
     };
   }
 

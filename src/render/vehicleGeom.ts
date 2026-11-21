@@ -27,6 +27,7 @@ export type VehicleId =
   | 'garbage'
   | 'construction'
   | 'fire'
+  | 'tow'
   | 'moto';
 
 export type BodyKind =
@@ -43,12 +44,14 @@ export type BodyKind =
   | 'cargo'
   | 'garbage'
   | 'dump'
-  | 'fire';
+  | 'fire'
+  | 'tow';
 
 export type RoofAccessory =
   | 'taxi'
   | 'lightbar-rb'
   | 'lightbar-rw'
+  | 'lightbar-amber'
   | 'beacon'
   | 'rack'
   | 'ac'
@@ -813,15 +816,17 @@ function addRoofAccessories(
       }
 
       case 'lightbar-rb':
-      case 'lightbar-rw': {
+      case 'lightbar-rw':
+      case 'lightbar-amber': {
         const lx = xFrontRoof - Math.min(0.42, len * 0.32);
         const barW = Math.min(1.26, hwRoof * 1.65);
         const y0 = roofTopY - 0.01;
         b.box(lx, y0, 0, 0.18, 0.05, barW, RUBBER_DARK, SURF.rubber, { noBottom: true });
         const podW = barW * 0.36;
         const podZ = barW * 0.30;
-        const rightGlow = acc === 'lightbar-rb' ? GLOW_BLUE : GLOW_WHITE;
-        g.box(lx, y0 + 0.046, podZ, 0.19, 0.095, podW, GLOW_TAIL, SURF.matte, { noBottom: true });
+        const leftGlow = acc === 'lightbar-amber' ? GLOW_AMBER : GLOW_TAIL;
+        const rightGlow = acc === 'lightbar-amber' ? GLOW_AMBER : acc === 'lightbar-rb' ? GLOW_BLUE : GLOW_WHITE;
+        g.box(lx, y0 + 0.046, podZ, 0.19, 0.095, podW, leftGlow, SURF.matte, { noBottom: true });
         g.box(lx, y0 + 0.046, -podZ, 0.19, 0.095, podW, rightGlow, SURF.matte, { noBottom: true });
         break;
       }
@@ -1446,6 +1451,68 @@ function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, 
       cabRoofY: cabRoofTop,
       cabRearX: xCabRear,
     }, detail);
+  } else if (spec.bodyKind === 'tow') {
+    // Rollback flatbed recovery deck + steel winch headboard / crane pylon + safety rails + amber work beacons
+    const deckY = chassisTopY;
+    const deckH = 0.16;
+    const deckTop = deckY + deckH;
+    const rampLen = 0.58;
+    const flatStart = bodyRear + rampLen;
+    const flatLen = bodyFront - flatStart;
+    const flatCx = (flatStart + bodyFront) * 0.5;
+    const deckW = spec.width * 0.98;
+    const deckHalfW = deckW * 0.5;
+
+    // Main flatbed deck (steel tread surface + painted yellow side skirts)
+    b.box(flatCx, deckY, 0, flatLen, deckH, deckW, STEEL_DARK, SURF.metal, {
+      topColor: RUBBER_MID,
+      noBottom: false,
+    });
+    // Painted recovery side rails along flatbed
+    b.quadMirroredZ(
+      [flatStart, deckY + 0.01, deckHalfW + 0.008],
+      [bodyFront, deckY + 0.01, deckHalfW + 0.008],
+      [bodyFront, deckTop + 0.08, deckHalfW + 0.008],
+      [flatStart, deckTop + 0.08, deckHalfW + 0.008],
+      WHITE,
+      SURF.paint,
+    );
+    // Angled rear loading tail-ramp (beveled steel lip)
+    b.taperBox(bodyRear + rampLen * 0.5, deckY - 0.06, 0, rampLen, deckW, rampLen * 0.72, deckW * 0.96, deckH + 0.06, STEEL_DARK, SURF.metal, {
+      oxTop: rampLen * 0.14,
+      noBottom: true,
+    });
+    // High-visibility safety warning stripe on rear deck face
+    quadRearX(b, bodyRear - 0.008, deckY - 0.02, deckY + 0.11, 0, deckW * 0.88, 0xf2c629, SURF.paintFixed);
+
+    // Steel headboard / recovery gantry + winch drum behind cab
+    const hbX = bodyFront - 0.16;
+    const hbTop = cabRoofTop - 0.12;
+    const hbH = hbTop - deckTop;
+    b.box(hbX, deckTop - 0.01, 0, 0.24, hbH, spec.width * 0.82, WHITE, SURF.paint, { noBottom: true });
+    // Central dark steel winch drum housing at base of headboard
+    b.box(hbX - 0.26, deckTop - 0.01, 0, 0.36, 0.34, 0.76, STEEL_DARK, SURF.metal, { noBottom: true });
+    if (detail !== 'low') {
+      // Twin diagonal A-frame recovery boom struts anchored from headboard down onto deck
+      const strutZ = halfW * 0.42;
+      const sx0 = hbX - 0.10;
+      const sx1 = hbX - 1.35;
+      b.quadMirroredZ([sx1, deckTop, strutZ + 0.06], [sx1 + 0.16, deckTop, strutZ + 0.06], [sx0, hbTop - 0.14, strutZ + 0.06], [sx0 - 0.16, hbTop - 0.14, strutZ + 0.06], STEEL, SURF.metal);
+      b.quadMirroredZ([sx1 + 0.16, deckTop, strutZ - 0.06], [sx1, deckTop, strutZ - 0.06], [sx0 - 0.16, hbTop - 0.14, strutZ - 0.06], [sx0, hbTop - 0.14, strutZ - 0.06], STEEL_DARK, SURF.metal);
+      // Side tie-down wheel-lift track strips on flatbed
+      for (const s of [-0.42, 0.42]) {
+        const z = s * halfW;
+        b.quad([flatStart + 0.2, deckTop + 0.008, z + 0.16], [bodyFront - 0.65, deckTop + 0.008, z + 0.16], [bodyFront - 0.65, deckTop + 0.008, z - 0.16], [flatStart + 0.2, deckTop + 0.008, z - 0.16], STEEL, SURF.metal, [0, 1, 0]);
+      }
+    }
+    // Rear-facing amber work lamps on top corners of headboard
+    for (const s of [-0.62, 0.62]) {
+      quadRearX(g, hbX - 0.128, hbTop - 0.18, hbTop - 0.05, s * (halfW * 0.80), 0.22, GLOW_AMBER, SURF.matte);
+    }
+
+    addRoofAccessories(b, g, spec.roofAccessories, {
+      roofTopY: cabRoofTop, crownH, xRearRoof: xCabRear + 0.15, xFrontRoof: xCabFront - 0.20, hwRoof: halfW * 0.86,
+    }, detail);
   }
 }
 
@@ -2036,7 +2103,7 @@ export function buildFourWheeler(spec: VehicleSpec, detail: AssetDetail = 'high'
 
   addWheels(b, spec, detail);
 
-  if (spec.bodyKind === 'cargo' || spec.bodyKind === 'garbage' || spec.bodyKind === 'dump' || spec.bodyKind === 'fire') {
+  if (spec.bodyKind === 'cargo' || spec.bodyKind === 'garbage' || spec.bodyKind === 'dump' || spec.bodyKind === 'fire' || spec.bodyKind === 'tow') {
     buildHeavyTruckBody(b, g, spec, detail);
   } else if (spec.bodyKind === 'bus' || spec.bodyKind === 'schoolbus' || spec.bodyKind === 'tourbus') {
     buildBusBody(b, g, spec, detail);
@@ -2754,6 +2821,39 @@ export const VEHICLE_PRESETS: VehiclePreset[] = [
       livery: 'fire-stripe',
     },
   },
+  {
+    id: 'tow',
+    label: 'Caminhão Guincho (Prancha)',
+    category: 'service',
+    vtype: VType.Tow,
+    defaultColor: 0xe8a317,
+    swatches: [0xe8a317, 0xd85c1e, 0x2c5c94, 0xeaeef3],
+    spec: {
+      kind: 'four-wheeler',
+      id: 'tow',
+      label: 'Caminhão Guincho (Prancha)',
+      bodyKind: 'tow',
+      length: 8.35,
+      width: 2.46,
+      groundClearance: 0.34,
+      beltY: 1.52,
+      roofY: 2.78,
+      wheelRadius: 0.49,
+      wheelWidth: 0.34,
+      axles: [-2.55, 2.70],
+      hoodLen: 0,
+      noseDrop: 0.08,
+      trunkLen: 0,
+      windshieldRake: 0.18,
+      rearRake: 0,
+      tumblehome: 0.08,
+      pillarPositions: [],
+      chromeBumpers: true,
+      fuelTanks: true,
+      roofAccessories: ['lightbar-amber'],
+      livery: 'none',
+    },
+  },
 
   // --- Two-Wheeler ---
   {
@@ -2797,6 +2897,7 @@ export const VTYPE_DEFAULT_PRESETS: Partial<Record<VType, VehicleId[]>> = {
   [VType.TourBus]: ['tourbus'],
   [VType.Construction]: ['construction'],
   [VType.Hearse]: ['hearse'],
+  [VType.Tow]: ['tow'],
 };
 
 /** Unified entry point to build any concrete vehicle by preset ID or custom spec. */

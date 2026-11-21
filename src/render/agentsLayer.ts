@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { App } from '../app';
-import { MAX_PEDS, MAX_VEHICLES, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, PED_FLAG_UMBRELLA, PED_FLAG_WORKER, PED_STRIDE, TRAIN_STRIDE, VEH_FLAG_BRAKE, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_STRIDE, VType, MAX_TRAIN_CARS, PED_FLAG_FUNERAL } from '../shared/constants';
+import { MAX_PEDS, MAX_VEHICLES, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, PED_FLAG_UMBRELLA, PED_FLAG_WORKER, PED_STRIDE, TRAIN_STRIDE, VEH_FLAG_BRAKE, VEH_FLAG_HAZARD, VEH_FLAG_SIREN, VEH_FLAG_YIELD, VEH_STRIDE, VType, VTYPE_LEN, MAX_TRAIN_CARS, PED_FLAG_FUNERAL } from '../shared/constants';
 /** render budgets (instances drawn per frame); the simulation itself has no such cap */
 const RENDER_PED = 6000;
 import { GB } from './geomBuilder';
@@ -32,6 +32,7 @@ const TYPE_COLOR: Partial<Record<VType, number>> = {
   [VType.TourBus]: 0xb82e38,
   [VType.Construction]: 0xe09624,
   [VType.Hearse]: 0x242830,
+  [VType.Tow]: 0xe8a317,
 };
 
 export class AgentsLayer {
@@ -40,6 +41,8 @@ export class AgentsLayer {
   private vehGlow: (THREE.InstancedMesh | null)[] = [];
   private vehGlowMat!: THREE.MeshBasicMaterial;
   private sirens: THREE.InstancedMesh;
+  private hazards: THREE.InstancedMesh;
+  private blinkers: THREE.InstancedMesh;
   private bodies: THREE.InstancedMesh;
   private heads: THREE.InstancedMesh;
   private umbrellas: THREE.InstancedMesh;
@@ -87,6 +90,12 @@ export class AgentsLayer {
     }
     this.sirens = new THREE.InstancedMesh(new THREE.BoxGeometry(0.36, 0.20, 1.15), new THREE.MeshBasicMaterial({ toneMapped: false }), 300);
     this.sirens.count = 0; this.sirens.frustumCulled = false;
+    // Full-width amber roof lightbar strictly for Tow trucks
+    this.hazards = new THREE.InstancedMesh(new THREE.BoxGeometry(0.32, 0.22, 1.25), new THREE.MeshBasicMaterial({ toneMapped: false }), 300);
+    this.hazards.count = 0; this.hazards.frustumCulled = false;
+    // Discrete 4-corner amber hazard flashers for disabled/crashed civilian vehicles
+    this.blinkers = new THREE.InstancedMesh(new THREE.BoxGeometry(0.20, 0.14, 0.20), new THREE.MeshBasicMaterial({ toneMapped: false }), 600);
+    this.blinkers.count = 0; this.blinkers.frustumCulled = false;
     // pedestrians
     const pb = new GB();
     pb.box(0, 0.85, 0, 0.32, 0.65, 0.42, W); // torso
@@ -104,7 +113,7 @@ export class AgentsLayer {
     this.bikes.count = 0; this.bikes.frustumCulled = false;
     this.bags = new THREE.InstancedMesh(new THREE.BoxGeometry(0.3, 0.45, 0.2).translate(-0.35, 0.22, 0.3), new THREE.MeshStandardMaterial({ color: 0x8a3fb0 }), 1500);
     this.bags.count = 0; this.bags.frustumCulled = false;
-    this.group.add(this.sirens, this.bodies, this.heads, this.umbrellas, this.bikes, this.bags);
+    this.group.add(this.sirens, this.hazards, this.blinkers, this.bodies, this.heads, this.umbrellas, this.bikes, this.bags);
     // trains: 0 loco, 1 passenger coach, 2 container flat, 3 hopper, 4 tank, 5 metro
     // (rolling stock with bogies and wheels, after the v14 build; lit windows/headlamps live in a glow twin)
     const C = (h: number) => new THREE.Color(h);
@@ -279,7 +288,7 @@ export class AgentsLayer {
     const gCounts = this.vGlowCounts;
     counts.fill(0);
     gCounts.fill(0);
-    let ns = 0;
+    let ns = 0, nh = 0, nbl = 0;
     const cv = cur.veh;
     const old = (this.app.stats?.era ?? 0) === 0;
     const NV = cv.length / VEH_STRIDE;
@@ -293,8 +302,10 @@ export class AgentsLayer {
       sphere.radius = rVeh;
       if (!this.frustum.intersectsSphere(sphere)) continue;
       const gen = cv[o + 5];
+      const lineOrVar = cv[o + 7];
+      const carVar = type === VType.Car && lineOrVar >= 0 ? lineOrVar : -1;
       const hash = ((i * 7 + gen * 13) >>> 0);
-      const presetId = pickVehiclePreset(type, i, gen, old ? 0 : 1);
+      const presetId = pickVehiclePreset(type, i, gen, old ? 0 : 1, carVar);
       if (!presetId) continue;
       const slot = PRESET_INDEX[presetId];
       const im = this.veh[slot];
@@ -304,20 +315,25 @@ export class AgentsLayer {
       this.v.set(x, y, z);
       this.m.compose(this.v, this.q, this.sc);
       im.setMatrixAt(counts[slot], this.m);
-      const line = cv[o + 7];
+      const line = lineOrVar;
       if (type === VType.Bus && line >= 0 && this.lineColors.has(line)) this.col.copy(this.lineColors.get(line)!);
       else if (TYPE_COLOR[type] !== undefined) this.col.setHex(TYPE_COLOR[type]!);
       else if (type === VType.Truck) this.col.setHex(TRUCK_COLORS[hash % TRUCK_COLORS.length]);
       else if (type === VType.Van) this.col.setHex(VAN_COLORS[hash % VAN_COLORS.length]);
       else if (type === VType.Moto) this.col.setHex(MOTO_COLORS[hash % MOTO_COLORS.length]);
-      else { const pal = old ? OLD_COLORS : CAR_COLORS; this.col.setHex(pal[(i * 7 + gen * 3) % pal.length]); }
+      else {
+        const useOld = carVar === 0 || (carVar < 0 && old);
+        const pal = useOld ? OLD_COLORS : CAR_COLORS;
+        const cIdx = carVar >= 0 ? (i * 7 + carVar * 5) : (i * 7 + gen * 3);
+        this.col.setHex(pal[cIdx % pal.length]);
+      }
       im.setColorAt(counts[slot], this.col);
       counts[slot]++;
       const gm = this.vehGlow[slot];
-      if (gm && (night > 0.05 || (flags & VEH_FLAG_SIREN)) && gCounts[slot] < gm.instanceMatrix.count) {
+      if (gm && (night > 0.05 || (flags & (VEH_FLAG_SIREN | VEH_FLAG_HAZARD))) && gCounts[slot] < gm.instanceMatrix.count) {
         gm.setMatrixAt(gCounts[slot]++, this.m);
       }
-      if (flags & VEH_FLAG_SIREN && ns < 300) {
+      if (flags & VEH_FLAG_SIREN && type !== VType.Tow && ns < 300) {
         const fwd = type === VType.Fire ? 3.55 : type === VType.Ambulance ? 1.35 : -0.15;
         const dy = type === VType.Fire ? 2.94 : type === VType.Ambulance ? 2.16 : 1.56;
         this.v.set(x + Math.cos(h) * fwd, y + dy, z + Math.sin(h) * fwd);
@@ -327,6 +343,34 @@ export class AgentsLayer {
         this.col.setRGB(ph ? 3 : 0.1, 0.1, ph ? 0.1 : 3);
         this.sirens.setColorAt(ns, this.col);
         ns++;
+      }
+      if (type === VType.Tow && (flags & (VEH_FLAG_HAZARD | VEH_FLAG_SIREN)) !== 0 && nh < 300) {
+        this.v.set(x + Math.cos(h) * 3.2, y + 2.90, z + Math.sin(h) * 3.2);
+        this.m.compose(this.v, this.q, this.sc);
+        this.hazards.setMatrixAt(nh, this.m);
+        const on = Math.sin(this.t * 9 + i * 1.7) > -0.15;
+        this.col.setRGB(on ? 3.2 : 0.45, on ? 1.85 : 0.22, on ? 0.08 : 0.02);
+        this.hazards.setColorAt(nh, this.col);
+        nh++;
+      } else if (type !== VType.Tow && (flags & VEH_FLAG_HAZARD) !== 0 && nbl + 4 <= 600) {
+        // Discrete 4-corner amber hazard blinkers (front/rear bumper corners, never a roof lightbar)
+        const heavy = type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus || type === VType.Truck || type === VType.Garbage || type === VType.Fire;
+        const moto = type === VType.Moto;
+        const hl = (VTYPE_LEN[type] ?? 4.6) * 0.46;
+        const hw = moto ? 0.26 : heavy ? 1.18 : 0.88;
+        const by = y + (moto ? 0.68 : heavy ? 0.85 : 0.62);
+        const ch = Math.cos(h), sh = Math.sin(h);
+        const on = Math.sin(this.t * 10 + i * 1.7) > -0.1;
+        this.col.setRGB(on ? 3.0 : 0.22, on ? 1.55 : 0.10, on ? 0.05 : 0.01);
+        for (const sx of [hl, -hl]) {
+          for (const sz of [hw, -hw]) {
+            this.v.set(x + ch * sx - sh * sz, by, z + sh * sx + ch * sz);
+            this.m.compose(this.v, this.q, this.sc);
+            this.blinkers.setMatrixAt(nbl, this.m);
+            this.blinkers.setColorAt(nbl, this.col);
+            nbl++;
+          }
+        }
       }
       void VEH_FLAG_BRAKE; void VEH_FLAG_YIELD;
     }
@@ -351,6 +395,18 @@ export class AgentsLayer {
     if (ns > 0 || prevNs > 0) {
       this.sirens.instanceMatrix.needsUpdate = true;
       if (this.sirens.instanceColor) this.sirens.instanceColor.needsUpdate = true;
+    }
+    const prevNh = this.hazards.count;
+    this.hazards.count = nh;
+    if (nh > 0 || prevNh > 0) {
+      this.hazards.instanceMatrix.needsUpdate = true;
+      if (this.hazards.instanceColor) this.hazards.instanceColor.needsUpdate = true;
+    }
+    const prevNbl = this.blinkers.count;
+    this.blinkers.count = nbl;
+    if (nbl > 0 || prevNbl > 0) {
+      this.blinkers.instanceMatrix.needsUpdate = true;
+      if (this.blinkers.instanceColor) this.blinkers.instanceColor.needsUpdate = true;
     }
 
     // ---- pedestrians ----

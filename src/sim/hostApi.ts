@@ -1,5 +1,5 @@
 import { FIELD_NAMES, type FieldName, KINDS } from '../shared/catalog';
-import { MAX_PEDS, MAX_VEHICLES, PED_STRIDE, ROAD_NAMES, VEH_STRIDE, TRAIN_STRIDE, MAX_TRAIN_CARS } from '../shared/constants';
+import { MAX_PEDS, MAX_VEHICLES, PED_STRIDE, ROAD_NAMES, VEH_STRIDE, TRAIN_STRIDE, MAX_TRAIN_CARS, VType } from '../shared/constants';
 import { sanitizeParams, type SimParams } from '../shared/params';
 import type { Snapshot, Stats, WorldDiff } from '../shared/protocol';
 import { TERM_LABELS } from './siting';
@@ -152,10 +152,34 @@ export function inspect(w: World, kind: string, id: number): unknown {
       mid: (() => { const p = e.pts, k = Math.floor(p.length / 6) * 3; return { x: p[k], y: p[k + 1], z: p[k + 2], hx: p[Math.min(p.length - 3, k + 3)] - p[k], hz: p[Math.min(p.length - 1, k + 5)] - p[k + 2] }; })(),
       gate: w.rail2?.gateInfo(e.id) ?? null,
       upgrade: (w as unknown as { lastUpgrade?: Map<number, unknown> }).lastUpgrade?.get(e.id) ?? null,
+      incidents: w.incidents?.onEdge(e.id) ?? [],
     };
   }
   if (kind === 'citizen') return x.inspectCitizen?.(id) ?? null;
   if (kind === 'ped') return x.inspectPed?.(id) ?? null;
-  if (kind === 'vehicle') return x.traffic?.inspect(id) ?? null;
+  if (kind === 'vehicle') {
+    const v = x.traffic?.inspect(id) as Record<string, unknown> | null;
+    if (!v) return null;
+    const vNames: Record<number, string> = {
+      [VType.Car]: 'Automóvel', [VType.Taxi]: 'Táxi', [VType.Moto]: 'Motocicleta', [VType.Bus]: 'Ônibus urbano',
+      [VType.SchoolBus]: 'Ônibus escolar', [VType.Truck]: 'Caminhão', [VType.Van]: 'Van', [VType.Garbage]: 'Caminhão de lixo',
+      [VType.Ambulance]: 'Ambulância', [VType.Police]: 'Viatura policial', [VType.Fire]: 'Caminhão de bombeiros',
+      [VType.TourBus]: 'Ônibus turístico', [VType.Construction]: 'Caminhão de obra', [VType.Hearse]: 'Carro funerário',
+      [VType.Tow]: 'Caminhão guincho',
+    };
+    const tNum = Number(v.type);
+    let mission = w.incidents?.describeVehicle(id) ?? null;
+    if (!mission && v.kind === 3 /* P_BUS */) {
+      const line = w.transitSys?.lines.find((l) => l.id === v.id);
+      if (line) mission = `${line.name} · desgaste da frota ${Math.round((line.fleetWear ?? 0) * 100)}%`;
+    } else if (!mission && v.kind === 2 /* P_SERVICE */) {
+      mission = v.siren ? 'Atendendo ocorrência de emergência' : 'Retornando à base';
+    } else if (!mission && v.kind === 10 /* P_PATROL */) {
+      mission = 'Patrulhamento preventivo';
+    } else if (!mission && v.kind === 8 /* P_GARBAGE */) {
+      mission = 'Coleta de resíduos sólidos';
+    }
+    return { ...v, typeName: vNames[tNum] ?? 'Veículo', mission: mission ?? 'Em circulação' };
+  }
   return null;
 }

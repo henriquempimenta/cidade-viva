@@ -55,6 +55,25 @@ export interface TransitLineView { id: number; kind: 'bus' | 'brt' | 'rail' | 'm
 export interface PowerLineView { id: number; pts: number[]; progress: number }
 export interface CrossingView { x: number; z: number; y: number; angle: number; closed: boolean; separated: boolean; /** road dips under the track (trincheira) */ under?: boolean; /** road half width, rail heading, rail top height */ hw?: number; rail?: number; ry?: number }
 
+export type RoadIncidentKind = 'breakdown' | 'minor_crash' | 'major_crash' | 'ped_crash';
+export type RoadIncidentStage = 'active' | 'responding' | 'clearing';
+export interface RoadIncidentView {
+  id: number;
+  kind: RoadIncidentKind;
+  edge: number;
+  dir: number;
+  lane: number;
+  s: number;
+  x: number;
+  y: number;
+  z: number;
+  angle: number;
+  fullClosure: boolean;
+  stage: RoadIncidentStage;
+  lanes: number;
+  halfWidth: number;
+}
+
 export interface WorldInit {
   size: number;
   hres: number; // heightmap resolution (vertices per side)
@@ -146,6 +165,7 @@ export interface WorldDiff {
   removedLines?: number[];
   powerLines?: PowerLineView[];
   crossings?: CrossingView[];
+  incidents?: RoadIncidentView[];
   floodLevel?: number;
   dikes?: number[][];
   events?: SimEvent[];

@@ -6,17 +6,21 @@
 - [ ] **Threshold de faixa em quadras curtas (`src/sim/trips.ts:300-301`)**: alinhar `totalLen > 30` com `len > 20` usado em `hasEndCrosswalk()` (`src/shared/roadGeom.ts`).
 
 ## Ressalvas Pontuais da Estabilização da Base (`APPROVED_WITH_RESERVATIONS`, média 8,92 / 10)
-- [ ] **`splitEdge` + recuo forçado para `sEntry - 0.06` (`src/sim/traffic.ts:685, 695, 714`)**: quando um `splitEdge` cria um novo nó atrás de um veículo que já está além do novo `sEntry`, evitar puxar `this.s[i]` para trás (limitar apenas o avanço `ds` do tick atual ou respeitar o veículo de trás) + adicionar teste de regressão.
+- [x] **`splitEdge` + recuo forçado para `sEntry - 0.06` (`src/sim/traffic.ts`)**: `sPre` gravado no início do tick impede puxar `this.s[i]` para trás abaixo de `sPre` quando `splitEdge` cria nó atrás de veículo além do novo `sEntry` + teste de regressão em `tests/cycle2Safety.test.ts`.
 - [ ] **Recuo visual de parada antes da faixa de pedestres (`src/sim/traffic.ts`)**: reforço do item do Ciclo 1 acima — recuar `sEntry` antes da zebra (`CROSSWALK_INSET + 1.5 m`) quando houver faixa pintada no nó.
 - [ ] **Recorte de calçada em declive lateral e esquina aguda (`src/render/roadsLayer.ts`)**: reforço do item do Ciclo 1 acima — evitar afloramento do terreno sobre abrigos/calçadas em encosta transversal e lábio de calçada em ângulos agudos.
-- [ ] **Endurecimento de testes e evacuação em `revalidateLines` (`tests/stabilityGates.test.ts:90, 633-654`, `src/sim/transit.ts:617-628`)**: apertar o gate de 40 dias de `despawnsRedLight` para `=== 0`, exercitar `phase = 3` explicitamente no teste de `onEdgeSplit` e replicar a evacuação de `rides` caso `revalidateLines` zere `l.fleet`.
+- [x] **Endurecimento de testes e evacuação em `revalidateLines` (`tests/stabilityGates.test.ts`, `src/sim/transit.ts`)**: gate de 40 dias de `despawnsRedLight` apertado para `=== 0`, `phase = 3` exercitado explicitamente no teste de `onEdgeSplit` e `evacuateLine()` replicada quando `revalidateLines` zera `l.fleet`.
 
 ---
 
-## Ciclo 2 — Segurança Viária, Emergências Avançadas & Ciclo de Vida da Frota (Próxima Entrega)
-- [ ] **Colisões e acidentes viários emergentes** (carro–carro em chuva/velocidade/conflito e carro–pedestre em conflito de faixa).
-- [ ] **Interdição temporária de faixa/via** com sinalização visual (cones/bloqueio) e desvio automático de rotas enquanto o acidente/pane bloqueia o trecho.
-- [ ] **Emergências cortando trânsito e avançando sinal vermelho com segurança** (`Ambulance`, `Fire`, `Police` com sirene: corredor de emergência, mudança de faixa para ultrapassar filas travadas e preempção segura em cruzamentos).
-- [ ] **Atendimento coordenado + guincho/reboque** (polícia, ambulância levando ferido ao hospital, bombeiros em colisão grave e guincho/reboque removendo veículo sinistrado/quebrado para liberar a via).
-- [ ] **Ciclo de vida veicular, estacionamento, frota e manutenção** (desgaste por km, custo periódico de manutenção, panes raras, renovação gradual da frota privada e de ônibus).
-- [ ] **Loop de revisão independente** com `npm run capture:field` + avaliador independente na rubrica [sim-review-rubric.md](./sim-review-rubric.md) (notas ≥ 7,0).
+## Ciclo 2 — Segurança Viária, Emergências Avançadas & Ciclo de Vida da Frota
+- [x] **Colisões e acidentes viários emergentes** (carro–carro sob chuva/neblina/velocidade/frenagem/volume, carro–pedestre em conflito de via e panes mecânicas por desgaste de carro/ônibus, com eventos na Crônica e inspetor atualizado).
+- [x] **Interdição temporária de faixa/via** com sinalização visual 3D real (cones laranja/branco, cavalete/barreira listrada e halo/pisca âmbar/emergência), desvio de faixa em vias múltiplas e desvio automático de rotas no roteador enquanto o incidente bloqueia o trecho.
+- [x] **Emergências cortando trânsito e avançando sinal vermelho com segurança** (`Ambulance`, `Fire`, `Police` com sirene: corredor lateral, troca ativa de faixa para ultrapassar filas lentas e preempção segura em cruzamentos com velocidade de cautela e retenção do tráfego transversal).
+- [x] **Atendimento coordenado + guincho/reboque (`VType.Tow`)** (modelo 3D paramétrico prancha/guincho em `vehicleGeom.ts`, polícia, ambulância evacuando ferido ao hospital com tratamento de saúde, bombeiros em colisão grave, guincho removendo veículo para reabrir a via e fail-safe determinístico em Era 0 / timeout).
+- [x] **Ciclo de vida veicular, estacionamento, frota e manutenção** (idade, km rodados, desgaste por km/estrada de terra, manutenção periódica paga circulando na economia local, oficina pós-pane/acidente, renovação gradual da frota privada aposentando modelos `vintage` e renovação/manutenção de ônibus).
+- [x] **Loop de revisão independente** com `npm run capture:field` + avaliador independente na rubrica [sim-review-rubric.md](./sim-review-rubric.md) (`APPROVED_WITH_RESERVATIONS`, média 8,90 / 10, todos os critérios ≥ 8,3).
+
+## Ressalvas Pontuais do Ciclo 2 (`APPROVED_WITH_RESERVATIONS`, média 8,90 / 10)
+- [ ] **Aproximação do guincho/viatura na mesma pista em vias com canteiro central (`src/sim/incidents.ts:621-656`)**: `syncBlockage(inc)` aplica `+900 s` de `incidentPenalty` em `inc.edge * 2 + inc.dir` antes de `dispatchUnits(inc)` rotear as viaturas, fazendo `carPlanEdges` às vezes encaminhar guincho/polícia para a pista contrária do canteiro central em avenidas/rodovias (`cls >= RoadClass.Avenue`). Desconsiderar temporariamente a penalidade da própria ocorrência em `planToIncident` para que a viatura aproxime-se a montante na mesma mão.
+- [ ] **Recuo do cavalete a montante para veículos longos (`src/render/overlays.ts:362-368`)**: ajustar `lx = -7.2` para `~-8.5` (ou proporcional ao comprimento do veículo sinistrado) para ampliar a folga visual atrás de ônibus/caminhões de 10–12 m.

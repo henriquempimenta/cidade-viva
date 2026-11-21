@@ -17,6 +17,12 @@ interface CitizenInfo {
   id: number; name: string; age: number; sex: string; traits: string[]; edu: string; job: string; home: string; income: number; money: number;
   needs: Record<string, number>; state: string; activity: string; agenda: { h: string; act: string; done: boolean }[]; bio: { year: number; text: string }[];
   family: string[]; mode: string; speedKmh?: number | null; happiness: number; tourist: boolean; insideBuilding: number;
+  car?: null | { wearPct: number; km: number; ageDays: number; vintage: boolean; status: string };
+}
+interface VehicleInfo {
+  slot: number; type: number; typeName: string; speed: number; limit: number; cap: number | null;
+  edge: string; edgeId: number; kind: number; id: number; aux: number;
+  siren: boolean; hazard: boolean; incidentId: number; mission: string;
 }
 interface EdgeInfo {
   id: number; name: string; cls: string; lanes: number; oneway: number; len: number; volume: number[]; capacity: number; vc: number; history: number[];
@@ -26,6 +32,7 @@ interface EdgeInfo {
   mid: { x: number; y: number; z: number; hx: number; hz: number };
   gate: null | { wait: number; hot: number; separated: boolean };
   upgrade: null | { day: number; chosen: string; options: { label: string; benefit: number; cost: number; ratio: number; feasible: boolean; note: string }[] };
+  incidents?: { id: number; kind: string; label: string; stage: string; fullClosure: boolean; units: string[] }[];
 }
 
 const WEALTH = ['popular', 'médio', 'alto'];
@@ -34,7 +41,7 @@ const NEED_LABEL: Record<string, string> = { hunger: 'Fome', sleep: 'Sono', hygi
 export class Inspector {
   private panel: HTMLElement;
   private markers = new THREE.Group();
-  private kind: 'building' | 'citizen' | 'edge' | null = null;
+  private kind: 'building' | 'citizen' | 'edge' | 'vehicle' | null = null;
   private id = -1;
   private lastRefresh = 0;
   private downAt = { x: 0, y: 0, t: 0 };
@@ -67,7 +74,7 @@ export class Inspector {
     if (ag) {
       if (ag.kind === 'ped' && ag.citizen >= 0) { this.showCitizen(ag.citizen); this.app.followEntity({ kind: 'citizen', id: ag.citizen }); return; }
       if (ag.kind === 'vehicle' && ag.citizen >= 0) { this.showCitizen(ag.citizen); this.app.followEntity({ kind: 'citizen', id: ag.citizen }); return; }
-      if (ag.kind === 'vehicle') { this.app.followEntity({ kind: 'vehicle', id: ag.slot, gen: ag.gen }); return; }
+      if (ag.kind === 'vehicle') { this.showVehicle(ag.slot); this.app.followEntity({ kind: 'vehicle', id: ag.slot, gen: ag.gen }); return; }
     }
     const objs: THREE.Object3D[] = [...this.app.buildings.pickables()];
     if (this.app.roads.mainMesh) objs.push(this.app.roads.mainMesh);
@@ -164,6 +171,9 @@ export class Inspector {
       <div class="state-pill">${d.state}</div>
       <div class="kv">${d.tourist ? `<span>Hotel</span><span>${d.home}</span><span>Situação</span><span>${d.job}</span>` : `<span>Casa</span><span>${d.home}</span><span>Trabalho/escola</span><span>${d.job}</span>`}
       <span>Renda/dia</span><span>$${d.income.toFixed(0)}</span><span>Economias</span><span>$${d.money.toFixed(0)}</span><span>Transporte</span><span>${d.mode}</span>${d.speedKmh != null ? `<span>Velocidade atual</span><span>${d.speedKmh.toFixed(0)} km/h</span>` : ''}<span>Felicidade</span><span>${Math.round(d.happiness * 100)}%</span></div>`;
+    if (d.car) {
+      html += `<h4>Veículo da família</h4><div class="kv"><span>Situação</span><span>${d.car.status}</span><span>Desgaste</span><span>${d.car.wearPct}%${d.car.vintage ? ' · clássico' : ''}</span><span>Quilometragem</span><span>${d.car.km} km (${d.car.ageDays} d)</span></div>`;
+    }
     html += `<h4>Necessidades</h4>`;
     for (const [k, v] of Object.entries(d.needs)) html += `<div class="term"><span>${NEED_LABEL[k] ?? k}</span><div class="tb"><i style="left:0;width:${Math.round(v * 100)}%;background:${v > 0.6 ? 'var(--good)' : v > 0.3 ? 'var(--warn)' : 'var(--bad)'}"></i></div><span class="v">${Math.round(v * 100)}</span></div>`;
     if (d.agenda.length) html += `<h4>Agenda de hoje</h4>` + d.agenda.map((a) => `<div class="alt" style="${a.done ? 'color:#93a598;text-decoration:line-through' : ''}">${a.h} · ${a.act}</div>`).join('');
@@ -188,6 +198,12 @@ export class Inspector {
       <div class="kv"><span>Comprimento</span><span>${d.len.toFixed(0)} m</span><span>Volume (veíc./h)</span><span>${d.volume.map((v) => v.toFixed(0)).join(' / ')}</span>
       <span>Capacidade</span><span>${d.capacity.toFixed(0)}</span><span>Volume/capacidade</span><span style="color:${d.vc > 0.85 ? 'var(--bad)' : 'inherit'}">${d.vc.toFixed(2)}</span>
       <span>Dias congestionado</span><span>${d.congestedDays}</span><span>Picos (7 dias)</span><span>${d.history.map((h) => h.toFixed(2)).join(' ')}</span></div>`;
+    if (d.incidents?.length) {
+      html += `<h4>Ocorrência viária ativa</h4>`;
+      for (const inc of d.incidents) {
+        html += `<div class="alt">🚨 <b>${inc.label}</b> · ${inc.fullClosure ? 'via interditada' : 'faixa bloqueada'}<br>${inc.stage}${inc.units.length ? `<br>Equipes: ${inc.units.join(' · ')}` : ''}</div>`;
+      }
+    }
     if (d.gate) {
       const g = d.gate;
       html += g.separated ? `<div class="alt">🚆 Cruza a ferrovia em desnível: sem cancelas.</div>`
@@ -218,9 +234,34 @@ export class Inspector {
     if (drawOD) this.app.overlays.showOD?.(d.pairs);
   }
 
+  async showVehicle(slot: number) {
+    this.kind = 'vehicle'; this.id = slot; this.pendingOpen = true;
+    this.clearMarkers();
+    await this.refreshVehicle();
+  }
+  private async refreshVehicle() {
+    const slot = this.id;
+    const d = await this.app.inspect<VehicleInfo>('vehicle', slot);
+    if (!d || this.kind !== 'vehicle' || this.id !== slot) return;
+    this.open();
+    const badges: string[] = [];
+    if (d.siren) badges.push('🚨 Sirene ligada');
+    if (d.hazard) badges.push('⚠️ Alerta/Giroflex');
+    const html = this.head('Veículo em operação', d.typeName, `${d.edge}${badges.length ? ' · ' + badges.join(' · ') : ''}`) + `
+      <div class="state-pill">${d.mission}</div>
+      <div class="kv">
+        <span>Velocidade</span><span>${Math.round(d.speed * 3.6)} km/h</span>
+        <span>Limite da via</span><span>${Math.round(d.limit * 3.6)} km/h</span>
+        ${d.incidentId >= 0 ? `<span>Ocorrência</span><span>#${d.incidentId}</span>` : ''}
+      </div>`;
+    this.panel.innerHTML = html;
+    this.panel.querySelector('.close')!.addEventListener('click', () => { this.close(); this.app.setMode('auto'); });
+  }
+
   frame() {
     const now = performance.now();
     if (this.kind === 'citizen' && now - this.lastRefresh > 1000) { this.lastRefresh = now; this.refreshCitizen(); }
+    else if (this.kind === 'vehicle' && now - this.lastRefresh > 1000) { this.lastRefresh = now; this.refreshVehicle(); }
     else if (this.kind === 'edge' && now - this.lastRefresh > 2000) { this.lastRefresh = now; this.refreshEdge(false); }
     else if (this.kind === 'building' && now - this.lastRefresh > 2000) { this.lastRefresh = now; this.refreshBuilding(false); }
     for (const m of this.markers.children) if ((m as THREE.Mesh).geometry?.type === 'OctahedronGeometry') m.rotation.y += 0.03;

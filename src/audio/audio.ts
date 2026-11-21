@@ -157,7 +157,7 @@ export class AudioEngine {
         const d = Math.hypot(dx, snap.veh[i + 1] - cam.y, dz);
         if (d < 250) {
           // weight by vehicle acoustic class (heavy > moto > light), aligned with sim acoustics
-          const w = ty === VType.Moto ? 1.75 : ty === VType.Truck || ty === VType.Bus || ty === VType.TourBus || ty === VType.SchoolBus || ty === VType.Fire || ty === VType.Garbage || ty === VType.Construction ? 2.7 : 1;
+          const w = ty === VType.Moto ? 1.75 : ty === VType.Truck || ty === VType.Bus || ty === VType.TourBus || ty === VType.SchoolBus || ty === VType.Fire || ty === VType.Garbage || ty === VType.Construction || ty === VType.Tow ? 2.7 : 1;
           const contrib = (1 - d / 250) * w;
           veh += contrib;
           const hd = Math.hypot(dx, dz) || 1;

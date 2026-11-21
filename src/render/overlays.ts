@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import type { App } from '../app';
-import type { TransitLineView } from '../shared/protocol';
+import { LANE_WIDTH } from '../shared/constants';
+import type { RoadIncidentView, TransitLineView } from '../shared/protocol';
 import { FIELD_LABELS, type FieldName } from '../shared/catalog';
+import { edgePtsCum, sampleEdgePts } from '../shared/roadGeom';
 import { U } from './uniforms';
 import { el } from '../ui/hud';
 
@@ -32,8 +34,10 @@ export class Overlays {
   private metro: HTMLElement;
   private metroCanvas: HTMLCanvasElement;
   lines = new Map<number, TransitLineView>();
+  incidents: RoadIncidentView[] = [];
   private lineGroup = new THREE.Group();
   private stopGroup = new THREE.Group();
+  private incidentGroup = new THREE.Group();
   private arcGroup = new THREE.Group();
   private odGroup = new THREE.Group();
   private shelterRoofGeo = new THREE.BoxGeometry(3.2, 0.14, 1.15);
@@ -46,6 +50,25 @@ export class Overlays {
   private shelterFrameMat = new THREE.MeshStandardMaterial({ color: 0x3b4856, roughness: 0.55, metalness: 0.35 });
   private shelterGlassMat = new THREE.MeshStandardMaterial({ color: 0x8fb8d8, transparent: true, opacity: 0.45, roughness: 0.25 });
   private shelterBenchMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3c, roughness: 0.85 });
+  // Road incident 3D signage (cones, striped barricades, pulsing warning beacon & halo)
+  private coneBaseGeo = new THREE.BoxGeometry(0.46, 0.06, 0.46);
+  private coneBodyGeo = new THREE.ConeGeometry(0.19, 0.78, 8);
+  private coneBandGeo = new THREE.CylinderGeometry(0.105, 0.145, 0.17, 8);
+  private barLegGeo = new THREE.BoxGeometry(0.12, 1.05, 0.12);
+  private barBoardGeo = new THREE.BoxGeometry(0.10, 0.38, 2.5);
+  private barStripeGeo = new THREE.BoxGeometry(0.12, 0.36, 0.32);
+  private barLampGeo = new THREE.CylinderGeometry(0.11, 0.13, 0.18, 8);
+  private incidentGeos: THREE.BufferGeometry[] = [];
+  private coneBaseMat = new THREE.MeshStandardMaterial({ color: 0x1e2228, roughness: 0.9 });
+  private coneOrangeMat = new THREE.MeshStandardMaterial({ color: 0xff5a12, roughness: 0.45 });
+  private coneWhiteMat = new THREE.MeshStandardMaterial({ color: 0xf4f6f8, roughness: 0.35 });
+  private barRedMat = new THREE.MeshStandardMaterial({ color: 0xd92622, roughness: 0.4 });
+  private barFrameMat = new THREE.MeshStandardMaterial({ color: 0x4b5563, roughness: 0.6, metalness: 0.35 });
+  private incAmberMat = new THREE.MeshBasicMaterial({ color: 0xffaa1a, toneMapped: false });
+  private incCrashMat = new THREE.MeshBasicMaterial({ color: 0xff2a1e, toneMapped: false });
+  private incHaloAmberMat = new THREE.MeshBasicMaterial({ color: 0xffa61a, transparent: true, opacity: 0.36, side: THREE.DoubleSide, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+  private incHaloCrashMat = new THREE.MeshBasicMaterial({ color: 0xff2e22, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+  private pulseT = 0;
 
   constructor(private app: App) {
     this.G = app.init.fieldRes;
@@ -53,7 +76,7 @@ export class Overlays {
     this.tex.magFilter = THREE.LinearFilter;
     this.tex.minFilter = THREE.LinearFilter;
     U.uOverlay.value = this.tex;
-    this.group.add(this.lineGroup, this.stopGroup, this.arcGroup, this.odGroup);
+    this.group.add(this.lineGroup, this.stopGroup, this.incidentGroup, this.arcGroup, this.odGroup);
     this.lineGroup.visible = false;
     const root = app.uiRoot;
     this.menu = document.createElement('div');
@@ -267,5 +290,140 @@ export class Overlays {
     }
   }
 
-  update(_dt: number) {}
+  setIncidents(list: RoadIncidentView[]) {
+    this.incidents = list;
+    this.incidentGroup.clear();
+    for (const geo of this.incidentGeos) geo.dispose();
+    this.incidentGeos.length = 0;
+
+    for (const inc of list) {
+      const g = new THREE.Group();
+      const cosA = Math.cos(inc.angle);
+      const sinA = Math.sin(inc.angle);
+      const edgeView = this.app.roads.edges.get(inc.edge);
+      const pts = edgeView?.pts && edgeView.pts.length >= 6 ? edgeView.pts : null;
+      const cum = pts ? edgePtsCum(pts) : undefined;
+
+      // Exact road + terrain surface height at any local (lx, lz) in the incident's travel frame:
+      // local +X = forward (cosA, sinA), local +Z = right / higher lane index (-sinA, cosA)
+      const surfaceY = (lx: number, lz: number): number => {
+        const wx = inc.x + cosA * lx - sinA * lz;
+        const wz = inc.z + sinA * lx + cosA * lz;
+        const roadY = pts ? sampleEdgePts(pts, inc.s + lx, inc.dir, cum)[1] : inc.y;
+        const terrY = this.app.terrain.heightAt(wx, wz);
+        return Math.max(roadY + 0.08, terrY + 0.10);
+      };
+
+      const baseY = surfaceY(0, 0);
+      g.position.set(inc.x, baseY, inc.z);
+      g.rotation.y = -inc.angle;
+
+      const addCone = (lx: number, lz: number) => {
+        const ly = surfaceY(lx, lz) - baseY;
+        const base = new THREE.Mesh(this.coneBaseGeo, this.coneBaseMat);
+        base.position.set(lx, ly + 0.03, lz);
+        const body = new THREE.Mesh(this.coneBodyGeo, this.coneOrangeMat);
+        body.position.set(lx, ly + 0.42, lz);
+        body.castShadow = true;
+        const band = new THREE.Mesh(this.coneBandGeo, this.coneWhiteMat);
+        band.position.set(lx, ly + 0.45, lz);
+        g.add(base, body, band);
+      };
+
+      const addBarricade = (lx: number, lz: number, crash: boolean) => {
+        const ly = Math.max(surfaceY(lx, lz - 1.05), surfaceY(lx, lz), surfaceY(lx, lz + 1.05)) - baseY;
+        const leg1 = new THREE.Mesh(this.barLegGeo, this.barFrameMat);
+        leg1.position.set(lx, ly + 0.52, lz - 1.05);
+        const leg2 = new THREE.Mesh(this.barLegGeo, this.barFrameMat);
+        leg2.position.set(lx, ly + 0.52, lz + 1.05);
+        const board = new THREE.Mesh(this.barBoardGeo, this.coneWhiteMat);
+        board.position.set(lx, ly + 0.86, lz);
+        board.castShadow = true;
+        g.add(leg1, leg2, board);
+        const stripeMat = crash ? this.barRedMat : this.coneOrangeMat;
+        for (const sz of [-0.92, -0.32, 0.28, 0.88]) {
+          const st = new THREE.Mesh(this.barStripeGeo, stripeMat);
+          st.position.set(lx, ly + 0.86, lz + sz);
+          g.add(st);
+        }
+        const lamp = new THREE.Mesh(this.barLampGeo, crash ? this.incCrashMat : this.incAmberMat);
+        lamp.position.set(lx, ly + 1.14, lz);
+        g.add(lamp);
+      };
+
+      const isCrash = inc.kind !== 'breakdown';
+      const lanes = Math.max(1, inc.lanes);
+      const incLane = Math.max(0, Math.min(lanes - 1, inc.lane));
+      // Breakdowns pull slightly to the right (+0.65 m); offset signage back to true lane center
+      const lat0 = inc.kind === 'breakdown' ? 0.65 : 0;
+      const laneCenterZ = (l: number) => (l - incLane) * LANE_WIDTH - lat0;
+
+      // Striped barricades upstream of the disabled/crashed vehicle(s) covering every closed lane in THIS direction
+      if (inc.fullClosure) {
+        for (let l = 0; l < lanes; l++) {
+          addBarricade(-7.2, laneCenterZ(l), isCrash);
+        }
+      } else {
+        addBarricade(-7.2, laneCenterZ(incLane), isCrash);
+      }
+
+      // Perimeter traffic cones tapering upstream and flanking strictly within the closed lane(s) (never in oncoming traffic or on sidewalks)
+      const zMin = (inc.fullClosure ? laneCenterZ(0) : laneCenterZ(incLane)) - 1.25;
+      const zMax = (inc.fullClosure ? laneCenterZ(lanes - 1) : laneCenterZ(incLane)) + 1.25;
+      const coneCoords: [number, number][] = [
+        [-11.4, zMin], [-11.4, zMax],
+        [-9.2, zMin], [-9.2, zMax],
+        [-4.2, zMin], [-4.2, zMax],
+        [5.2, zMin], [5.2, zMax],
+      ];
+      if (inc.fullClosure && lanes >= 2) {
+        for (let l = 0; l < lanes - 1; l++) {
+          const zMid = (laneCenterZ(l) + laneCenterZ(l + 1)) * 0.5;
+          coneCoords.push([-10.5, zMid], [-4.2, zMid], [5.2, zMid]);
+        }
+      }
+      for (const [cx, cz] of coneCoords) addCone(cx, cz);
+
+      // Slope-conforming pulsing warning halo (kept compact so it never spills onto sidewalks or clips below slopes)
+      const segs = 28;
+      const innerR = inc.kind === 'major_crash' ? 2.25 : 2.0;
+      const outerR = inc.kind === 'major_crash' ? 2.78 : 2.5;
+      const pos = new Float32Array((segs + 1) * 2 * 3);
+      const idx: number[] = [];
+      for (let k = 0; k <= segs; k++) {
+        const a = (k / segs) * Math.PI * 2;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const ix = ca * innerR, iz = sa * innerR;
+        const ox = ca * outerR, oz = sa * outerR;
+        const iy = surfaceY(ix, iz) - baseY + 0.14;
+        const oy = surfaceY(ox, oz) - baseY + 0.14;
+        const v0 = k * 2;
+        pos[v0 * 3] = ix; pos[v0 * 3 + 1] = iy; pos[v0 * 3 + 2] = iz;
+        pos[(v0 + 1) * 3] = ox; pos[(v0 + 1) * 3 + 1] = oy; pos[(v0 + 1) * 3 + 2] = oz;
+        if (k < segs) {
+          idx.push(v0, v0 + 1, v0 + 2, v0 + 1, v0 + 3, v0 + 2);
+        }
+      }
+      const haloGeo = new THREE.BufferGeometry();
+      haloGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      haloGeo.setIndex(idx);
+      haloGeo.computeVertexNormals();
+      this.incidentGeos.push(haloGeo);
+      const halo = new THREE.Mesh(haloGeo, isCrash ? this.incHaloCrashMat : this.incHaloAmberMat);
+      g.add(halo);
+
+      this.incidentGroup.add(g);
+    }
+  }
+
+  update(dt: number) {
+    if (!this.incidents.length) return;
+    this.pulseT += dt;
+    const amb = 0.5 + 0.5 * Math.sin(this.pulseT * 8.5);
+    const red = 0.5 + 0.5 * Math.sin(this.pulseT * 12.5);
+    this.incAmberMat.color.setRGB(1.2 + amb * 1.8, 0.55 + amb * 1.0, 0.05);
+    this.incCrashMat.color.setRGB(0.6 + red * 2.4, 0.08 + (1 - red) * 0.25, 0.08 + (1 - red) * 2.2);
+    this.incHaloAmberMat.opacity = 0.18 + amb * 0.30;
+    this.incHaloCrashMat.opacity = 0.20 + red * 0.34;
+  }
 }

@@ -38,7 +38,7 @@ const BASE: Record<string, { shot: ShotType; w: number }> = {
   power_line: { shot: 'flyover', w: 0.8 }, rail_build: { shot: 'travelling', w: 1.1 }, bus_line: { shot: 'chase', w: 1.0 }, city_hall: { shot: 'orbit', w: 0.7 },
   collapse: { shot: 'orbit', w: 2.1 }, occupation: { shot: 'orbit', w: 1.0 }, investigation: { shot: 'establishing', w: 1.3 }, election: { shot: 'reveal', w: 1.5 },
   mayor: { shot: 'orbit', w: 1.0 }, works_stalled: { shot: 'crane', w: 1.1 }, works_resumed: { shot: 'crane', w: 1.2 }, expropriation: { shot: 'orbit', w: 0.8 }, abandoned: { shot: 'orbit', w: 0.45 },
-  outbreak: { shot: 'orbit', w: 0.8 }, accident: { shot: 'orbit', w: 0.8 }, police_station: { shot: 'orbit', w: 1.1 },
+  outbreak: { shot: 'orbit', w: 0.8 }, accident: { shot: 'orbit', w: 1.35 }, breakdown: { shot: 'orbit', w: 0.75 }, road_cleared: { shot: 'orbit', w: 0.35 }, police_station: { shot: 'orbit', w: 1.1 },
 };
 
 const DUR: Record<ShotType, [number, number]> = {

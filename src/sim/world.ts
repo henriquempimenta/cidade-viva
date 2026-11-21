@@ -20,7 +20,8 @@ import { Terrain } from './terrain';
 import { Weather } from './weather';
 import { Citizens, type Household } from './citizens';
 import { Economy } from './economy';
-import { Traffic, P_CITIZEN, P_CONSTRUCTION, P_FUNERAL, P_SERVICE } from './traffic';
+import { Traffic, P_CITIZEN, P_CONSTRUCTION, P_FUNERAL, P_INCIDENT, P_SERVICE } from './traffic';
+import { RoadIncidents } from './incidents';
 import { Peds } from './peds';
 import { Places } from './places';
 import { carPlan, carPlanFromNode, carPlanToNode, doorOf, walkPoints, type CarPlan } from './trips';
@@ -73,6 +74,7 @@ export class World {
   citizens!: Citizens;
   utils!: Utilities;
   services!: Services;
+  incidents!: RoadIncidents;
   cityHall!: CityHall;
   integrity!: Integrity;
   upgrades!: RoadUpgrades;
@@ -269,6 +271,10 @@ export class World {
     this.roads.onSplit = (o, e1, e2, t) => {
       this.traffic.splitEdge(o, e1, e2, t);
       this.transitSys?.onEdgeSplit(o, e1, e2, t);
+      this.incidents?.onEdgeSplit(o, e1, e2, t);
+    };
+    this.roads.onRemove = (eid) => {
+      this.incidents?.onEdgeRemoved(eid);
     };
     this.peds = new Peds(this.terrain, (x, z) => this.pedElevation(x, z));
     this.hasCitizens = true;
@@ -276,6 +282,7 @@ export class World {
     this.utilities = this.utils;
     this.outageGrid = this.utils.outageGrid;
     this.services = new Services(this);
+    this.incidents = new RoadIncidents(this);
     this.cityHall = new CityHall(this);
     this.integrity = new Integrity(this);
     this.upgrades = new RoadUpgrades(this);
@@ -377,6 +384,7 @@ export class World {
     const kind = T.pKind[slot], id = T.pId[slot];
     if (kind === P_CITIZEN) { if (this.citizens.slot[id] === slot) this.citizens.arrive(id); return; }
     if (kind === 3 /* P_BUS */) { this.transitSys.busArrived(slot); return; }
+    if (kind === P_INCIDENT) { this.incidents.unitArrived(slot); return; }
     this.serviceArrived?.(slot);
   }
   vehicleStuck(slot: number) {
@@ -390,6 +398,7 @@ export class World {
         }
       }
     } else if (T.pKind[slot] === 3) this.transitSys.busArrived(slot);
+    else if (T.pKind[slot] === P_INCIDENT) this.incidents.unitStuck(slot);
     else this.serviceStuck?.(slot);
   }
   serviceArrived: ((slot: number) => void) | null = null;
@@ -868,6 +877,7 @@ export class World {
     this.traffic.step(dt, this.nodeAllow);
     this.peds.step(dt);
     this.citizens.step(dt);
+    this.incidents.step(dt);
     // construction progress
     for (const id of [...this.buildings.underConstruction]) {
       const b = this.buildings.byId.get(id);
@@ -1072,6 +1082,7 @@ export class World {
     if (B.treesRemoved.length) { diff.treesRemoved = B.treesRemoved; B.treesRemoved = []; }
     if (this.rail2?.dirtyViews) { this.rail2.dirtyViews = false; diff.rail = this.rail2.railViews(); }
     if (this.rail2?.crossingsDirty) { this.rail2.crossingsDirty = false; diff.crossings = this.rail2.crossingViews(); }
+    if (this.incidents?.dirty) { this.incidents.dirty = false; diff.incidents = this.incidents.views(); }
     const st = this.rail2?.stationViews(); if (st?.length) diff.stations = st;
     const lv = this.transitSys?.views(); if (lv?.length) diff.lines = lv;
     if (this.happen) {

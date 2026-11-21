@@ -7,6 +7,7 @@ import {
   type VehicleId,
 } from '../src/render/vehicleGeom';
 import { VTYPE_LEN, VType } from '../src/shared/constants';
+import { VEHICLE_MESH_LEN } from '../src/shared/vehiclePresets';
 import { getFamily } from '../src/workbench/registry';
 
 const HEAVY_IDS = new Set<VehicleId>([
@@ -17,29 +18,35 @@ const HEAVY_IDS = new Set<VehicleId>([
   'garbage',
   'construction',
   'fire',
+  'tow',
 ]);
 
 const DETAILS: AssetDetail[] = ['high', 'med', 'low'];
 
 describe('vehicleGeom parametric generator', () => {
-  it('registers all 18 vehicle presets and maps every motorized VType', () => {
-    expect(VEHICLE_PRESETS).toHaveLength(18);
+  it('registers all 19 vehicle presets and maps every motorized VType (including Tow)', () => {
+    expect(VEHICLE_PRESETS).toHaveLength(19);
     const ids = new Set(VEHICLE_PRESETS.map((p) => p.id));
-    expect(ids.size).toBe(18);
+    expect(ids.size).toBe(19);
 
     const family = getFamily('vehicles');
     expect(family.id).toBe('vehicles');
-    expect(family.variants()).toHaveLength(18);
+    expect(family.variants()).toHaveLength(19);
 
     const motorized: VType[] = [
       VType.Car, VType.Taxi, VType.Moto, VType.Bus, VType.SchoolBus,
       VType.Truck, VType.Van, VType.Garbage, VType.Ambulance, VType.Police,
-      VType.Fire, VType.TourBus, VType.Construction, VType.Hearse,
+      VType.Fire, VType.TourBus, VType.Construction, VType.Hearse, VType.Tow,
     ];
     for (const vt of motorized) {
       const list = VTYPE_DEFAULT_PRESETS[vt];
       expect(list && list.length).toBeGreaterThan(0);
     }
+    const towBuilt = buildVehicle('tow', 'high');
+    towBuilt.body.computeBoundingBox();
+    const tbb = towBuilt.body.boundingBox!;
+    const towExtent = 2 * Math.max(Math.abs(tbb.min.x), Math.abs(tbb.max.x));
+    expect(VEHICLE_MESH_LEN.tow).toBeGreaterThanOrEqual(towExtent - 0.001);
   });
 
   for (const preset of VEHICLE_PRESETS) {

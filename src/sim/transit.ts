@@ -43,6 +43,9 @@ export interface Line {
   waiting: Map<number, number[]>; onboard: Map<number, number[]>; edges: Set<number>;
   headway: number; lastSpawn: number; pts: number[];
   pendingBRT?: boolean;
+  /** average fleet age (days) & mechanical wear (0..1) for bus/BRT fleet maintenance & renewal */
+  fleetAge?: number;
+  fleetWear?: number;
 }
 export interface Ride { line: number; fromId: number; toId: number; gen: number; phase: number; since: number; dest: number }
 
@@ -61,6 +64,8 @@ export class Transit {
   private lastPlan = -5;
   ridersDay = 0;
   faresCollected = 0;
+  busMaintCostToday = 0;
+  busRenewals = 0;
 
   constructor(private w: World) {}
 
@@ -221,16 +226,9 @@ export class Transit {
         if (survivors.length >= 2) {
           this.replaceStops(l, survivors);
         } else {
-          // Fewer than 2 viable stops remain: evacuate waiting, walking (phase 0) and onboard (phase 2) riders cleanly
-          for (const q of l.waiting.values()) for (const cid of q) this.giveUp(cid);
-          l.waiting.clear();
-          for (const pass of l.onboard.values()) for (const cid of pass) this.giveUp(cid);
-          l.onboard.clear();
-          for (const [cid, r] of [...this.rides.entries()]) {
-            if (r.line === l.id) this.giveUp(cid);
-          }
+          // Fewer than 2 viable stops remain: evacuate waiting, walking (phase 0/3) and onboard (phase 2) riders cleanly
+          this.evacuateLine(l);
           l.stops = survivors;
-          l.fleet = 0;
         }
       }
       if (changed) this.dirty.add(l.id);
@@ -603,6 +601,31 @@ export class Transit {
     for (const i of pass) this.giveUp(i);
   }
 
+  /** Evacuate every waiting, walking and onboard rider on line `l` and suspend its fleet. */
+  private evacuateLine(l: Line) {
+    for (const q of l.waiting.values()) for (const cid of q) this.giveUp(cid);
+    l.waiting.clear();
+    for (const pass of l.onboard.values()) for (const cid of pass) this.giveUp(cid);
+    l.onboard.clear();
+    for (const [cid, r] of [...this.rides.entries()]) {
+      if (r.line === l.id) this.giveUp(cid);
+    }
+    l.fleet = 0;
+  }
+
+  /** Evacuate onboard riders from a broken-down bus without stranding them or corrupting rides. */
+  evacuateBus(slot: number): number {
+    const T = this.w.traffic;
+    const l = this.lines.find((x) => x.id === T.pId[slot]);
+    if (!l) return 0;
+    l.vehicles.delete(slot);
+    const pass = l.onboard.get(slot) ?? [];
+    l.onboard.delete(slot);
+    for (const cid of pass) this.giveUp(cid);
+    T.pAux[slot] = 0;
+    return pass.length;
+  }
+
   /** after a topology change (one-way conversion, street replaced by a structure): re-route lines through their stops */
   revalidateLines(): number {
     const R = this.w.roads;
@@ -614,7 +637,7 @@ export class Transit {
       if (pathValid && stopsValid) continue;
       const e0 = R.edges[l.path[0] >> 1];
       const start = e0 ? ((l.path[0] & 1) === 0 ? e0.a : e0.b) : l.stops[0]?.node;
-      if (start === undefined || start < 0 || !R.nodes[start]?.alive) { l.fleet = 0; continue; }
+      if (start === undefined || start < 0 || !R.nodes[start]?.alive) { this.evacuateLine(l); continue; }
       const seq = [start, ...l.stops.map((s) => s.node).filter((n) => n >= 0 && n !== start && R.nodes[n]?.alive), start];
       const path: number[] = [];
       let ok = true;
@@ -623,9 +646,9 @@ export class Transit {
         const seg = seq[k] === seq[k + 1] ? [] : R.route(seq[k], seq[k + 1], 800);
         if (!seg) ok = false; else path.push(...seg);
       }
-      if (!ok || path.length < 2) { l.fleet = 0; continue; } // suspended until the network allows it again
+      if (!ok || path.length < 2) { this.evacuateLine(l); continue; } // suspended until the network allows it again
       const newStops = this.placeStopsAlongPath(path);
-      if (newStops.length < 2) { l.fleet = 0; continue; }
+      if (newStops.length < 2) { this.evacuateLine(l); continue; }
       l.path = path;
       l.destS = R.edges[path[path.length - 1] >> 1].len - 1;
       l.edges = new Set(path.map((d) => d >> 1));
@@ -672,6 +695,7 @@ export class Transit {
 
   daily() {
     const w = this.w;
+    this.busMaintCostToday = 0;
     for (const [k, v] of this.od) { const nv = v * 0.6; if (nv < 1) this.od.delete(k); else this.od.set(k, nv); }
     for (const l of this.lines) {
       l.ridersYday = l.ridersToday;
@@ -681,6 +705,23 @@ export class Transit {
         if (perBus > 90 && l.fleet < 14) { l.fleet++; l.headway = this.headway(l); }
         else if (perBus < 20 && l.fleet > 2) { l.fleet--; l.headway = this.headway(l); }
         if (l.kind === 'bus' && l.ridersYday > 650 && w.era >= 2) this.toBRT(l);
+        // Fleet aging, preventive maintenance & gradual renewal
+        if (l.fleet > 0) {
+          l.fleetAge = (l.fleetAge ?? 0) + 1;
+          l.fleetWear = Math.min(1, (l.fleetWear ?? 0) + 0.022 + Math.min(0.035, l.ridersYday / Math.max(1, l.fleet * 1800)));
+          if (l.fleetWear >= 0.36 && w.budget.money > -400) {
+            l.fleetWear = Math.max(0.08, l.fleetWear - 0.24);
+            this.busMaintCostToday += l.fleet * 4;
+          }
+          if ((l.fleetAge >= 28 || l.fleetWear >= 0.78) && w.budget.money > l.fleet * 55) {
+            l.fleetAge = 0;
+            l.fleetWear = 0.05;
+            this.busMaintCostToday += l.fleet * 40;
+            this.busRenewals++;
+            const st = l.stops[0];
+            if (st) w.events.emit('bus_line', st.x, st.z, 0.45, `Frota renovada na ${l.name}`, { visual: 0.5 });
+          }
+        }
       }
       this.dirty.add(l.id);
     }
@@ -729,6 +770,7 @@ export class Transit {
         id, kind: 'bus', color: COLORS[(id - 1) % COLORS.length], name: `Linha ${id} · ${w.districtName(za.x, za.z)} ↔ ${w.districtName(zb.x, zb.z)}`,
         stops, path, startS: 0, destS: R.edges[path[path.length - 1] >> 1].len - 1, fleet, vehicles: new Set(), ridersToday: 0, ridersYday: 0,
         waiting: new Map(), onboard: new Map(), edges: new Set(path.map((d) => d >> 1)), headway: 300, lastSpawn: -1e9, pts,
+        fleetAge: 0, fleetWear: 0.05,
       };
       l.headway = this.headway(l);
       this.lines.push(l);
@@ -964,7 +1006,7 @@ export class Transit {
     return out;
   }
   cost(): number {
-    let c = 0;
+    let c = this.busMaintCostToday;
     for (const l of this.lines) c += l.kind === 'bus' ? l.fleet * 12 : l.kind === 'brt' ? l.fleet * 16 : l.kind === 'metro' ? 300 : 120;
     return c;
   }

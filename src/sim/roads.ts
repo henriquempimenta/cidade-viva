@@ -115,6 +115,9 @@ export class RoadNetwork {
   dirtyEdges = new Set<number>();
   removedEdges: number[] = [];
   private trees = new Map<number, Tree>();
+  /** temporary travel-time penalties (s) from active road incidents, keyed by directed edge (eid*2+dir) */
+  incidentPenalty = new Map<number, number>();
+  private detourTrees = new Set<number>();
   time = 0;
   /** external hook: the railway vetoes segments that would cross it badly (returns the reason) */
   railCheck?: (ax: number, az: number, bx: number, bz: number, cls: RoadClass) => string | null;
@@ -327,6 +330,8 @@ export class RoadNetwork {
   footprintCheck: ((ax: number, az: number, bx: number, bz: number, halfW: number, trimA: number, trimB: number) => boolean) | null = null;
   /** observers of an edge split (traffic moves its vehicles onto the two halves) */
   onSplit: ((old: REdge, e1: REdge, e2: REdge, t: number) => void) | null = null;
+  /** observers of a standalone edge removal (not called during splitEdge, which uses onSplit) */
+  onRemove: ((eid: number) => void) | null = null;
   /** split edge at parameter t, returns new node */
   splitEdge(eid: number, t: number): RNode {
     const e = this.edges[eid];
@@ -334,7 +339,7 @@ export class RoadNetwork {
     const n = this.addNode(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t);
     const props = { progress: e.progress, bridge: e.bridge, name: e.name, day: e.builtDay, oneway: e.oneway, lanes: e.lanes, elevated: e.elevated };
     const busLane = e.busLane;
-    this.removeEdge(eid);
+    this.removeEdge(eid, true);
     const e1 = this.addEdge(e.a, n.id, e.cls, props);
     const e2 = this.addEdge(n.id, e.b, e.cls, props);
     e1.busLane = e2.busLane = busLane;
@@ -344,7 +349,7 @@ export class RoadNetwork {
     return n;
   }
 
-  removeEdge(eid: number) {
+  removeEdge(eid: number, splitting = false) {
     const e = this.edges[eid];
     if (!e.alive) return;
     e.alive = false;
@@ -354,8 +359,11 @@ export class RoadNetwork {
     this.hashRemove(this.edgeHash, eid, a.x, a.z, b.x, b.z);
     this.removedEdges.push(eid);
     this.dirtyEdges.delete(eid);
+    this.incidentPenalty.delete(eid * 2);
+    this.incidentPenalty.delete(eid * 2 + 1);
     this.updateNodeGeom(a); this.updateNodeGeom(b);
     this.topoVer++;
+    if (!splitting) this.onRemove?.(eid);
   }
 
   edgeBetween(a: number, b: number): REdge | null {
@@ -526,7 +534,26 @@ export class RoadNetwork {
   travelTime(e: REdge, dir: number): number {
     const t0 = e.len / this.freeSpeed(e);
     const vc = e.volume[dir] / this.capacity(e);
-    return t0 * (1 + 0.15 * Math.pow(vc, 4)) + e.stopped[dir] * 1.5 + (this.nodes[dir === 0 ? e.b : e.a].delay || 0) * 0.5;
+    const pen = this.incidentPenalty.get(e.id * 2 + dir) ?? 0;
+    return t0 * (1 + 0.15 * Math.pow(vc, 4)) + e.stopped[dir] * 1.5 + (this.nodes[dir === 0 ? e.b : e.a].delay || 0) * 0.5 + pen;
+  }
+
+  /** Apply or clear a temporary routing penalty on a directed edge (used by road incidents/closures). */
+  setIncidentPenalty(de: number, penaltySeconds: number) {
+    if (penaltySeconds <= 0) {
+      if (this.incidentPenalty.delete(de)) {
+        this.graph = null;
+        if (!this.incidentPenalty.size) {
+          for (const d of this.detourTrees) this.trees.delete(d);
+          this.detourTrees.clear();
+        }
+      }
+      return;
+    }
+    if (this.incidentPenalty.get(de) !== penaltySeconds) {
+      this.incidentPenalty.set(de, penaltySeconds);
+      this.graph = null;
+    }
   }
   usable(e: REdge) { return e.alive && e.progress >= 1; }
   /**
@@ -666,20 +693,22 @@ export class RoadNetwork {
     const g = this.routeGraph();
     this.pending = { ticket: this.backend.submit(g, dests), backend: this.backend, graph: g, dests, due: this.stepNo + RoadNetwork.EPOCH, ver: g.ver, t: this.time, waitSince: -1, fallback: false };
   }
-  tree(dest: number, force = false): Tree | null {
+  tree(dest: number, force = false, bypassBudget = false): Tree | null {
     let t = this.trees.get(dest);
     // an old tree stays usable after the graph grows: route() validates every hop and
-    // forces a rebuild only when the cached path is actually broken
+    // forces a rebuild only when the cached path is actually broken or blocked by an active closure
     if (!t || force) {
-      if (this.buildBudget <= 0 && t) return t;
-      if (this.buildBudget <= 0 && !t) return null;
-      this.buildBudget--;
+      if (!bypassBudget && this.buildBudget <= 0 && t) return t;
+      if (!bypassBudget && this.buildBudget <= 0 && !t) return null;
+      if (this.buildBudget > 0) this.buildBudget--;
       t = this.buildTree(dest, t);
       this.trees.set(dest, t);
+      if (this.incidentPenalty.size > 0) this.detourTrees.add(dest);
       if (this.trees.size > 4000) {
         let oldK = -1, oldT = Infinity;
         for (const [k, v] of this.trees) if (v.lastUse < oldT) { oldT = v.lastUse; oldK = k; }
         this.trees.delete(oldK);
+        this.detourTrees.delete(oldK);
       }
     }
     t!.lastUse = this.time;
@@ -696,10 +725,11 @@ export class RoadNetwork {
     return { dist: new Float32Array(0), next, ver: g.ver, built: this.time, lastUse: this.time };
   }
   /** directed edges from node `from` to `dest`; null if unreachable or routing budget exhausted */
-  route(from: number, dest: number, maxLen = 500): number[] | null {
+  route(from: number, dest: number, maxLen = 500, bypassBudget = false): number[] | null {
     if (from === dest) return [];
+    let forceDetour = bypassBudget;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const t = this.tree(dest, attempt === 1);
+      const t = this.tree(dest, attempt === 1, forceDetour);
       if (!t) return null;
       if (from >= t.next.length) continue;
       const out: number[] = [];
@@ -712,6 +742,10 @@ export class RoadNetwork {
         const tail = (de & 1) === 0 ? e.a : e.b;
         // cached trees can predate a direction change: every hop is checked against the current topology
         if (tail !== u || ((de & 1) === 1 && e.oneway)) { ok = false; this.graph = null; break; } // stale snapshot: rebuild it too
+        // active road closure on a cached route: rebuild this destination tree with closure penalties to detour automatically
+        if (attempt === 0 && (this.incidentPenalty.get(de) ?? 0) >= 500) {
+          ok = false; forceDetour = true; this.graph = null; break;
+        }
         out.push(de);
         u = (de & 1) === 0 ? e.b : e.a;
       }
@@ -738,7 +772,7 @@ export class RoadNetwork {
     return true;
   }
   /** drop every cached tree (direction changes make them unsafe even if they still look connected) */
-  invalidateRoutes() { this.trees.clear(); this.graph = null; this.topoVer++; }
+  invalidateRoutes() { this.trees.clear(); this.detourTrees.clear(); this.graph = null; this.topoVer++; }
   private walkDist = new Float64Array(0);
   private walkPrev = new Int32Array(0);
   private walkHeap = new MinHeap();

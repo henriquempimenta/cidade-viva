@@ -183,6 +183,8 @@ export class Happenings {
       case 'epidemic': this.epidemic(); break;
       case 'festival': this.festival(); break;
       case 'blackout': w.utils.forcedBlackout = 6; break;
+      case 'accident': w.incidents?.injectIncident('major_crash'); break;
+      case 'breakdown': w.incidents?.injectIncident('breakdown'); break;
     }
   }
 

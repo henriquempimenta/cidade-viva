@@ -243,7 +243,12 @@ export class Economy {
         this.wantsToMove(h, tier > (home?.wealth ?? 1) ? 'melhorou de vida' : 'precisou economizar');
       } else if (home && hap < 0.4 && w.day - h.movedDay > 4 && w.rng.chance(0.15)) this.wantsToMove(h, 'insatisfação com o bairro');
       if (h.unhappyDays > 6 && w.rng.chance(0.2 + p.taxRate)) C.leaveCity(h, 'infelicidade e falta de oportunidades');
-      if (!h.car && h.money > [1500, 2500, 4000][h.wealth] && w.rng.chance(0.1)) { h.car = true; h.carLoc = h.home; h.carUser = -1; h.carDriver = -1; h.money -= 800; }
+      if (!h.car && h.money > [1500, 2500, 4000][h.wealth] && w.rng.chance(0.1)) {
+        h.car = true; h.carLoc = h.home; h.carUser = -1; h.carDriver = -1;
+        h.carAge = 0; h.carKm = 0; h.carWear = 0; h.carRepairUntil = 0;
+        h.carVariant = w.era === 0 ? 0 : 1 + w.rng.int(0, 10);
+        h.money -= 800;
+      }
     }
     // happiness heatmap
     {

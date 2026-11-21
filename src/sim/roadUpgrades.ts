@@ -221,7 +221,7 @@ export class RoadUpgrades {
     e.lanes = e.lanes * 2; p.lanes = p.lanes * 2;
     R.invalidateRoutes();
     // keep the network strongly connected: test reachability both ways
-    const ok = R.route(e.a, e.b) && R.route(e.b, e.a) && R.route(p.a, p.b) && R.route(p.b, p.a);
+    const ok = R.route(e.a, e.b, 500, true) && R.route(e.b, e.a, 500, true) && R.route(p.a, p.b, 500, true) && R.route(p.b, p.a, 500, true);
     if (!ok) {
       [e.oneway, p.oneway, e.lanes, p.lanes, p.a, p.b] = before;
       R.computePts(p);
@@ -230,6 +230,9 @@ export class RoadUpgrades {
     }
     // vehicles already on the reversed edge keep moving the same physical way: their direction bit flips
     if (same) this.w.traffic.reverseEdge(p.id);
+    // clear any active road incidents on transformed edges before re-planning traffic
+    this.w.incidents?.onEdgeTopologyChange(e.id);
+    this.w.incidents?.onEdgeTopologyChange(p.id);
     // every vehicle and line whose remaining route now runs against the traffic is re-planned
     this.w.replanAfterTopology();
     R.dirtyEdges.add(e.id); R.dirtyEdges.add(p.id);

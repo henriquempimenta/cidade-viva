@@ -20,15 +20,15 @@ export const PED_STRIDE = 7; // x,y,z,heading,gen,flags,citizen
 export const TRAIN_STRIDE = 6; // x,y,z,heading,type,line
 
 export enum VType {
-  None = 0, Car, Taxi, Moto, Bus, SchoolBus, Truck, Van, Garbage, Ambulance, Police, Fire, TourBus, Construction, Hearse, Bike,
+  None = 0, Car, Taxi, Moto, Bus, SchoolBus, Truck, Van, Garbage, Ambulance, Police, Fire, TourBus, Construction, Hearse, Bike, Tow,
 }
-export const VTYPE_COUNT = 16;
+export const VTYPE_COUNT = 17;
 export const VTYPE_LEN: Record<number, number> = {
   [VType.Car]: 4.4, [VType.Taxi]: 4.4, [VType.Moto]: 2.2, [VType.Bus]: 12, [VType.SchoolBus]: 10,
   [VType.Truck]: 10, [VType.Van]: 5.5, [VType.Garbage]: 8, [VType.Ambulance]: 6, [VType.Police]: 4.8,
-  [VType.Fire]: 9, [VType.TourBus]: 12, [VType.Construction]: 8, [VType.Hearse]: 5.5, [VType.Bike]: 1.8,
+  [VType.Fire]: 9, [VType.TourBus]: 12, [VType.Construction]: 8, [VType.Hearse]: 5.5, [VType.Bike]: 1.8, [VType.Tow]: 8.4,
 };
-export const VEH_FLAG_SIREN = 1, VEH_FLAG_YIELD = 2, VEH_FLAG_BRAKE = 4, VEH_FLAG_FULL = 8, VEH_FLAG_ELEVATED = 16;
+export const VEH_FLAG_SIREN = 1, VEH_FLAG_YIELD = 2, VEH_FLAG_BRAKE = 4, VEH_FLAG_FULL = 8, VEH_FLAG_ELEVATED = 16, VEH_FLAG_HAZARD = 32;
 
 export const PED_FLAG_TOURIST = 1, PED_FLAG_UMBRELLA = 2, PED_FLAG_LUGGAGE = 4, PED_FLAG_WORKER = 8, PED_FLAG_FOLLOW = 16, PED_FLAG_PHOTO = 32, PED_FLAG_FUNERAL = 64, PED_FLAG_WAITING = 128;
 
@@ -39,7 +39,7 @@ export const ROAD_HALF_WIDTH = [3.2, 4, 5.5, 9, 10]; // half carriageway incl. m
 export const ROAD_LIMIT_KMH = [30, 40, 50, 60, 90];
 export const ROAD_SPEED = ROAD_LIMIT_KMH.map((k) => k / 3.6); // m/s
 /** top speed each kind of vehicle may drive at regardless of the posted limit (m/s) */
-export const MODE_CAP: Partial<Record<number, number>> = { [VType.Truck]: 80 / 3.6, [VType.Garbage]: 60 / 3.6, [VType.Construction]: 60 / 3.6, [VType.Bus]: 70 / 3.6, [VType.SchoolBus]: 60 / 3.6, [VType.TourBus]: 80 / 3.6 };
+export const MODE_CAP: Partial<Record<number, number>> = { [VType.Truck]: 80 / 3.6, [VType.Garbage]: 60 / 3.6, [VType.Construction]: 60 / 3.6, [VType.Tow]: 75 / 3.6, [VType.Bus]: 70 / 3.6, [VType.SchoolBus]: 60 / 3.6, [VType.TourBus]: 80 / 3.6 };
 /** with siren: emergency vehicles may exceed the posted limit by this much (m/s), up to EMERGENCY_CAP */
 export const EMERGENCY_EXCESS = 20 / 3.6, EMERGENCY_CAP = 100 / 3.6;
 export const ROAD_LANES = [1, 1, 1, 2, 2]; // lanes per direction

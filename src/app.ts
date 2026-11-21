@@ -206,6 +206,7 @@ export class App {
     d.rail?.forEach((r) => this.rail.upsert(r));
     d.stations?.forEach((s) => this.rail.upsertStation(s));
     if (d.crossings) this.rail.setCrossings(d.crossings);
+    if (d.incidents) this.overlays.setIncidents(d.incidents);
     d.lines?.forEach((l) => this.overlays.upsertLine(l));
     d.removedLines?.forEach((id) => this.overlays.removeLine(id));
     d.powerLines?.forEach((p) => this.effects.upsertPowerLine(p));

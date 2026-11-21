@@ -18,6 +18,7 @@ export type VehicleId =
   | 'garbage'
   | 'construction'
   | 'fire'
+  | 'tow'
   | 'moto';
 
 /**
@@ -42,6 +43,7 @@ export const VEHICLE_MESH_LEN: Record<VehicleId, number> = {
   garbage: 8.4,
   construction: 8.4,
   fire: 9.26,
+  tow: 8.6,
   moto: 2.2,
 };
 
@@ -72,11 +74,14 @@ const DIRECT_VTYPE_ID: Partial<Record<VType, VehicleId>> = {
   [VType.TourBus]: 'tourbus',
   [VType.Construction]: 'construction',
   [VType.Hearse]: 'hearse',
+  [VType.Tow]: 'tow',
 };
 
 /** Single deterministic preset picker shared identically by Traffic (sim) and AgentsLayer (render). */
-export function pickVehiclePreset(type: VType, slot: number, gen: number, era: number): VehicleId | null {
+export function pickVehiclePreset(type: VType, slot: number, gen: number, era: number, variant = -1): VehicleId | null {
   if (type === VType.Car) {
+    if (variant === 0) return 'vintage';
+    if (variant > 0) return MODERN_CAR_POOL[(variant - 1) % MODERN_CAR_POOL.length];
     const hash = ((slot * 7 + gen * 13) >>> 0);
     const pool = era === 0 ? ERA0_CAR_POOL : MODERN_CAR_POOL;
     return pool[hash % pool.length];
@@ -85,12 +90,12 @@ export function pickVehiclePreset(type: VType, slot: number, gen: number, era: n
 }
 
 /** Real physical length for a vehicle slot/generation/era, always >= its rendered 3D mesh extent. */
-export function vehiclePhysicalLen(type: VType, slot: number, gen: number, era: number): number {
-  const id = pickVehiclePreset(type, slot, gen, era);
+export function vehiclePhysicalLen(type: VType, slot: number, gen: number, era: number, variant = -1): number {
+  const id = pickVehiclePreset(type, slot, gen, era, variant);
   if (!id) return VTYPE_LEN[type] ?? 4.5;
-  // If spawned in Era 0 and era later advances to >= 1 while still active, cover both pools' length
-  if (type === VType.Car && era === 0) {
-    const modernId = pickVehiclePreset(type, slot, gen, 1);
+  // If spawned in Era 0 without an explicit household variant and era later advances, cover both pools' length
+  if (type === VType.Car && variant < 0 && era === 0) {
+    const modernId = pickVehiclePreset(type, slot, gen, 1, -1);
     return Math.max(VEHICLE_MESH_LEN[id], modernId ? VEHICLE_MESH_LEN[modernId] : 0);
   }
   return VEHICLE_MESH_LEN[id];

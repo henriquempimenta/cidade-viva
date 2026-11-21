@@ -47,7 +47,7 @@ describe('Rodada de Estabilização — Gates Quantitativos e Sondas Críticas',
     expect(rate).toBeGreaterThanOrEqual(0.95);
   }, 120000);
 
-  it('saúde de fluxo em 40 dias (seed=1234, vale): viagens > 70k, despawns < 2,5%, red-light < 0,2%, bikes > 10k, lixo < 0,30, zero sobreposições', async () => {
+  it('saúde de fluxo em 40 dias (seed=1234, vale): viagens > 70k, despawns < 2,5%, red-light === 0, bikes > 10k, lixo < 0,30, zero sobreposições', async () => {
     const w = makeWorld(1234, { terrain: 'vale' });
     const T = w.traffic;
     const steps = Math.round(40 * 4800);
@@ -79,7 +79,6 @@ describe('Rodada de Estabilização — Gates Quantitativos e Sondas Críticas',
     const completedTrips = w.citizens.tripsCompleted;
     const vehArrivals = T.arrivals;
     const stuckRate = T.despawnsStuck / Math.max(1, vehArrivals);
-    const redRate = T.despawnsRedLight / Math.max(1, vehArrivals);
     const bikeTrips = w.citizens.modeCount[1];
     const privateBld = w.buildings.list.filter((b) => b.alive && b.state === 'done' && !b.def.public);
     const avgGarbage = privateBld.reduce((acc, b) => acc + b.garbage, 0) / Math.max(1, privateBld.length);
@@ -87,7 +86,7 @@ describe('Rodada de Estabilização — Gates Quantitativos e Sondas Críticas',
     expect(completedTrips).toBeGreaterThan(70000);
     expect(vehArrivals).toBeGreaterThan(50000);
     expect(stuckRate).toBeLessThan(0.025);
-    expect(redRate).toBeLessThan(0.002);
+    expect(T.despawnsRedLight).toBe(0);
     expect(bikeTrips).toBeGreaterThan(10000);
     expect(avgGarbage).toBeLessThan(0.30);
     expect(overlaps).toBe(0);
@@ -349,8 +348,8 @@ describe('Rodada de Estabilização — Gates Quantitativos e Sondas Críticas',
     expect(main.transit?.stops.length).toBe(1);
   });
 
-  it('folga real entre picapes (5,24 m) paradas em fila >= 0,75 m e VEHICLE_MESH_LEN >= malha 3D para todos os 18 presets', () => {
-    // 1. Verify single source of truth across all 18 3D presets
+  it('folga real entre picapes (5,24 m) paradas em fila >= 0,75 m e VEHICLE_MESH_LEN >= malha 3D para todos os 19 presets', () => {
+    // 1. Verify single source of truth across all 19 3D presets
     for (const p of VEHICLE_PRESETS) {
       const built = buildVehicle(p.id, 'high');
       built.body.computeBoundingBox();
@@ -633,11 +632,13 @@ describe('Rodada de Estabilização — Gates Quantitativos e Sondas Críticas',
     const cWalk = w.citizens.add({ age: 25, hh: hh.id });
     const cWait = w.citizens.add({ age: 26, hh: hh.id });
     const cRide = w.citizens.add({ age: 27, hh: hh.id });
-    hh.members.push(cWalk, cWait, cRide);
-    for (const c of [cWalk, cWait, cRide]) w.citizens.state[c] = ST_TRANSIT;
+    const cAlight = w.citizens.add({ age: 28, hh: hh.id });
+    hh.members.push(cWalk, cWait, cRide, cAlight);
+    for (const c of [cWalk, cWait, cRide, cAlight]) w.citizens.state[c] = ST_TRANSIT;
     S.rides.set(cWalk, { line: busLine.id, fromId: stA.id, toId: stB.id, gen: w.citizens.gen[cWalk], phase: 0, since: 0, dest: home.id });
     S.rides.set(cWait, { line: busLine.id, fromId: stA.id, toId: stB.id, gen: w.citizens.gen[cWait], phase: 1, since: 0, dest: home.id });
     S.rides.set(cRide, { line: busLine.id, fromId: stA.id, toId: stB.id, gen: w.citizens.gen[cRide], phase: 2, since: 0, dest: home.id });
+    S.rides.set(cAlight, { line: busLine.id, fromId: stA.id, toId: stB.id, gen: w.citizens.gen[cAlight], phase: 3, since: 0, dest: home.id });
     busLine.waiting.set(stA.id, [cWait]);
     busLine.onboard.set(55, [cRide]);
 
@@ -650,8 +651,26 @@ describe('Rodada de Estabilização — Gates Quantitativos e Sondas Críticas',
     expect(S.rides.has(cWalk)).toBe(false);
     expect(S.rides.has(cWait)).toBe(false);
     expect(S.rides.has(cRide)).toBe(false);
+    expect(S.rides.has(cAlight)).toBe(false);
     expect(busLine.waiting.size).toBe(0);
     expect(busLine.onboard.size).toBe(0);
+
+    // 3. revalidateLines suspending a broken line (fleet = 0) MUST also evacuate waiting, onboard and rides
+    const brokenLine: Line = {
+      id: 807, kind: 'bus', color: '#8e44ad', name: 'Quebrada', stops: [stB],
+      path: [e1.id * 2], startS: 0, destS: 50, fleet: 2, vehicles: new Set(), ridersToday: 0, ridersYday: 0,
+      waiting: new Map(), onboard: new Map(), edges: new Set([e1.id]), headway: 120, lastSpawn: 0, pts: [],
+    };
+    S.lines.push(brokenLine);
+    const cRev = w.citizens.add({ age: 30, hh: hh.id });
+    hh.members.push(cRev);
+    w.citizens.state[cRev] = ST_TRANSIT;
+    S.rides.set(cRev, { line: brokenLine.id, fromId: stB.id, toId: stB.id, gen: w.citizens.gen[cRev], phase: 1, since: 0, dest: home.id });
+    brokenLine.waiting.set(stB.id, [cRev]);
+    S.revalidateLines();
+    expect(brokenLine.fleet).toBe(0);
+    expect(S.rides.has(cRev)).toBe(false);
+    expect(brokenLine.waiting.size).toBe(0);
   });
 
   it('usina desconectada da rede não infla power.supply e pedestre sobre ponte recebe cota do tabuleiro acima da água', () => {

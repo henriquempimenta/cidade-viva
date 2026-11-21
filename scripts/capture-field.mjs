@@ -205,15 +205,35 @@ async function main() {
       observations: {},
     };
 
-    // Helper: position overhead angled camera at (x, z) and wait frames so render & culling catch up
-    const lookAtPoint = async (x, z, dist = 48, height = 38) => {
+    // Helper: position overhead angled camera at (x, z) with terrain-occlusion avoidance
+    const lookAtPoint = async (x, z, dist = 48, height = 38, targetY = null) => {
       await cdp.eval(`(async () => {
         const a = window.app;
         a.enterFree(false);
-        a.controls.target.set(${x}, a.terrain.heightAt(${x}, ${z}) + 1, ${z});
-        a.rig.camera.position.set(${x} + ${dist * 0.72}, a.terrain.heightAt(${x}, ${z}) + ${height}, ${z} + ${dist * 0.68});
+        const ty = ${targetY === null ? 'null' : Number(targetY)} ?? Math.max(0.5, a.terrain.heightAt(${x}, ${z}) + 1);
+        // Sample 8 azimuths to choose a sightline that never clips into a hillside/riverbank
+        const candidates = [
+          [0.72, 0.68], [-0.72, 0.68], [0.72, -0.68], [-0.72, -0.68],
+          [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0],
+        ];
+        let best = candidates[0], bestClear = -Infinity;
+        for (const [ux, uz] of candidates) {
+          const cx = ${x} + ux * ${dist};
+          const cz = ${z} + uz * ${dist};
+          const mx = (${x} + cx) * 0.5;
+          const mz = (${z} + cz) * 0.5;
+          const camH = ty + ${height};
+          const midLineH = ty + ${height} * 0.5;
+          const clear = Math.min(camH - a.terrain.heightAt(cx, cz), midLineH - a.terrain.heightAt(mx, mz));
+          if (clear > bestClear) { bestClear = clear; best = [ux, uz]; }
+        }
+        const cx = ${x} + best[0] * ${dist};
+        const cz = ${z} + best[1] * ${dist};
+        const cy = Math.max(ty + ${height}, a.terrain.heightAt(cx, cz) + 14);
+        a.controls.target.set(${x}, ty, ${z});
+        a.rig.camera.position.set(cx, cy, cz);
         a.controls.update();
-        a.send({ type: 'camera', x: ${x}, z: ${z}, h: ${height} });
+        a.send({ type: 'camera', x: ${x}, z: ${z}, h: cy - ty });
         for (let k = 0; k < 5; k++) await new Promise((r) => requestAnimationFrame(r));
       })()`);
     };
@@ -509,7 +529,7 @@ async function main() {
       return best;
     })()`);
     if (bridgePos) {
-      await lookAtPoint(bridgePos.x, bridgePos.z, 34, 24);
+      await lookAtPoint(bridgePos.x, bridgePos.z, 36, 26, bridgePos.y + 0.8);
       await sleep(500);
       await snapFrozen('05-bridge-walkway.png', 1, async () => {
         const time = await cdp.eval(`window.app.timeLabel()`);
@@ -517,6 +537,152 @@ async function main() {
           kind: 'bridge-walkway', state: 'observing', mode: 'bridge', gen: -1,
           cameraMode: 'free', insideBuilding: false, inconclusive: false,
           bridge: bridgePos, time,
+        };
+      });
+    }
+
+    // --- 7. Cycle 2: Active road incident (cones, barricade, hazard vehicle, response & tow) ---
+    // Prefer a real emergent incident first; wait briefly at elevated speed before optional fallback injection.
+    const incidentPick = await cdp.eval(`(async () => {
+      const a = window.app;
+      let source = 'emergent';
+      if (!a.overlays.incidents || a.overlays.incidents.length === 0) {
+        a.setSpeed(50);
+        const t0 = performance.now();
+        while (performance.now() - t0 < 5500) {
+          if (a.overlays.incidents && a.overlays.incidents.length > 0) break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+      if (!a.overlays.incidents || a.overlays.incidents.length === 0) {
+        source = 'injected';
+        a.setSpeed(10);
+        a.send({ type: 'inject', event: 'accident' });
+        const t1 = performance.now();
+        while (performance.now() - t1 < 3500) {
+          if (a.overlays.incidents && a.overlays.incidents.length > 0) break;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+      a.setSpeed(1);
+      const inc = a.overlays.incidents?.[0] ?? null;
+      return inc ? { source, inc } : null;
+    })()`);
+
+    if (incidentPick?.inc) {
+      const inc = incidentPick.inc;
+      await cdp.eval(`(() => { window.app.hud.inspector.close(); })()`);
+      await lookAtPoint(inc.x, inc.z, 30, 22, inc.y + 0.8);
+      await sleep(500);
+      await snapFrozen('06-road-incident-t0.png', 8, async () => {
+        const obs = await cdp.eval(`(async () => {
+          const a = window.app;
+          const live = a.overlays.incidents.find((x) => x.id === ${inc.id}) ?? a.overlays.incidents[0] ?? null;
+          const edgeInfo = await a.inspect('edge', ${inc.edge});
+          return { live, edgeIncidents: edgeInfo?.incidents ?? [], time: a.timeLabel() };
+        })()`);
+        return {
+          kind: 'road-incident', source: incidentPick.source,
+          state: obs.live?.stage ?? 'cleared', mode: 'incident', gen: -1,
+          cameraMode: 'free', insideBuilding: false, inconclusive: !obs.live,
+          incident: obs.live ?? inc, edgeIncidents: obs.edgeIncidents, t: 0, time: obs.time,
+        };
+      });
+      // Advance sim moderately while incident remains active so responders visibly approach without clearing early
+      await cdp.eval(`(async () => {
+        const a = window.app;
+        const t0 = performance.now();
+        while (performance.now() - t0 < 2400) {
+          const live = a.overlays.incidents.find((x) => x.id === ${inc.id});
+          if (!live || live.stage === 'clearing') break;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      })()`);
+      await snapFrozen('06-road-incident-t1.png', 1, async () => {
+        const obs = await cdp.eval(`(async () => {
+          const a = window.app;
+          const live = a.overlays.incidents.find((x) => x.id === ${inc.id}) ?? a.overlays.incidents[0] ?? null;
+          const edgeId = live?.edge ?? ${inc.edge};
+          await a.hud.inspector.showEdge(edgeId);
+          // Clear OD arcs so the 3D scene stays clean around the incident cones/barricades
+          a.overlays.clearOD?.();
+          const edgeInfo = await a.inspect('edge', edgeId);
+          return { live, edgeIncidents: edgeInfo?.incidents ?? [], time: a.timeLabel() };
+        })()`);
+        return {
+          kind: 'road-incident', source: incidentPick.source,
+          state: obs.live?.stage ?? 'cleared', mode: 'incident', gen: -1,
+          cameraMode: 'free', insideBuilding: false, inconclusive: !obs.live,
+          incident: obs.live ?? inc, edgeIncidents: obs.edgeIncidents, t: 2.4, time: obs.time,
+        };
+      });
+    }
+
+    // --- 8. Cycle 2: Emergency responder or Tow truck in transit / on scene ---
+    const responderPick = await cdp.eval(`(async () => {
+      const a = window.app;
+      const findBest = () => {
+        const s = a.curSnap;
+        if (!s) return null;
+        const cands = [];
+        for (let i = 0; i < s.veh.length / 9; i++) {
+          const o = i * 9, t = s.veh[o + 4], gen = s.veh[o + 5], flags = s.veh[o + 6];
+          if (!t) continue;
+          // Prioritize Tow (16), Ambulance (9), Fire (11), Police (10) with siren or hazard
+          if (t === 16 || t === 9 || t === 11 || t === 10) {
+            const pri = (t === 16 ? 40 : 0) + ((flags & 1) ? 30 : 0) + ((flags & 32) ? 20 : 0) + (t === 9 || t === 11 ? 15 : 5);
+            cands.push({ slot: i, gen, type: t, flags, pri });
+          }
+        }
+        cands.sort((x, y) => y.pri - x.pri);
+        return cands[0] ?? null;
+      };
+      let best = findBest();
+      if (!best) {
+        a.send({ type: 'inject', event: 'breakdown' });
+        a.setSpeed(5);
+        const t0 = performance.now();
+        while (performance.now() - t0 < 3000) {
+          best = findBest();
+          if (best) break;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+      return best;
+    })()`);
+
+    if (responderPick) {
+      await cdp.eval(`(async () => {
+        const a = window.app;
+        a.setSpeed(1);
+        await a.hud.inspector.showVehicle(${responderPick.slot});
+        a.followEntity({ kind: 'vehicle', id: ${responderPick.slot}, gen: ${responderPick.gen} });
+      })()`);
+      await sleep(1400);
+      await snapFrozen('07-emergency-response.png', 1, async () => {
+        const obs = await cdp.eval(`(async () => {
+          const a = window.app;
+          await a.hud.inspector.showVehicle(${responderPick.slot});
+          const vInfo = await a.inspect('vehicle', ${responderPick.slot});
+          const p = a.agents.vehiclePos(${responderPick.slot}, ${responderPick.gen});
+          return {
+            info: vInfo,
+            pose: p ? { x: p.p.x, z: p.p.z, h: p.h } : null,
+            cameraMode: a.mode,
+            time: a.timeLabel(),
+          };
+        })()`);
+        return {
+          kind: 'emergency-response',
+          state: obs.info?.mission ?? 'lost',
+          mode: obs.info?.typeName ?? 'emergency',
+          gen: responderPick.gen,
+          cameraMode: obs.cameraMode,
+          insideBuilding: false,
+          inconclusive: !obs.pose || !obs.info,
+          vehicle: obs.info,
+          pose: obs.pose,
+          time: obs.time,
         };
       });
     }

@@ -40,13 +40,13 @@ const kitFamily: WorkbenchFamily = {
   ],
 };
 
-/** Parametric Vehicles family (Pilot 1): 18 variants generated from vehicleGeom.ts. */
+/** Parametric Vehicles family (Pilot 1): 19 variants generated from vehicleGeom.ts. */
 const vehiclesFamily: WorkbenchFamily = {
   id: 'vehicles',
   title: 'Veículos Paramétricos',
-  description: 'Catálogo completo de 18 veículos (civis, serviços, emergência, ônibus, caminhões pesados e moto) gerados por vehicleGeom.ts.',
+  description: 'Catálogo completo de 19 veículos (civis, serviços, emergência, guincho, ônibus, caminhões pesados e moto) gerados por vehicleGeom.ts.',
   triangleBudget: 620,
-  heroVariants: ['sedan', 'hatch', 'suv', 'pickup', 'vintage', 'police', 'ambulance', 'bus', 'garbage', 'fire', 'moto'],
+  heroVariants: ['sedan', 'hatch', 'suv', 'pickup', 'vintage', 'police', 'ambulance', 'bus', 'garbage', 'fire', 'tow', 'moto'],
   variants: () => VEHICLE_PRESETS.map((p) => ({
     id: p.id,
     label: p.label,

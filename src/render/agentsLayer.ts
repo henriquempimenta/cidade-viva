@@ -4,6 +4,9 @@ import {
   MAX_PEDS,
   MAX_TRAIN_CARS,
   MAX_VEHICLES,
+  PED_FLAG_CHILD,
+  PED_FLAG_ELDER,
+  PED_FLAG_FEMALE,
   PED_FLAG_FUNERAL,
   PED_FLAG_LUGGAGE,
   PED_FLAG_TOURIST,
@@ -71,11 +74,15 @@ const PED_INDEX: Record<PedId, number> = Object.fromEntries(
   PED_PRESETS.map((p, idx) => [p.id, idx]),
 ) as Record<PedId, number>;
 
-const CIVILIAN_SLOTS = CIVILIAN_PED_IDS.map((id) => PED_INDEX[id]);
+const MALE_CIVILIAN_SLOTS = [PED_INDEX['male-casual'], PED_INDEX['male-jacket'], PED_INDEX['robust-casual']];
+const FEMALE_CIVILIAN_SLOTS = [PED_INDEX['female-dress'], PED_INDEX['female-casual'], PED_INDEX['slender-sport']];
+const MALE_ELDER_SLOTS = [PED_INDEX['male-jacket'], PED_INDEX['male-casual']];
+const FEMALE_ELDER_SLOTS = [PED_INDEX['female-casual'], PED_INDEX['female-dress']];
 const WORKER_SLOT = PED_INDEX.worker;
 const FUNERAL_SLOT = PED_INDEX.funeral;
 const TOURIST_SLOT = PED_INDEX.tourist;
 const CYCLIST_SLOT = PED_INDEX.cyclist;
+void CIVILIAN_PED_IDS;
 
 const LOD_LEVELS: AssetDetail[] = ['high', 'med', 'low'];
 /** Real-time distance thresholds (meters) for 3-tier pedestrian/bike/accessory LOD. */
@@ -138,9 +145,12 @@ export class AgentsLayer {
   private trainGlowMat!: THREE.MeshBasicMaterial;
   private m = new THREE.Matrix4();
   private q = new THREE.Quaternion();
+  private qPitch = new THREE.Quaternion();
   private v = new THREE.Vector3();
   private sc = new THREE.Vector3(1, 1, 1);
+  private pedSc = new THREE.Vector3(1, 1, 1);
   private up = new THREE.Vector3(0, 1, 0);
+  private zAxis = new THREE.Vector3(0, 0, 1);
   private col = new THREE.Color();
   private skinCol = new THREE.Color();
   private hairCol = new THREE.Color();
@@ -155,6 +165,7 @@ export class AgentsLayer {
   private vPos = new Float32Array(MAX_VEHICLES * 4); // interpolated x,y,z,h (grows with the sim pools)
   private pPos = new Float32Array(MAX_PEDS * 4);
   private tPos = new Float32Array(MAX_TRAIN_CARS * 4);
+  private tPitch = new Float32Array(MAX_TRAIN_CARS);
   private t = 0;
   private pedAnimT = 0;
   lineColors = new Map<number, THREE.Color>();
@@ -329,7 +340,7 @@ export class AgentsLayer {
     const tc = cur.train, tp = prev?.train;
     for (let i = 0; i < cur.trainCount; i++) {
       const o = i * TRAIN_STRIDE;
-      let x = tc[o], y = tc[o + 1], z = tc[o + 2], h = tc[o + 3];
+      let x = tc[o], y = tc[o + 1], z = tc[o + 2], h = tc[o + 3], pitch = tc[o + 6];
       const type = tc[o + 4];
       if (tp && prev && i < prev.trainCount && tp[o + 4] === type && tp[o + 5] === tc[o + 5]) {
         const d = Math.hypot(tc[o] - tp[o], tc[o + 2] - tp[o + 2]);
@@ -338,10 +349,13 @@ export class AgentsLayer {
           let dh = tc[o + 3] - tp[o + 3];
           while (dh > Math.PI) dh -= Math.PI * 2;
           while (dh < -Math.PI) dh += Math.PI * 2;
-          h = tp[o + 3] + dh * a;
+          // On terminal reversal (~180° heading flip), snap along the track instead of rotating cars perpendicular
+          h = Math.abs(dh) > Math.PI * 0.75 ? tc[o + 3] : tp[o + 3] + dh * a;
+          pitch = Math.abs(dh) > Math.PI * 0.75 ? tc[o + 6] : tp[o + 6] + (tc[o + 6] - tp[o + 6]) * a;
         }
       }
       this.tPos[i * 4] = x; this.tPos[i * 4 + 1] = y; this.tPos[i * 4 + 2] = z; this.tPos[i * 4 + 3] = h;
+      this.tPitch[i] = pitch;
     }
   }
 
@@ -533,6 +547,9 @@ export class AgentsLayer {
       const isFuneral = (flags & PED_FLAG_FUNERAL) !== 0;
       const isTourist = (flags & PED_FLAG_TOURIST) !== 0;
       const isWaiting = (flags & PED_FLAG_WAITING) !== 0;
+      const isFemale = (flags & PED_FLAG_FEMALE) !== 0;
+      const isChild = (flags & PED_FLAG_CHILD) !== 0;
+      const isElder = (flags & PED_FLAG_ELDER) !== 0;
       const hasUmbrella = !isBike && (flags & PED_FLAG_UMBRELLA) !== 0;
       const hasLuggage = !isBike && (flags & PED_FLAG_LUGGAGE) !== 0;
 
@@ -543,7 +560,10 @@ export class AgentsLayer {
       let lod = distSq < LOD_HIGH_DIST_SQ ? 0 : distSq < LOD_MED_DIST_SQ ? 1 : 2;
       if (isFollowed && distSq < 120 * 120) lod = 0;
 
-      // Archetype selection
+      // Archetype selection preserving demographic identity (sex & age group) deterministically by citizen id
+      const civPool = isElder
+        ? (isFemale ? FEMALE_ELDER_SLOTS : MALE_ELDER_SLOTS)
+        : (isFemale ? FEMALE_CIVILIAN_SLOTS : MALE_CIVILIAN_SLOTS);
       const archSlot = isBike
         ? CYCLIST_SLOT
         : isWorker
@@ -552,7 +572,7 @@ export class AgentsLayer {
             ? FUNERAL_SLOT
             : isTourist
               ? TOURIST_SLOT
-              : CIVILIAN_SLOTS[seed % CIVILIAN_SLOTS.length];
+              : civPool[seed % civPool.length];
 
       // Pick LOD bucket (fall back to coarser LOD if fine bucket reaches capacity)
       let bucket = this.pedBuckets[archSlot][lod];
@@ -565,10 +585,12 @@ export class AgentsLayer {
       const idx = bucket.count;
       this.q.setFromAxisAngle(this.up, -h);
       this.v.set(x, y, z);
-      this.m.compose(this.v, this.q, this.sc);
+      const pScale = isChild && !isBike ? 0.78 : 1.0;
+      this.pedSc.set(pScale, pScale, pScale);
+      this.m.compose(this.v, this.q, this.pedSc);
       bucket.mesh.setMatrixAt(idx, this.m);
 
-      // Multi-zone realistic colors per citizen
+      // Multi-zone realistic colors per citizen (consistent across walking, waiting & cycling for the same cid)
       const h1 = ((seed * 2654435761) >>> 0);
       const h2 = ((seed * 2246822519 + 17) >>> 0);
       if (isWorker) {
@@ -582,7 +604,7 @@ export class AgentsLayer {
         this.bottomCol.setHex(PED_BOTTOM_PALETTE[(h2 >>> 4) % PED_BOTTOM_PALETTE.length]);
       }
       this.skinCol.setHex(PED_SKIN_PALETTE[(h1 >>> 8) % PED_SKIN_PALETTE.length]);
-      this.hairCol.setHex(PED_HAIR_PALETTE[(h2 >>> 12) % PED_HAIR_PALETTE.length]);
+      this.hairCol.setHex(isElder ? 0x9aa0a6 : PED_HAIR_PALETTE[(h2 >>> 12) % PED_HAIR_PALETTE.length]);
 
       bucket.mesh.setColorAt(idx, this.col);
       const i3 = idx * 3;
@@ -703,7 +725,13 @@ export class AgentsLayer {
       const yTop = (gC > 0.35 && clr < 2.2) ? Math.max(railBase, gC + 0.18) : railBase;
       const railHeadY = yTop + 0.29;
 
+      const pitch = this.tPitch[i];
       this.q.setFromAxisAngle(this.up, -h);
+      if (Math.abs(pitch) > 1e-4) {
+        // Local +X points forward; +pitch around local +Z raises front (+X) on uphill grades before world yaw (-h)
+        this.qPitch.setFromAxisAngle(this.zAxis, pitch);
+        this.q.multiply(this.qPitch);
+      }
       this.v.set(x, railHeadY, z);
       this.m.compose(this.v, this.q, this.sc);
 

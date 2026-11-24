@@ -291,11 +291,15 @@ describe('Ciclo 2 — Segurança Viária, Emergências Avançadas, Guincho & Cic
     const c2 = C.add({ age: 35, hh: hhRenew.id });
     hhRenew.members.push(c2);
 
-    // 2. Public bus line aging, maintenance & renewal
+    // 2. Public bus line aging, maintenance & gradual renewal on depot return
+    const nBus1 = w.roads.addNode(1000, 1400), nBus2 = w.roads.addNode(1160, 1400);
+    const eBus = w.roads.addEdge(nBus1.id, nBus2.id, RoadClass.Collector, { progress: 1 });
+    const busSlot = w.traffic.spawn(VType.Bus, [eBus.id * 2], 15, eBus.len - 2, { kind: 3, id: 901, aux: 0 });
+    expect(busSlot).toBeGreaterThanOrEqual(0);
     const l: Line = {
       id: 901, kind: 'bus', color: '#2ecc71', name: 'Linha Teste Frota', stops: [],
-      path: [], startS: 0, destS: 0, fleet: 3, vehicles: new Set(), ridersToday: 150, ridersYday: 150,
-      waiting: new Map(), onboard: new Map(), edges: new Set(), headway: 180, lastSpawn: 0, pts: [],
+      path: [eBus.id * 2], startS: 5, destS: eBus.len - 2, fleet: 3, vehicles: new Set([busSlot]), ridersToday: 150, ridersYday: 150,
+      waiting: new Map(), onboard: new Map(), edges: new Set([eBus.id]), headway: 180, lastSpawn: 0, pts: [],
       fleetAge: 28, fleetWear: 0.72,
     };
     w.transitSys.lines.push(l);
@@ -319,10 +323,17 @@ describe('Ciclo 2 — Segurança Viária, Emergências Avançadas, Guincho & Cic
     expect(hhRenew.carAge).toBe(0);
     expect(hhRenew.carWear).toBe(0);
 
-    // Bus fleet renewed & cost accounted
-    expect(w.transitSys.busRenewals).toBeGreaterThan(busRenewBefore);
-    expect(l.fleetAge).toBe(0);
-    expect(l.fleetWear).toBeLessThan(0.2);
+    // daily() schedules gradual renewal without mutating age/counter until a bus actually returns to the depot
+    expect(l.pendingRenewals).toBe(1);
+    expect(w.transitSys.busRenewals).toBe(busRenewBefore);
+
+    // Actual depot return in busArrived() executes the 1-unit gradual renewal
+    w.transitSys.busArrived(busSlot);
+    expect(w.transitSys.busRenewals).toBe(busRenewBefore + 1);
+    expect(l.pendingRenewals).toBe(0);
+    expect(l.fleetAge!).toBeGreaterThan(0);
+    expect(l.fleetAge!).toBeLessThan(28);
+    expect(l.fleetWear!).toBeLessThan(0.5);
     expect(w.transitSys.busMaintCostToday).toBeGreaterThan(0);
   });
 

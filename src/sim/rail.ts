@@ -14,7 +14,7 @@ import { KINDS } from '../shared/catalog';
 
 interface RStation { s: number; b: number; name: string; stop: number; stopId: number }
 interface RLine { /** construction progress 0..1 (lines built during the game grow along their length) */ built?: number; id: number; kind: 'main' | 'metro' | 'spur'; x: number[]; y: number[]; z: number[]; cum: number[]; tracks: number; elevated: boolean; len: number; transit?: Line; stations: RStation[]; openStations: RStation[] }
-interface Train { id: number; line: number; kind: 'pass' | 'freight' | 'metro'; s: number; dir: number; v: number; vmax: number; cars: number[]; dwell: number; served: Set<number>; gen: number }
+interface Train { id: number; line: number; kind: 'pass' | 'freight' | 'metro'; s: number; dir: number; v: number; vmax: number; cars: number[]; dwell: number; served: Set<number>; gen: number; /** lateral track side (-1..+1 in fixed +s line normal) for smooth post-terminal crossover on double track */ trackSide?: number }
 interface Crossing { edge: number; t: number; line: number; s: number; x: number; z: number; y: number; angle: number; separated: boolean; under?: boolean; /** a road deck flies over this crossing: the track may not be lifted here */ bypassed?: boolean; closed: boolean; /** vehicle-seconds queued at the gates today */ wait: number; /** consecutive saturated days */ hot: number }
 
 const CAR_LEN = [17, 20, 17, 15, 16, 19];
@@ -260,7 +260,16 @@ export class Rail {
       const vTarget = stopS < Infinity ? Math.min(tr.vmax, Math.sqrt(2 * brake * Math.max(0, stopS - 2)) + 0.5) : tr.vmax;
       tr.v += Math.max(-brake * 1.5, Math.min(0.5, vTarget - tr.v)) * dt;
       tr.v = Math.max(0, tr.v);
-      tr.s += tr.v * dt * tr.dir;
+      const dsMove = tr.v * dt;
+      tr.s += dsMove * tr.dir;
+      // Smoothly transition double-track lateral side over the first ~35 m after departing a terminal reversal
+      const targetSide = tr.dir > 0 ? 1 : -1;
+      if (tr.trackSide === undefined) tr.trackSide = targetSide;
+      else if (tr.trackSide !== targetSide && dsMove > 0) {
+        const delta = targetSide - tr.trackSide;
+        const maxStep = (2 / 35) * dsMove;
+        tr.trackSide += Math.sign(delta) * Math.min(Math.abs(delta), maxStep);
+      }
       if (stopS < 3 && tr.v < 1.2) {
         const st = stops.find((x) => Math.abs(x.s - tr.s) < 4)!;
         if (st) {
@@ -292,15 +301,33 @@ export class Rail {
     // end of line
     this.trains = this.trains.filter((tr) => {
       const l = this.lines[tr.line];
-      const tail = tr.cars.reduce((s, c) => s + CAR_LEN[c], 0);
+      const tail = this.consistSpan(tr.cars);
       if (tr.kind === 'metro') {
         if ((tr.dir > 0 && tr.s >= l.len) || (tr.dir < 0 && tr.s <= 0)) {
-          // reverse cleanly at the terminal platform instead of teleporting off-track
-          tr.s = Math.max(0, Math.min(l.len, tr.s));
-          tr.dir = -tr.dir;
+          // Bidirectional terminal reversal: move head to the former tail so all cars remain in-place inside [0, l.len]
+          // Keep trackSide fixed on the current track throughout the 25 s dwell (smooth crossover begins only after departure)
+          const oldDir = tr.dir;
+          if (tr.trackSide === undefined) tr.trackSide = oldDir > 0 ? 1 : -1;
+          const endS = Math.max(0, Math.min(l.len, tr.s));
+          tr.dir = -oldDir;
+          tr.cars.reverse();
+          tr.s = Math.max(0, Math.min(l.len, endS - oldDir * tail));
           tr.v = 0;
           tr.dwell = Math.max(tr.dwell, 25);
           tr.served.clear();
+          // Serve any terminal station covered by the stationary consist for the new return direction
+          if (l.transit) {
+            const seats = tr.cars.reduce((n, c) => n + (c === 1 ? 120 : c === 5 ? 150 : 0), 0);
+            const lo = Math.min(endS, tr.s) - 4;
+            const hi = Math.max(endS, tr.s) + 4;
+            for (let k = 0; k < l.stations.length; k++) {
+              const st = l.stations[k];
+              if (st.s >= lo && st.s <= hi) {
+                w.transitSys.serveStop(l.transit, k, tr.id + 100000, seats, (to) => (l.stations[to].s - st.s) * tr.dir > 0);
+                tr.served.add(st.s);
+              }
+            }
+          }
         }
         return true;
       }
@@ -337,20 +364,28 @@ export class Rail {
         if (!a) w.traffic.closedCrossings.set(c.edge, (a = []));
         a.push(c.t);
         const e = w.roads.edges[c.edge];
+        const railY = this.at(this.lines[c.line], c.s)[1];
         if (e?.alive) {
           const na = w.roads.nodes[e.a], nb = w.roads.nodes[e.b];
           const el = Math.hypot(nb.x - na.x, nb.z - na.z) || 1;
           w.peds.closedGates.push({
-            x: c.x, z: c.z,
+            x: c.x, z: c.z, y: railY,
             ux: (nb.x - na.x) / el, uz: (nb.z - na.z) / el,
             halfW: laneOffset(e, Math.max(0, e.lanes - 1)) + 5,
           });
         } else {
-          w.peds.closedGates.push({ x: c.x, z: c.z });
+          w.peds.closedGates.push({ x: c.x, z: c.z, y: railY });
         }
       }
       void was;
     }
+  }
+
+  /** Total longitudinal span of a consist from front of car 0 to rear of the last car (including 0.8 m couplings). */
+  private consistSpan(cars: number[]): number {
+    let sum = 0;
+    for (let i = 0; i < cars.length; i++) sum += CAR_LEN[cars[i]];
+    return sum + 0.8 * Math.max(0, cars.length - 1);
   }
 
   private dispatch(l: RLine, kind: Train['kind']): boolean {
@@ -365,9 +400,22 @@ export class Rail {
       for (let i = 0; i < n; i++) cars.push(2 + Math.floor(w.rng.next() * 3));
     } else if (kind === 'pass') cars = [0, 1, 1, 1, 1];
     else cars = [5, 5, 5, 5];
-    const tail = cars.reduce((s, c) => s + CAR_LEN[c], 0);
-    const tr: Train = { id: this.nextTrain++, line: l.id, kind, s: dir > 0 ? -5 : l.len + 5, dir, v: kind === 'freight' ? 12 : 18, vmax: kind === 'freight' ? 15 : kind === 'metro' ? 19 : 24, cars, dwell: 0, served: new Set(), gen: 0 };
-    void tail;
+    const span = this.consistSpan(cars);
+    const startS = kind === 'metro' ? Math.min(l.len, span) : (dir > 0 ? -5 : l.len + 5);
+    const tr: Train = {
+      id: this.nextTrain++,
+      line: l.id,
+      kind,
+      s: startS,
+      dir,
+      v: kind === 'metro' ? 0 : kind === 'freight' ? 12 : 18,
+      vmax: kind === 'freight' ? 15 : kind === 'metro' ? 19 : 24,
+      cars,
+      dwell: kind === 'metro' ? 4 : 0,
+      served: new Set(),
+      gen: 0,
+      trackSide: dir > 0 ? 1 : -1,
+    };
     this.trains.push(tr);
     this.runs[kind]++;
     if (kind !== 'metro' && w.rng.chance(0.35)) {
@@ -380,7 +428,10 @@ export class Rail {
   trainPose(key: number): { x: number; y: number; z: number; h: number } | null {
     const tr = this.trains.find((t) => t.id === key - 100000);
     if (!tr) return null;
-    const p = this.at(this.lines[tr.line], tr.s);
+    const l = this.lines[tr.line];
+    const span = this.consistSpan(tr.cars);
+    const sMid = Math.max(0, Math.min(l.len, tr.s - tr.dir * (span * 0.5)));
+    const p = this.at(l, sMid);
     return { x: p[0], y: p[1] + 2, z: p[2], h: tr.dir > 0 ? p[3] : p[3] + Math.PI };
   }
 
@@ -388,18 +439,55 @@ export class Rail {
     let n = 0;
     for (const tr of this.trains) {
       const l = this.lines[tr.line];
+      const sideSign = tr.trackSide ?? (tr.dir > 0 ? 1 : -1);
+      const side = l.tracks >= 2 ? 2.1 * sideSign : 0;
+      const m = tr.cars.length;
+      const carCenters: { s: number; c: number; len: number }[] = [];
       let off = 0;
-      const side = l.tracks >= 2 ? 2.1 : 0;
-      for (const c of tr.cars) {
+      for (let k = 0; k < m; k++) {
+        const c = tr.cars[k];
+        const len = CAR_LEN[c];
+        const s = tr.s - tr.dir * (off + len * 0.5);
+        off += len + 0.8;
+        carCenters.push({ s, c, len });
+      }
+      // Keep metro car snapshot indices spatially ordered across terminal reversals so interpolation never swaps cars
+      if (tr.kind === 'metro' && tr.dir < 0) carCenters.reverse();
+      for (let k = 0; k < carCenters.length; k++) {
         if (n >= MAX_TRAIN_CARS) break;
-        const s = tr.s - tr.dir * (off + CAR_LEN[c] / 2);
-        off += CAR_LEN[c] + 0.8;
+        const { s, c, len } = carCenters[k];
         if (s < 0 || s > l.len) continue;
-        const p = this.at(l, s);
-        const h = tr.dir > 0 ? p[3] : p[3] + Math.PI;
+        const bogieHalf = len * 0.34;
+        const sF = Math.max(0, Math.min(l.len, s + tr.dir * bogieHalf));
+        const sB = Math.max(0, Math.min(l.len, s - tr.dir * bogieHalf));
+        const pF = this.at(l, sF);
+        const pB = this.at(l, sB);
+        const dx = pF[0] - pB[0];
+        const dy = pF[1] - pB[1];
+        const dz = pF[2] - pB[2];
+        const horiz = Math.hypot(dx, dz);
+        let xMid: number, yMid: number, zMid: number, h: number, pitch: number;
+        if (horiz > 0.25) {
+          xMid = (pF[0] + pB[0]) * 0.5;
+          yMid = (pF[1] + pB[1]) * 0.5;
+          zMid = (pF[2] + pB[2]) * 0.5;
+          h = Math.atan2(dz, dx);
+          pitch = Math.atan2(dy, horiz);
+        } else {
+          const p = this.at(l, s);
+          xMid = p[0]; yMid = p[1]; zMid = p[2];
+          h = tr.dir > 0 ? p[3] : p[3] + Math.PI;
+          pitch = 0;
+        }
+        const hLine = tr.dir > 0 ? h : h + Math.PI;
         const o = n * TRAIN_STRIDE;
-        out[o] = p[0] - Math.sin(h) * side; out[o + 1] = p[1] + 0.3; out[o + 2] = p[2] + Math.cos(h) * side; out[o + 3] = h;
-        out[o + 4] = c; out[o + 5] = tr.id;
+        out[o] = xMid - Math.sin(hLine) * side;
+        out[o + 1] = yMid + 0.3;
+        out[o + 2] = zMid + Math.cos(hLine) * side;
+        out[o + 3] = h;
+        out[o + 4] = c;
+        out[o + 5] = tr.id;
+        out[o + 6] = pitch;
         n++;
       }
     }

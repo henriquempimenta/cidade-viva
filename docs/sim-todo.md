@@ -22,8 +22,8 @@
 - [x] **Loop de revisão independente** com `npm run capture:field` + avaliador independente na rubrica [sim-review-rubric.md](./sim-review-rubric.md) (`APPROVED_WITH_RESERVATIONS`, média 8,90 / 10, todos os critérios ≥ 8,3).
 
 ## Ressalvas Pontuais do Ciclo 2 (`APPROVED_WITH_RESERVATIONS`, média 8,90 / 10)
-- [ ] **Aproximação do guincho/viatura na mesma pista em vias com canteiro central (`src/sim/incidents.ts:621-656`)**: `syncBlockage(inc)` aplica `+900 s` de `incidentPenalty` em `inc.edge * 2 + inc.dir` antes de `dispatchUnits(inc)` rotear as viaturas, fazendo `carPlanEdges` às vezes encaminhar guincho/polícia para a pista contrária do canteiro central em avenidas/rodovias (`cls >= RoadClass.Avenue`). Desconsiderar temporariamente a penalidade da própria ocorrência em `planToIncident` para que a viatura aproxime-se a montante na mesma mão.
-- [ ] **Recuo do cavalete a montante para veículos longos (`src/render/overlays.ts:362-368`)**: ajustar `lx = -7.2` para `~-8.5` (ou proporcional ao comprimento do veículo sinistrado) para ampliar a folga visual atrás de ônibus/caminhões de 10–12 m.
+- [x] **Aproximação do guincho/viatura na mesma pista em vias com canteiro central (`src/sim/incidents.ts:621-656`)**: `planToIncident` desconsidera temporariamente a penalidade da própria ocorrência em `inc.edge * 2 + inc.dir` e roteia explicitamente para a entrada a montante na mesma mão em avenidas/rodovias (`cls >= RoadClass.Avenue`).
+- [x] **Recuo do cavalete a montante para veículos longos (`src/render/overlays.ts:362-368`)**: recuo do cavalete ajustado para `lx = -8.8` (com cones de afunilamento reposicionados a montante) para ampliar a folga visual atrás de ônibus/caminhões de 10–12 m.
 
 ---
 

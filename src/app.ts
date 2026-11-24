@@ -220,7 +220,7 @@ export class App {
     if (d.od) this.overlays.setFlows(d.od, false);
     if (d.cargo) this.overlays.setFlows(d.cargo, true);
     if (d.heights) {
-      this.terrain.updateHeights(d.heights);
+      this.terrain.updateHeights(d.heights, d.flood);
       this.roads.markDirty();
       this.rail.markDirty();
       this.overlays.refreshGround();

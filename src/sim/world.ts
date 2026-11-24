@@ -535,7 +535,7 @@ export class World {
           this.citizens.virtualArrive(id, T.remainingTime(slot), T.x[slot], T.z[slot]);
         }
       }
-    } else if (T.pKind[slot] === 3) this.transitSys.busArrived(slot);
+    } else if (T.pKind[slot] === 3) this.transitSys.busInterrupted(slot);
     else if (T.pKind[slot] === P_INCIDENT) this.incidents.unitStuck(slot);
     else this.serviceStuck?.(slot);
   }
@@ -1231,6 +1231,7 @@ export class World {
     if (this.terraforming.heightsDirty) {
       this.terraforming.heightsDirty = false;
       diff.heights = this.terrain.heights.slice();
+      diff.flood = this.terrain.flood.slice();
     }
     if (this.utils?.dirtyLines.size) { diff.powerLines = [...this.utils.dirtyLines].map((id) => ({ ...this.utils.powerLines[id] })); this.utils.dirtyLines.clear(); }
     this.diffHook?.(diff);

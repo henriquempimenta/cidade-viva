@@ -27,7 +27,8 @@ const DEFS: Def[] = [
   { group: 'Sociedade', key: 'initialEducation', label: 'Educação inicial', min: 0, max: 1, step: 0.05 },
   { group: 'Sociedade', key: 'corruption', label: 'Propensão à corrupção', min: 0, max: 1, step: 0.05 },
   { group: 'Sociedade', key: 'transparency', label: 'Transparência e imprensa', min: 0, max: 1, step: 0.05 },
-  { group: 'Eventos', key: 'disasterFreq', label: 'Frequência de desastres', min: 0, max: 3, step: 0.1 },
+  { group: 'Eventos', key: 'disasterFreq', label: 'Desastres (enchentes, epidemias e incêndios)', min: 0, max: 3, step: 0.1 },
+  { group: 'Eventos', key: 'incidentFreq', label: 'Frequência de acidentes viários', min: 0, max: 3, step: 0.1 },
   { group: 'Eventos', key: 'festivalFreq', label: 'Frequência de festivais', min: 0, max: 3, step: 0.1 },
 ];
 

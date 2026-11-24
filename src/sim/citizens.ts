@@ -1,4 +1,4 @@
-import { DAY_SECONDS, DAYS_PER_YEAR, HOUR_SECONDS, MAX_CITIZENS, PED_FLAG_FUNERAL, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, RoadClass, VType } from '../shared/constants';
+import { DAY_SECONDS, DAYS_PER_YEAR, HOUR_SECONDS, MAX_CITIZENS, PED_FLAG_CHILD, PED_FLAG_ELDER, PED_FLAG_FEMALE, PED_FLAG_FUNERAL, PED_FLAG_LUGGAGE, PED_FLAG_TOURIST, RoadClass, VType } from '../shared/constants';
 import { FIRST_F, FIRST_M, LAST } from '../shared/names';
 import { MinHeap } from './heap';
 import type { Building } from './buildings';
@@ -345,7 +345,15 @@ export class Citizens {
       if (!this.alive[i]) continue;
       if (Math.abs(this.actUntil[i] - now) > 1e6) continue;
       if (this.actUntil[i] > now + 0.01) continue; // rescheduled later; stale heap entry
-      if (this.state[i] === ST_VIRTUAL) { this.arrive(i); continue; }
+      if (this.state[i] === ST_VIRTUAL) {
+        if (this.w.incidents?.isCitizenEvacuating(i)) {
+          // Citizen is inside an active ambulance evacuation: RoadIncidents owns delivery/timeout (never virtual-arrive)
+          this.schedule(i, now + 60);
+          continue;
+        }
+        this.arrive(i);
+        continue;
+      }
       if (this.state[i] !== ST_IN) continue; // moving physically; arrival callback will reschedule
       this.decide(i);
     }
@@ -575,10 +583,21 @@ export class Citizens {
     const activeRoute = walkP ?? (carP && carP.path.every((de) => { const e = w.roads.edges[de >> 1]; return !!e && e.deck === undefined; }) ? carP : null);
     if (activeRoute && w.peds.capacityLeft > 30) {
       const wp3 = walkPath(w.roads, activeRoute, doorOf(w.roads, from), doorOf(w.roads, to));
-      const slot = w.peds.spawn(wp3.pts, i, speed, (mode === 1 ? PED_FLAG_BIKE : 0) | (this.tourist[i] ? PED_FLAG_TOURIST | (a === Act.Hotel ? PED_FLAG_LUGGAGE : 0) : 0), this.colorOf(i), 0, wp3.ys);
+      const flags = this.pedIdentityFlags(i) | (mode === 1 ? PED_FLAG_BIKE : 0) | (this.tourist[i] ? PED_FLAG_TOURIST | (a === Act.Hotel ? PED_FLAG_LUGGAGE : 0) : 0);
+      const slot = w.peds.spawn(wp3.pts, i, speed, flags, this.colorOf(i), 0, wp3.ys);
       if (slot >= 0) { this.state[i] = ST_WALK; this.slot[i] = slot; return; }
     }
     this.virtualArrive(i, refLen / speed);
+  }
+
+  /** Demographic identity flags (sex & age group) preserved consistently across all ped/bike spawns for citizen `i`. */
+  pedIdentityFlags(i: number): number {
+    if (i < 0 || i >= this.max) return 0;
+    let f = 0;
+    if (this.sex[i] === 1) f |= PED_FLAG_FEMALE;
+    if (this.age[i] < 15) f |= PED_FLAG_CHILD;
+    else if (this.age[i] >= 65) f |= PED_FLAG_ELDER;
+    return f;
   }
 
   colorOf(i: number) { return ((i * 2654435761) >>> 0) % 997 / 997; }
@@ -616,7 +635,7 @@ export class Citizens {
     const wp = activePlanFromPoint(w.roads, x, z, dest, 1600);
     if (!wp) return false;
     const wp3 = walkPath(w.roads, wp, { x, z }, door);
-    const slot = w.peds.spawn(wp3.pts, i, speed, this.tourist[i] ? PED_FLAG_TOURIST : 0, this.colorOf(i), 0, wp3.ys);
+    const slot = w.peds.spawn(wp3.pts, i, speed, this.pedIdentityFlags(i) | (this.tourist[i] ? PED_FLAG_TOURIST : 0), this.colorOf(i), 0, wp3.ys);
     if (slot < 0) return false;
     // return abandoned household car cleanly to home garage (never clone or strand it)
     const h = this.households.get(this.hh[i]);
@@ -1014,6 +1033,8 @@ export class Citizens {
     if (st === ST_WALK && s >= 0 && w.peds.active[s]) { w.peds.pose(s); return { x: w.peds.x[s], y: w.peds.y[s], z: w.peds.z[s], h: w.peds.h[s], inside: false, building: -1 }; }
     if (st === ST_TRANSIT) { const p = w.transit2?.position(i); if (p) return p; }
     if (st === ST_VIRTUAL) {
+      const evP = w.incidents?.evacPose(i);
+      if (evP) return { x: evP.x, y: evP.y, z: evP.z, h: evP.h, inside: false, building: -1 };
       const dest = w.buildings.byId.get(this.tripDest[i]);
       const fx = this.vFromX[i], fz = this.vFromZ[i];
       const tx = dest?.x ?? fx, tz = dest?.z ?? fz;

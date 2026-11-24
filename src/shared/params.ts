@@ -33,6 +33,7 @@ export interface SimParams {
   transparency: number; // 0..1 imprensa, controle e transparência
   // Eventos
   disasterFreq: number; // 0..3
+  incidentFreq: number; // 0..3
   festivalFreq: number; // 0..3
 }
 
@@ -59,6 +60,7 @@ export const DEFAULT_PARAMS: SimParams = {
   policeEfficiency: 1,
   initialEducation: 0.35,
   disasterFreq: 1,
+  incidentFreq: 1,
   festivalFreq: 1,
   corruption: 0.35,
   transparency: 0.5,
@@ -92,6 +94,7 @@ const NUM_BOUNDS: Record<string, [number, number, boolean?]> = {
   corruption: [0, 1],
   transparency: [0, 1],
   disasterFreq: [0, 3],
+  incidentFreq: [0, 3],
   festivalFreq: [0, 3],
 };
 

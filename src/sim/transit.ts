@@ -46,6 +46,8 @@ export interface Line {
   /** average fleet age (days) & mechanical wear (0..1) for bus/BRT fleet maintenance & renewal */
   fleetAge?: number;
   fleetWear?: number;
+  /** pending single-bus replacements scheduled to retire old units on their next garage return */
+  pendingRenewals?: number;
 }
 export interface Ride { line: number; fromId: number; toId: number; gen: number; phase: number; since: number; dest: number }
 
@@ -65,6 +67,8 @@ export class Transit {
   ridersDay = 0;
   faresCollected = 0;
   busMaintCostToday = 0;
+  /** intraday accumulator for single-bus renewals carried into daily() for CityHall.daily() accounting */
+  private busRenewalCostAcc = 0;
   busRenewals = 0;
 
   constructor(private w: World) {}
@@ -299,7 +303,7 @@ export class Transit {
       const wp = this.planWalkToStop(from, st);
       if (wp) {
         const wp3 = walkPath(w.roads, wp, door, st);
-        const slot = w.peds.spawn(wp3.pts, i, 1.35, 0, 0, 0, wp3.ys);
+        const slot = w.peds.spawn(wp3.pts, i, 1.35, w.citizens.pedIdentityFlags(i), w.citizens.colorOf(i), 0, wp3.ys);
         if (slot >= 0) { w.citizens.slot[i] = slot; w.citizens.state[i] = ST_TRANSIT; return true; }
       }
     }
@@ -434,7 +438,7 @@ export class Transit {
       }
       if (wp && w.peds.capacityLeft > 40) {
         const wp3 = walkPath(w.roads, wp, { x: fx, z: fz }, st);
-        const ns = w.peds.spawn(wp3.pts, cid, 1.35, 0, 0, 0, wp3.ys);
+        const ns = w.peds.spawn(wp3.pts, cid, 1.35, w.citizens.pedIdentityFlags(cid), w.citizens.colorOf(cid), 0, wp3.ys);
         if (ns >= 0) { w.citizens.slot[cid] = ns; continue; }
       }
       this.giveUp(cid);
@@ -460,12 +464,12 @@ export class Transit {
     if (w.peds.capacityLeft > 60) {
       const [px, pz, h] = this.queuePose(st, idx);
       const stopY = Math.max(0.2, w.terrain.meshY(px, pz), w.terrain.heightAt(px, pz)) + 0.27;
-      const slot = w.peds.spawn([px, pz, px + Math.cos(h) * 0.05, pz + Math.sin(h) * 0.05], i, 0.01, PED_FLAG_WAITING, 0, 4, [stopY, stopY]);
+      const slot = w.peds.spawn([px, pz, px + Math.cos(h) * 0.05, pz + Math.sin(h) * 0.05], i, 0.01, PED_FLAG_WAITING | w.citizens.pedIdentityFlags(i), w.citizens.colorOf(i), 4, [stopY, stopY]);
       if (slot >= 0) { w.peds.hold(slot); w.citizens.slot[i] = slot; }
     } else w.citizens.slot[i] = -1;
   }
 
-  private giveUp(i: number) {
+  private giveUp(i: number, fromX?: number, fromZ?: number) {
     const w = this.w;
     const r = this.rides.get(i);
     this.rides.delete(i);
@@ -473,6 +477,13 @@ export class Transit {
     const s = w.citizens.slot[i];
     if (s >= 0 && w.peds.citizen[s] === i) w.peds.despawn(s);
     w.citizens.slot[i] = -1;
+    if (fromX !== undefined && fromZ !== undefined) {
+      if (w.citizens.switchToWalk(i, fromX, fromZ)) return;
+      const dest = r ? w.buildings.byId.get(r.dest) : w.buildings.byId.get(w.citizens.tripDest[i]);
+      const dist = dest ? Math.hypot(dest.x - fromX, dest.z - fromZ) : 390;
+      w.citizens.virtualArrive(i, Math.max(10, dist / 1.3), fromX, fromZ);
+      return;
+    }
     w.citizens.virtualArrive(i, 300);
   }
 
@@ -503,7 +514,7 @@ export class Transit {
           const wp = this.planWalkFromStop(st, dest);
           if (wp) {
             const wp3 = walkPath(w.roads, wp, st, door);
-            const slot = w.peds.spawn(wp3.pts, i, 1.35, 0, 0, 0, wp3.ys);
+            const slot = w.peds.spawn(wp3.pts, i, 1.35, w.citizens.pedIdentityFlags(i), w.citizens.colorOf(i), 0, wp3.ys);
             if (slot >= 0) { w.citizens.slot[i] = slot; continue; }
           }
         }
@@ -587,19 +598,69 @@ export class Transit {
     return n > 0 ? Math.min(18, 6 + n * 0.6) : 0;
   };
 
-  /** a bus completed its loop: respawn and keep passengers */
+  /** a bus completed its loop: respawn and keep passengers, or retire/replace if a fleet renewal is pending */
   busArrived(slot: number) {
     const w = this.w, T = w.traffic;
     const l = this.lines.find((x) => x.id === T.pId[slot]);
+    let bx = l?.stops[0]?.x, bz = l?.stops[0]?.z;
+    if (T.active[slot]) { T.computePose(slot); bx = T.x[slot]; bz = T.z[slot]; }
     l?.vehicles.delete(slot);
     if (!l) return;
     const pass = l.onboard.get(slot) ?? [];
     l.onboard.delete(slot);
+    const activePass = pass.filter((cid) => {
+      const r = this.rides.get(cid);
+      return !!r && w.citizens.alive[cid] && w.citizens.gen[cid] === r.gen && w.citizens.state[cid] === ST_TRANSIT && r.line === l.id && r.phase === 2;
+    });
+    if ((l.pendingRenewals ?? 0) > 0 && w.budget.money > 55) {
+      // Never drop paid onboard passengers during a fleet renewal: either transfer them seamlessly onto the
+      // replacement bus immediately, or retire cleanly at the depot when empty.
+      if (activePass.length > 0) {
+        const ns = this.spawnBus(l);
+        if (ns < 0) {
+          for (const i of activePass) this.giveUp(i, bx, bz);
+          return;
+        }
+        l.onboard.set(ns, activePass);
+        T.pAux[ns] = activePass.length;
+      } else {
+        // Empty bus retires cleanly at depot; next dispatch puts the fresh bus (new slot/gen) into service
+        l.lastSpawn = -1e9;
+      }
+      l.pendingRenewals = Math.max(0, (l.pendingRenewals ?? 0) - 1);
+      // Apply gradual 1-bus renewal ONLY when an aging bus genuinely finishes its loop and returns to the depot
+      const frac = 1 / Math.max(1, l.fleet);
+      l.fleetAge = (l.fleetAge ?? 0) * (1 - frac);
+      l.fleetWear = Math.max(0.05, (l.fleetWear ?? 0.05) * (1 - frac) + 0.05 * frac);
+      this.busRenewalCostAcc += 40;
+      this.busMaintCostToday += 40;
+      this.busRenewals++;
+      const st = l.stops[0];
+      if (st) w.events.emit('bus_line', st.x, st.z, 0.45, `Ônibus renovado na frota da ${l.name}`, { visual: 0.5 });
+      return;
+    }
     if (l.vehicles.size < l.fleet) {
       const ns = this.spawnBus(l);
-      if (ns >= 0) { l.onboard.set(ns, pass); return; }
+      if (ns >= 0) {
+        l.onboard.set(ns, activePass);
+        T.pAux[ns] = activePass.length;
+        return;
+      }
     }
-    for (const i of pass) this.giveUp(i);
+    for (const i of activePass) this.giveUp(i, bx, bz);
+  }
+
+  /** a bus was interrupted/dropped mid-route (gridlock or road topology removal): evacuate riders without consuming a depot renewal */
+  busInterrupted(slot: number) {
+    const w = this.w, T = w.traffic;
+    const l = this.lines.find((x) => x.id === T.pId[slot]);
+    let bx = l?.stops[0]?.x, bz = l?.stops[0]?.z;
+    if (T.active[slot]) { T.computePose(slot); bx = T.x[slot]; bz = T.z[slot]; }
+    l?.vehicles.delete(slot);
+    if (!l) return;
+    const pass = l.onboard.get(slot) ?? [];
+    l.onboard.delete(slot);
+    for (const i of pass) this.giveUp(i, bx, bz);
   }
 
   /** Evacuate every waiting, walking and onboard rider on line `l` and suspend its fleet. */
@@ -696,7 +757,9 @@ export class Transit {
 
   daily() {
     const w = this.w;
-    this.busMaintCostToday = 0;
+    // Carry intraday single-bus renewal costs into today's municipal closeout (read right after by CityHall.daily())
+    this.busMaintCostToday = this.busRenewalCostAcc;
+    this.busRenewalCostAcc = 0;
     for (const [k, v] of this.od) { const nv = v * 0.6; if (nv < 1) this.od.delete(k); else this.od.set(k, nv); }
     for (const l of this.lines) {
       l.ridersYday = l.ridersToday;
@@ -714,13 +777,12 @@ export class Transit {
             l.fleetWear = Math.max(0.08, l.fleetWear - 0.24);
             this.busMaintCostToday += l.fleet * 4;
           }
-          if ((l.fleetAge >= 28 || l.fleetWear >= 0.78) && w.budget.money > l.fleet * 55) {
-            l.fleetAge = 0;
-            l.fleetWear = 0.05;
-            this.busMaintCostToday += l.fleet * 40;
-            this.busRenewals++;
-            const st = l.stops[0];
-            if (st) w.events.emit('bus_line', st.x, st.z, 0.45, `Frota renovada na ${l.name}`, { visual: 0.5 });
+          if ((l.fleetAge >= 28 || l.fleetWear >= 0.78) && w.budget.money > 55) {
+            // Schedule 1 unit for gradual renewal; age/wear/cost/counter apply ONLY on genuine depot return in busArrived()
+            const curPending = l.pendingRenewals ?? 0;
+            if (curPending < Math.max(1, l.fleet)) {
+              l.pendingRenewals = curPending + 1;
+            }
           }
         }
       }

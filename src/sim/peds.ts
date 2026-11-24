@@ -1,4 +1,4 @@
-import { PED_FLAG_UMBRELLA, PED_STRIDE } from '../shared/constants';
+import { PED_FLAG_UMBRELLA, PED_FLAG_WAITING, PED_STRIDE } from '../shared/constants';
 import { MinHeap } from './heap';
 import type { Terrain } from './terrain';
 
@@ -34,14 +34,15 @@ export class Peds {
   private minX = new Float32Array(0); private maxX = new Float32Array(0);
   private minZ = new Float32Array(0); private maxZ = new Float32Array(0);
   private delayed = new Uint8Array(0);
+  gateHeld = new Uint8Array(0);
   private free: number[] = [];
   private q = new MinHeap();
   count = 0;
   time = 0;
   onArrive: (slot: number) => void = () => {};
   rain = 0;
-  /** closed railway level crossings: position, road unit axis (ux,uz) and carriageway+sidewalk half-width */
-  closedGates: { x: number; z: number; ux?: number; uz?: number; halfW?: number }[] = [];
+  /** closed railway level crossings: position (including 3D rail elevation y), road unit axis (ux,uz) and carriageway+sidewalk half-width */
+  closedGates: { x: number; z: number; y?: number; ux?: number; uz?: number; halfW?: number }[] = [];
 
   constructor(private T: Terrain, private elevation?: (x: number, z: number) => number) { this.grow(2048); }
 
@@ -55,6 +56,7 @@ export class Peds {
     this.minX = g(this.minX, Float32Array); this.maxX = g(this.maxX, Float32Array);
     this.minZ = g(this.minZ, Float32Array); this.maxZ = g(this.maxZ, Float32Array);
     this.delayed = g(this.delayed, Uint8Array);
+    this.gateHeld = g(this.gateHeld, Uint8Array);
     for (let i = old; i < n; i++) { this.pts.push(null); this.ptsY.push(null); this.cum.push(null); }
     for (let i = n - 1; i >= old; i--) this.free.push(i);
     this.max = n;
@@ -88,6 +90,7 @@ export class Peds {
     this.t0[i] = this.time;
     this.arrive[i] = this.time + C[n - 1] / v;
     this.delayed[i] = 0;
+    this.gateHeld[i] = 0;
     this.q.push(i, this.arrive[i]);
     this.x[i] = P[0]; this.z[i] = P[1]; this.h[i] = Math.atan2(P[3] - P[1], P[2] - P[0]);
     this.y[i] = Y ? Y[0] : (this.elevation ? this.elevation(P[0], P[1]) : Math.max(0.2, this.T.meshY(P[0], P[1])) + 0.15);
@@ -96,8 +99,22 @@ export class Peds {
     this.count++;
     return i;
   }
-  /** keep a walker standing where it is until explicitly removed (queues at stops) */
-  hold(i: number) { if (this.active[i]) this.arrive[i] = Infinity; }
+  /** keep a walker frozen at its exact current 3D pose until explicitly repositioned or removed (queues / crash hold) */
+  hold(i: number) {
+    if (!this.active[i]) return;
+    if (Number.isFinite(this.arrive[i])) this.pose(i);
+    this.arrive[i] = Infinity;
+    this.speed[i] = 0;
+    this.t0[i] = this.time;
+    this.flags[i] |= PED_FLAG_WAITING;
+    const x = this.x[i], y = this.y[i], z = this.z[i], h = this.h[i];
+    const x2 = x + Math.cos(h) * 0.05, z2 = z + Math.sin(h) * 0.05;
+    this.pts[i] = new Float32Array([x, z, x2, z2]);
+    this.ptsY[i] = new Float32Array([y, y]);
+    this.cum[i] = new Float32Array([0, 0.05]);
+    this.minX[i] = Math.min(x, x2); this.maxX[i] = Math.max(x, x2);
+    this.minZ[i] = Math.min(z, z2); this.maxZ[i] = Math.max(z, z2);
+  }
   /** reposition a held pedestrian (e.g. FIFO bus-stop queue shifting forward) without despawning */
   setHeldPose(i: number, x: number, z: number, h: number, y?: number) {
     if (!this.active[i]) return;
@@ -124,6 +141,7 @@ export class Peds {
     if (!this.active[i]) return;
     this.active[i] = 0;
     this.delayed[i] = 0;
+    this.gateHeld[i] = 0;
     this.pts[i] = null; this.ptsY[i] = null; this.cum[i] = null;
     this.free.push(i);
     this.count--;
@@ -131,6 +149,7 @@ export class Peds {
 
   /** distance walked so far → pose cache (including exact level-aware 3D elevation y) */
   pose(i: number) {
+    if (!Number.isFinite(this.arrive[i])) return; // held pedestrian stays frozen at (x, y, z, h) until setHeldPose() or despawn()
     const P = this.pts[i], C = this.cum[i];
     if (!P || !C) return;
     const n = C.length;
@@ -156,6 +175,7 @@ export class Peds {
 
   step(dt: number) {
     this.time += dt;
+    this.gateHeld.fill(0);
     // hold pedestrians approaching a closed level crossing (tight AABB reject; zero heap pushes while waiting)
     if (this.closedGates.length) {
       const gates = this.closedGates;
@@ -171,10 +191,12 @@ export class Peds {
         }
         if (!hit) continue;
         this.pose(i);
-        const px = this.x[i], pz = this.z[i];
+        const px = this.x[i], py = this.y[i], pz = this.z[i];
         const hx = Math.cos(this.h[i]), hz = Math.sin(this.h[i]);
         for (let k = 0; k < ng; k++) {
           const g = gates[k];
+          // 3D level separation: pedestrians on viaducts above or underpasses below are never held by at-grade gates
+          if (g.y !== undefined && Math.abs(py - g.y) >= 3.0) continue;
           const dx = px - g.x, dz = pz - g.z;
           const ux = g.ux ?? 0, uz = g.uz ?? 0;
           const halfW = g.halfW ?? 10;
@@ -187,6 +209,7 @@ export class Peds {
               this.t0[i] += dt;
               this.arrive[i] += dt;
               this.delayed[i] = 1;
+              this.gateHeld[i] = 1;
               break;
             }
           } else {
@@ -195,6 +218,7 @@ export class Peds {
               this.t0[i] += dt;
               this.arrive[i] += dt;
               this.delayed[i] = 1;
+              this.gateHeld[i] = 1;
               break;
             }
           }
@@ -235,7 +259,10 @@ export class Peds {
       if (Math.abs(this.x[i] - cam.x) > R || Math.abs(this.z[i] - cam.z) > R) { out[o + 4] = -1; continue; }
       out[o] = this.x[i]; out[o + 1] = this.y[i]; out[o + 2] = this.z[i];
       out[o + 3] = this.h[i]; out[o + 4] = this.gen[i];
-      out[o + 5] = this.flags[i] | (this.rain > 0.3 && !(this.flags[i] & PED_FLAG_BIKE) && (i % 3 !== 0) ? PED_FLAG_UMBRELLA : 0);
+      let fl = this.flags[i];
+      if (this.gateHeld[i] === 1 || !Number.isFinite(this.arrive[i])) fl |= PED_FLAG_WAITING;
+      if (this.rain > 0.3 && !(fl & PED_FLAG_BIKE) && (i % 3 !== 0)) fl |= PED_FLAG_UMBRELLA;
+      out[o + 5] = fl;
       out[o + 6] = this.citizen[i];
       n++;
     }

@@ -239,6 +239,55 @@ export class Traffic {
     return arr ?? [];
   }
 
+  /** returns true when a closed level-crossing gate lies between longitudinal coordinates `sFrom` and `sTo` on `(e, dir)` */
+  hasClosedCrossingBetween(e: REdge, dir: number, sFrom: number, sTo: number): boolean {
+    const crossing = this.closedCrossings.get(e.id);
+    if (!crossing || !crossing.length) return false;
+    const lo = Math.min(sFrom, sTo);
+    const hi = Math.max(sFrom, sTo);
+    for (const ct of crossing) {
+      const cs = dir === 0 ? ct * e.len : (1 - ct) * e.len;
+      if (cs + 5 > lo && cs - 5 < hi) return true;
+    }
+    return false;
+  }
+
+  /** longitudinal coordinate of the incident center on `(e, dir)` (falls back to `fallbackS`) */
+  private sceneSOf(e: REdge, dir: number, incId: number, fallbackS: number): number {
+    const blks = this.blockages.get(e.id * 2 + dir);
+    if (blks) {
+      const b = blks.find((x) => x.incidentId === incId);
+      if (b) return Math.max(fallbackS, b.s);
+    }
+    return fallbackS;
+  }
+
+  /** returns true when vehicle `i` is pulled right up behind an already-parked responder of its OWN incident on the same lane */
+  private behindOwnSceneResponder(i: number): boolean {
+    if (this.pKind[i] !== P_INCIDENT || this.pAux[i] > 3) return false;
+    const incId = this.pId[i];
+    if (incId < 0) return false;
+    const eid = this.edge[i], dir = this.dir[i], lane = this.lane[i];
+    const e = this.R.edges[eid];
+    if (!e?.alive) return false;
+    if (this.hasClosedCrossingBetween(e, dir, this.s[i], this.sceneSOf(e, dir, incId, this.destS[i]))) return false;
+    const myFront = this.s[i] + this.len[i] * 0.5;
+    let nearestLeader = -1;
+    let minGap = Infinity;
+    for (const o of this.occupants(e, dir, lane)) {
+      if (o === i || !this.active[o] || this.edge[o] !== eid || this.dir[o] !== dir || this.lane[o] !== lane) continue;
+      if (this.s[o] <= this.s[i]) continue;
+      const gap = (this.s[o] - this.len[o] * 0.5) - myFront;
+      if (gap < minGap) { minGap = gap; nearestLeader = o; }
+    }
+    return nearestLeader >= 0
+      && minGap >= 0.4
+      && minGap < 3.2
+      && this.incidentId[nearestLeader] === incId
+      && this.pKind[nearestLeader] === P_INCIDENT
+      && this.pAux[nearestLeader] <= 3;
+  }
+
   /** returns true when vehicle `i` has >= `margin` m longitudinal clearance from ALL other active vehicles in its lane (ignoring lat) */
   isClearOfLaneNeighbors(i: number, margin = 0.6): boolean {
     if (!this.active[i]) return false;
@@ -653,7 +702,12 @@ export class Traffic {
       if (!arr.length) continue;
       const eid = (k >> 2) >> 1, dir = (k >> 2) & 1;
       const e = R.edges[eid];
-      if (!e || !e.alive) { for (const i of arr) this.despawn(i); continue; }
+      if (!e || !e.alive) {
+        for (const i of arr) {
+          if (this.active[i]) { this.onStuck(i); this.despawn(i); }
+        }
+        continue;
+      }
       const sStart = this.sStart(e, dir);
       const sEnd = this.sEnd(e, dir);
       const vmax = R.speedLimit(e) * rainF;
@@ -901,13 +955,18 @@ export class Traffic {
       const pi = this.pidx[i];
       if (pi >= path.length - 1) {
         const isService = this.pKind[i] === P_SERVICE || this.pKind[i] === P_GARBAGE;
+        const isBus = this.pKind[i] === P_BUS;
         const isIncScene = this.pKind[i] === P_INCIDENT && this.pAux[i] <= 3;
         const isIncTransport = this.pKind[i] === P_INCIDENT && this.pAux[i] >= 4;
+        const sceneBlockedByGate = isIncScene
+          && this.hasClosedCrossingBetween(e, dir, this.s[i], this.sceneSOf(e, dir, this.pId[i], this.destS[i]));
         const arrived = isIncScene
-          ? (this.s[i] >= this.destS[i] - 3.0 && this.isClearOfLaneNeighbors(i, 0.5))
-            || (this.s[i] >= this.destS[i] - 34 && (this.v[i] < 0.8 || this.stuck[i] > 2.5) && this.isClearOfLaneNeighbors(i, 0.5))
-            || (this.s[i] >= this.destS[i] - 1.5 && this.stuck[i] > 6)
-          : isIncTransport || isService
+          ? !sceneBlockedByGate && (
+              (this.s[i] >= this.destS[i] - 4.5 && this.isClearOfLaneNeighbors(i, 0.5))
+              || (this.s[i] >= this.destS[i] - 2.0 && this.stuck[i] > 4.0)
+              || (this.s[i] >= this.destS[i] - 22.0 && this.v[i] < 0.5 && this.behindOwnSceneResponder(i) && this.isClearOfLaneNeighbors(i, 0.5))
+            )
+          : isIncTransport || isService || isBus
             ? this.s[i] >= this.destS[i] - 2.0
             : this.s[i] >= this.destS[i] - 0.5 || (this.stuck[i] > 8 && this.destS[i] - this.s[i] < 30);
         if (arrived) {
@@ -1069,7 +1128,8 @@ export class Traffic {
       if (!this.active[i]) continue;
       const p = this.path[i]!;
       const pi = this.pidx[i];
-      if (R.validPath(p, pi + 1) && (pi + 1 >= p.length || this.joins(p[pi], p[pi + 1]))) continue;
+      if (R.legal(p[pi]) && R.validPath(p, pi + 1) && (pi + 1 >= p.length || this.joins(p[pi], p[pi + 1]))) continue;
+      if (!R.legal(p[pi])) { this.onStuck(i); this.despawn(i); dropped++; continue; }
       // keep the current edge (the vehicle is physically on it) and the final edge (where the door is)
       const cur = p[pi], last = p[p.length - 1];
       const head = this.headOf(cur);

@@ -168,10 +168,12 @@ export const WORKBENCH_FAMILIES: WorkbenchFamily[] = [
   railFamily,
 ];
 
+/** Strict family lookup without silent fallback (returns null for unknown or empty IDs). */
+export function findFamily(id?: string | null): WorkbenchFamily | null {
+  if (!id) return null;
+  return WORKBENCH_FAMILIES.find((f) => f.id === id) ?? null;
+}
+
 export function getFamily(id?: string | null): WorkbenchFamily {
-  if (id) {
-    const found = WORKBENCH_FAMILIES.find((f) => f.id === id);
-    if (found) return found;
-  }
-  return WORKBENCH_FAMILIES[0];
+  return findFamily(id) ?? WORKBENCH_FAMILIES[0];
 }

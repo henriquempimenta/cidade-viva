@@ -9,31 +9,67 @@
  * Usage:
  *   node scripts/capture-field.mjs [--seed 1234] [--terrain vale] [--warmup 40] [--out .review/field]
  */
-import { spawn } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import net from 'node:net';
+
+function getGitState() {
+  let gitCommit = 'unknown';
+  let gitDirty = false;
+  let gitWorktreeHash = null;
+  try {
+    gitCommit = execSync('git rev-parse --short HEAD', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const status = execSync('git status --porcelain', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    gitDirty = status.length > 0;
+    if (gitDirty) {
+      const h = createHash('sha256');
+      const diff = execSync('git diff HEAD', { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+      h.update(status).update('\0').update(diff);
+      const untrackedRaw = execSync('git ls-files -z --others --exclude-standard', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const untracked = untrackedRaw
+        ? untrackedRaw.split('\0').filter((f) => f && !f.startsWith('.review/') && !f.startsWith('dist/')).sort()
+        : [];
+      for (const rel of untracked) {
+        h.update('\0U:').update(rel).update('\0');
+        try { h.update(readFileSync(resolve(process.cwd(), rel))); } catch { /* ignore unreadable */ }
+      }
+      gitWorktreeHash = h.digest('hex').slice(0, 12);
+    }
+  } catch { /* fallback defaults */ }
+  return { gitCommit, gitDirty, gitWorktreeHash };
+}
+
+const KNOWN_TERRAINS = new Set(['vale', 'serra', 'litoral', 'planicie']);
 
 function parseArgs(argv) {
   const args = {
     seed: '1234',
     terrain: 'vale',
+    scenario: '',
     warmup: '40',
     out: '.review/field',
     width: 1440,
     height: 900,
     hour: '14.5', // daylight default; set 'auto' to keep natural clock
   };
+  let terrainExplicit = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--seed' && argv[i + 1]) args.seed = argv[++i];
-    else if (a === '--terrain' && argv[i + 1]) args.terrain = argv[++i];
+    else if (a === '--terrain' && argv[i + 1]) { args.terrain = argv[++i]; terrainExplicit = true; }
+    else if (a === '--scenario' && argv[i + 1]) args.scenario = argv[++i];
     else if (a === '--warmup' && argv[i + 1]) args.warmup = argv[++i];
     else if (a === '--out' && argv[i + 1]) args.out = argv[++i];
     else if (a === '--hour' && argv[i + 1]) args.hour = argv[++i];
     else if (a === '--width' && argv[i + 1]) args.width = Number(argv[++i]);
     else if (a === '--height' && argv[i + 1]) args.height = Number(argv[++i]);
   }
+  if (args.scenario && !terrainExplicit && KNOWN_TERRAINS.has(args.scenario)) {
+    args.terrain = args.scenario;
+  }
+  if (!args.scenario) args.scenario = args.terrain;
   return args;
 }
 
@@ -198,8 +234,14 @@ async function main() {
     // Wait a moment so agents populate streets & transit lines
     await sleep(3200);
 
+    const { gitCommit, gitDirty, gitWorktreeHash } = getGitState();
     const report = {
-      params: { seed: args.seed, terrain: args.terrain, warmup: args.warmup, hour: args.hour },
+      gitCommit,
+      gitDirty,
+      gitWorktreeHash,
+      scenario: args.scenario,
+      capturedAt: new Date().toISOString(),
+      params: { seed: args.seed, terrain: args.terrain, scenario: args.scenario, warmup: args.warmup, hour: args.hour },
       readyInfo,
       shots: [],
       observations: {},
@@ -819,7 +861,10 @@ async function main() {
       });
     }
 
-    writeFileSync(resolve(outDir, 'field-report.json'), JSON.stringify(report, null, 2));
+    report.capturedAt = new Date().toISOString();
+    const json = JSON.stringify(report, null, 2);
+    writeFileSync(resolve(outDir, 'field-report.json'), json);
+    writeFileSync(resolve(outDir, 'summary.json'), json);
     console.log(`Captured ${report.shots.length} field screenshots + telemetry to ${outDir}`);
   } finally {
     cdp?.close();

@@ -173,7 +173,8 @@ export interface WorldDiff {
   fields?: { name: string; data: Float32Array; max: number };
   outage?: Uint8Array; // per field cell: 1 = no power
   skyline?: Float32Array; // per field cell: max building height
-  heights?: Float32Array; // terrain updated (dikes)
+  heights?: Float32Array; // terrain updated (dikes / terraforming)
+  flood?: Uint8Array; // flood mask synchronized with terrain height updates
   od?: number[]; // x1,z1,x2,z2,weight
   cargo?: number[];
 }

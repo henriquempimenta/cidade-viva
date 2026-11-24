@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { createAssetMaterial, createGlowMaterial, type AssetBuildResult, type AssetDetail } from '../render/meshKit';
 import { attachPedInstanceBuffers, createPedDepthMaterial, createPedMaterial } from '../render/pedMaterial';
-import { getFamily, WORKBENCH_FAMILIES } from './registry';
+import { findFamily, getFamily, WORKBENCH_FAMILIES } from './registry';
 import type { PedShowcaseConfig, WorkbenchFamily, WorkbenchVariant } from './types';
 
 type TimeOfDay = 'day' | 'dawn' | 'night';
@@ -654,6 +654,8 @@ function runInteractive(studio: StudioRig, initialFamily: WorkbenchFamily) {
     }
     famSel.onchange = () => {
       family = getFamily(famSel.value);
+      overlayEl.dataset.familyId = family.id;
+      overlayEl.dataset.familyError = 'false';
       variants = family.variants();
       curVariant = variants[0];
       curColor = curVariant.defaultColor;
@@ -731,19 +733,48 @@ function runInteractive(studio: StudioRig, initialFamily: WorkbenchFamily) {
   tick();
 }
 
-const studio = createStudio();
-const family = getFamily(familyParam);
-const variants = family.variants();
+/** Render an explicit error state when an invalid ?family= query is requested (never silently fall back). */
+function renderFamilyError(requested: string) {
+  uiEl.style.display = 'none';
+  metricsEl.style.display = 'none';
+  overlayEl.innerHTML = '';
+  overlayEl.dataset.familyError = 'true';
+  overlayEl.dataset.familyId = '';
+  const validIds = WORKBENCH_FAMILIES.map((f) => f.id);
+  addBanner(
+    `Erro na Bancada — família desconhecida: "${requested}"`,
+    `Famílias válidas: ${validIds.join(', ')}`,
+  );
+  addLabel(16, 52, `Família "${requested}" não encontrada em WORKBENCH_FAMILIES (${validIds.join(', ')}).`);
+  const win = window as WorkbenchWindow;
+  win.__WORKBENCH_META__ = {
+    mode,
+    error: 'unknown_family',
+    requestedFamily: requested,
+    validFamilies: validIds,
+  };
+  win.__WORKBENCH_READY__ = true;
+}
 
-if (mode === 'sheet') {
-  const v = variants.find((x) => x.id === variantParam) ?? variants[0];
-  renderHeroSheet(studio, family, v);
-} else if (mode === 'lineup') {
-  renderLineup(studio, family, variants, timeParam);
-} else if (mode === 'closeup-grid') {
-  renderCloseupGrid(studio, family, variants, pageParam, timeParam);
-} else if (mode === 'lod-compare') {
-  renderLodCompare(studio, family, variants, timeParam);
+const studio = createStudio();
+const resolvedFamily = familyParam !== null ? findFamily(familyParam) : WORKBENCH_FAMILIES[0];
+
+if (!resolvedFamily) {
+  renderFamilyError(familyParam ?? '');
 } else {
-  runInteractive(studio, family);
+  overlayEl.dataset.familyError = 'false';
+  overlayEl.dataset.familyId = resolvedFamily.id;
+  const variants = resolvedFamily.variants();
+  if (mode === 'sheet') {
+    const v = variants.find((x) => x.id === variantParam) ?? variants[0];
+    renderHeroSheet(studio, resolvedFamily, v);
+  } else if (mode === 'lineup') {
+    renderLineup(studio, resolvedFamily, variants, timeParam);
+  } else if (mode === 'closeup-grid') {
+    renderCloseupGrid(studio, resolvedFamily, variants, pageParam, timeParam);
+  } else if (mode === 'lod-compare') {
+    renderLodCompare(studio, resolvedFamily, variants, timeParam);
+  } else {
+    runInteractive(studio, resolvedFamily);
+  }
 }

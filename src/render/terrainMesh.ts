@@ -228,9 +228,16 @@ export class TerrainView {
     return (heights[k] * (1 - tx) + heights[k + 1] * tx) * (1 - tz) + (heights[k + hres] * (1 - tx) + heights[k + hres + 1] * tx) * tz;
   }
 
-  updateHeights(h: Float32Array) {
+  updateHeights(h: Float32Array, flood?: Uint8Array) {
     this.heights = h;
     this.init.heights = h;
+    if (flood) {
+      this.init.flood = flood;
+    } else if (this.init.flood) {
+      for (let k = 0; k < h.length; k++) {
+        if (h[k] >= 2.4 && this.init.flood[k]) this.init.flood[k] = 0;
+      }
+    }
     this.cutKey = '';
     const pos = this.geo.attributes.position as THREE.BufferAttribute;
     for (let i = 0; i < pos.count; i++) {

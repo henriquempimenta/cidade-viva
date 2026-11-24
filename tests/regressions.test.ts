@@ -551,7 +551,8 @@ describe('metrô terminal e velocidade no inspetor do cidadão', () => {
     rail.trains.push(tr);
     w.rail2.step(0.5);
     expect(tr.dir).toBe(-1);
-    expect(tr.s).toBe(1000);
+    // Head moves to the former tail (1000 - 4*19 - 3*0.8 = 921.6) so all 4 cars remain continuously on-track in [0, 1000]
+    expect(tr.s).toBeCloseTo(921.6, 1);
     expect(tr.dwell).toBeGreaterThanOrEqual(25);
   });
 

@@ -382,27 +382,29 @@ export class Overlays {
       const laneCenterZ = (l: number) => (l - incLane) * LANE_WIDTH - lat0;
 
       // Striped barricades upstream of the disabled/crashed vehicle(s) covering every closed lane in THIS direction
+      // Set back to -8.8 m so even long 10-12 m buses/trucks have clear visual margin behind the rear bumper
+      const barricadeX = -8.8;
       if (inc.fullClosure) {
         for (let l = 0; l < lanes; l++) {
-          addBarricade(-7.2, laneCenterZ(l), isCrash);
+          addBarricade(barricadeX, laneCenterZ(l), isCrash);
         }
       } else {
-        addBarricade(-7.2, laneCenterZ(incLane), isCrash);
+        addBarricade(barricadeX, laneCenterZ(incLane), isCrash);
       }
 
       // Perimeter traffic cones tapering upstream and flanking strictly within the closed lane(s) (never in oncoming traffic or on sidewalks)
       const zMin = (inc.fullClosure ? laneCenterZ(0) : laneCenterZ(incLane)) - 1.25;
       const zMax = (inc.fullClosure ? laneCenterZ(lanes - 1) : laneCenterZ(incLane)) + 1.25;
       const coneCoords: [number, number][] = [
-        [-11.4, zMin], [-11.4, zMax],
-        [-9.2, zMin], [-9.2, zMax],
-        [-4.2, zMin], [-4.2, zMax],
-        [5.2, zMin], [5.2, zMax],
+        [-12.6, zMin], [-12.6, zMax],
+        [-10.4, zMin], [-10.4, zMax],
+        [-5.0, zMin], [-5.0, zMax],
+        [5.6, zMin], [5.6, zMax],
       ];
       if (inc.fullClosure && lanes >= 2) {
         for (let l = 0; l < lanes - 1; l++) {
           const zMid = (laneCenterZ(l) + laneCenterZ(l + 1)) * 0.5;
-          coneCoords.push([-10.5, zMid], [-4.2, zMid], [5.2, zMid]);
+          coneCoords.push([-11.6, zMid], [-5.0, zMid], [5.6, zMid]);
         }
       }
       for (const [cx, cz] of coneCoords) addCone(cx, cz);

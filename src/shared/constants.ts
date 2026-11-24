@@ -17,7 +17,7 @@ export const OCC_CELL = 4; // meters per occupancy cell
 
 export const VEH_STRIDE = 9; // x,y,z,heading,type,gen,flags,line,citizen
 export const PED_STRIDE = 7; // x,y,z,heading,gen,flags,citizen
-export const TRAIN_STRIDE = 6; // x,y,z,heading,type,line
+export const TRAIN_STRIDE = 7; // x,y,z,heading,type,trainId,pitch
 
 export enum VType {
   None = 0, Car, Taxi, Moto, Bus, SchoolBus, Truck, Van, Garbage, Ambulance, Police, Fire, TourBus, Construction, Hearse, Bike, Tow,
@@ -30,7 +30,7 @@ export const VTYPE_LEN: Record<number, number> = {
 };
 export const VEH_FLAG_SIREN = 1, VEH_FLAG_YIELD = 2, VEH_FLAG_BRAKE = 4, VEH_FLAG_FULL = 8, VEH_FLAG_ELEVATED = 16, VEH_FLAG_HAZARD = 32;
 
-export const PED_FLAG_TOURIST = 1, PED_FLAG_UMBRELLA = 2, PED_FLAG_LUGGAGE = 4, PED_FLAG_WORKER = 8, PED_FLAG_FOLLOW = 16, PED_FLAG_PHOTO = 32, PED_FLAG_FUNERAL = 64, PED_FLAG_WAITING = 128;
+export const PED_FLAG_TOURIST = 1, PED_FLAG_UMBRELLA = 2, PED_FLAG_LUGGAGE = 4, PED_FLAG_WORKER = 8, PED_FLAG_FOLLOW = 16, PED_FLAG_PHOTO = 32, PED_FLAG_FUNERAL = 64, PED_FLAG_WAITING = 128, PED_FLAG_FEMALE = 512, PED_FLAG_CHILD = 1024, PED_FLAG_ELDER = 2048;
 
 export enum RoadClass { Dirt = 0, Local = 1, Collector = 2, Avenue = 3, Highway = 4 }
 export const ROAD_NAMES = ['Estrada de terra', 'Rua local', 'Rua coletora', 'Avenida', 'Via expressa'];

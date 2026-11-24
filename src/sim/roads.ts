@@ -584,6 +584,12 @@ export class RoadNetwork {
     return t0 * (1 + 0.15 * Math.pow(vc, 4)) + e.stopped[dir] * 1.5 + (this.nodes[dir === 0 ? e.b : e.a].delay || 0) * 0.5 + pen;
   }
 
+  /** Drop cached routing tree for a single destination node so the next route() recomputes with current penalties. */
+  invalidateTree(dest: number) {
+    this.trees.delete(dest);
+    this.detourTrees.delete(dest);
+  }
+
   /** Apply or clear a temporary routing penalty on a directed edge (used by road incidents/closures). */
   setIncidentPenalty(de: number, penaltySeconds: number) {
     if (penaltySeconds <= 0) {

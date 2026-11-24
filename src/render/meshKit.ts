@@ -34,6 +34,7 @@ export interface AssetMeta {
   family: string;
   triangles: number;
   glowTriangles: number;
+  emergencyGlowTriangles?: number;
   /** Dimensions along X (length/forward), Y (height), Z (width) in meters. */
   size: [number, number, number];
   minY: number;
@@ -42,6 +43,8 @@ export interface AssetMeta {
 export interface AssetBuildResult {
   body: THREE.BufferGeometry;
   glow?: THREE.BufferGeometry;
+  /** Dedicated emergency/warning emissives (sirens, lightbars, beacons) modulated independently of night headlights. */
+  emergencyGlow?: THREE.BufferGeometry;
   meta: AssetMeta;
 }
 
@@ -502,25 +505,29 @@ export class MeshBuilder {
   }
 }
 
-/** Helper to finalize a body + optional glow MeshBuilder into the standard AssetBuildResult contract. */
+/** Helper to finalize a body + optional glow/emergencyGlow MeshBuilders into the standard AssetBuildResult contract. */
 export function finalizeAsset(
   id: string,
   label: string,
   family: string,
   bodyBuilder: MeshBuilder,
   glowBuilder?: MeshBuilder | null,
+  emergencyGlowBuilder?: MeshBuilder | null,
 ): AssetBuildResult {
   const b = bodyBuilder.bounds();
   const hasGlow = glowBuilder && glowBuilder.triangleCount > 0;
+  const hasEmergencyGlow = emergencyGlowBuilder && emergencyGlowBuilder.triangleCount > 0;
   return {
     body: bodyBuilder.toGeometry(),
     glow: hasGlow ? glowBuilder.toGeometry() : undefined,
+    emergencyGlow: hasEmergencyGlow ? emergencyGlowBuilder.toGeometry() : undefined,
     meta: {
       id,
       label,
       family,
       triangles: bodyBuilder.triangleCount,
       glowTriangles: hasGlow ? glowBuilder.triangleCount : 0,
+      emergencyGlowTriangles: hasEmergencyGlow ? emergencyGlowBuilder.triangleCount : 0,
       size: [Number(b.size[0].toFixed(2)), Number(b.size[1].toFixed(2)), Number(b.size[2].toFixed(2))],
       minY: Number(b.min[1].toFixed(3)),
     },

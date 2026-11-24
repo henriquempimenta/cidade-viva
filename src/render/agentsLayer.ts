@@ -111,13 +111,83 @@ interface PedInstancedBucket {
   count: number;
 }
 
+/**
+ * Derive 4 flush outer-corner blinker anchors [fx,fy,+fz, fx,fy,-fz, rx,ry,+rz, rx,ry,-rz]
+ * directly from a vehicle's real body & glow geometry so hazard blinkers always hug the mesh
+ * and remain clearly visible on every variant (zero floating, zero occlusion, zero runtime alloc).
+ */
+export function computeVehicleBlinkerAnchors(
+  body: THREE.BufferGeometry,
+  glow?: THREE.BufferGeometry | null,
+): Float32Array {
+  const out = new Float32Array(12);
+  body.computeBoundingBox();
+  const bb = body.boundingBox!;
+  const bPos = body.getAttribute('position');
+  const gPos = glow?.getAttribute('position') ?? null;
+
+  for (let endIdx = 0; endIdx < 2; endIdx++) {
+    const signX = endIdx === 0 ? 1 : -1;
+    let lampX = signX > 0 ? bb.max.x : bb.min.x;
+    let lampY = Math.min(1.15, Math.max(0.55, bb.min.y + (bb.max.y - bb.min.y) * 0.38));
+    let lampZ = Math.max(0.18, bb.max.z * 0.78);
+    if (gPos && gPos.count > 0) {
+      let bestX = -Infinity;
+      for (let i = 0; i < gPos.count; i++) {
+        const gx = gPos.getX(i), gy = gPos.getY(i);
+        if (gx * signX <= 0 || gy > 1.65) continue;
+        if (gx * signX > bestX) bestX = gx * signX;
+      }
+      if (bestX > 0) {
+        let sumY = 0, cnt = 0, maxZ = 0;
+        for (let i = 0; i < gPos.count; i++) {
+          const gx = gPos.getX(i), gy = gPos.getY(i), gz = Math.abs(gPos.getZ(i));
+          if (gx * signX < bestX - 0.14 || gy > 1.65) continue;
+          sumY += gy; cnt++;
+          if (gz > maxZ) maxZ = gz;
+        }
+        if (cnt > 0) {
+          lampX = bestX * signX;
+          lampY = sumY / cnt;
+          lampZ = Math.max(0.16, maxZ);
+        }
+      }
+    }
+    let bodyX = -Infinity;
+    let bodyZ = 0;
+    const zMin = Math.max(0.08, lampZ * 0.55);
+    for (let i = 0; i < bPos.count; i++) {
+      const bx = bPos.getX(i), by = bPos.getY(i), bz = Math.abs(bPos.getZ(i));
+      if (bx * signX <= 0 || Math.abs(by - lampY) > 0.22 || bz < zMin) continue;
+      if (bx * signX > bodyX) bodyX = bx * signX;
+    }
+    if (bodyX > 0) {
+      for (let i = 0; i < bPos.count; i++) {
+        const bx = bPos.getX(i), by = bPos.getY(i), bz = Math.abs(bPos.getZ(i));
+        if (bx * signX < bodyX - 0.22 || Math.abs(by - lampY) > 0.22) continue;
+        if (bz > bodyZ) bodyZ = bz;
+      }
+    }
+    const clampedX = bodyX > 0 ? Math.min(bodyX, Math.abs(lampX) + 0.05) : Math.abs(lampX);
+    const clampedZ = bodyZ > 0 ? Math.min(bodyZ, lampZ + 0.06) : lampZ;
+    const anchorX = clampedX * signX + signX * 0.015;
+    const anchorZ = Math.max(0.12, clampedZ - 0.05);
+    const anchorY = Math.max(0.42, Math.min(1.45, lampY));
+    const base = endIdx * 6;
+    out[base] = anchorX; out[base + 1] = anchorY; out[base + 2] = anchorZ;
+    out[base + 3] = anchorX; out[base + 4] = anchorY; out[base + 5] = -anchorZ;
+  }
+  return out;
+}
+
 export class AgentsLayer {
   group = new THREE.Group();
   private veh: THREE.InstancedMesh[] = [];
   private vehGlow: (THREE.InstancedMesh | null)[] = [];
+  private vehEmerg: (THREE.InstancedMesh | null)[] = [];
+  private vehBlinkers: Float32Array[] = [];
   private vehGlowMat!: THREE.MeshBasicMaterial;
-  private sirens: THREE.InstancedMesh;
-  private hazards: THREE.InstancedMesh;
+  private vehEmergMat!: THREE.MeshBasicMaterial;
   private blinkers: THREE.InstancedMesh;
 
   // 3-tier LOD buckets for pedestrians (archetype × 3 LODs) and accessories (bike, umbrella, luggage × 3 LODs)
@@ -150,6 +220,7 @@ export class AgentsLayer {
   private cullSphere = new THREE.Sphere(new THREE.Vector3(), 10);
   private vCounts = new Int32Array(VEHICLE_PRESETS.length);
   private vGlowCounts = new Int32Array(VEHICLE_PRESETS.length);
+  private vEmergCounts = new Int32Array(VEHICLE_PRESETS.length);
   private tCounts = new Int32Array(RAIL_PRESETS.length * 3);
   private tGlowCounts = new Int32Array(RAIL_PRESETS.length * 3);
   private vPos = new Float32Array(MAX_VEHICLES * 4); // interpolated x,y,z,h (grows with the sim pools)
@@ -163,12 +234,15 @@ export class AgentsLayer {
   constructor(private app: App) {
     const vehMat = createAssetMaterial();
     this.vehGlowMat = createGlowMaterial();
+    this.vehEmergMat = createGlowMaterial();
     for (const preset of VEHICLE_PRESETS) {
       const built = buildVehicle(preset.id, 'high');
       const cap = preset.vtype === VType.Car ? 2500 : 900;
       const im = new THREE.InstancedMesh(built.body, vehMat, cap);
+      im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
       im.count = 0; im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false;
       this.veh.push(im);
+      this.vehBlinkers.push(computeVehicleBlinkerAnchors(built.body, built.glow));
       this.group.add(im);
       if (built.glow) {
         const gm = new THREE.InstancedMesh(built.glow, this.vehGlowMat, cap);
@@ -178,14 +252,19 @@ export class AgentsLayer {
       } else {
         this.vehGlow.push(null);
       }
+      if (built.emergencyGlow) {
+        const em = new THREE.InstancedMesh(built.emergencyGlow, this.vehEmergMat, cap);
+        em.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
+        em.count = 0; em.frustumCulled = false;
+        this.vehEmerg.push(em);
+        this.group.add(em);
+      } else {
+        this.vehEmerg.push(null);
+      }
     }
-    this.sirens = new THREE.InstancedMesh(new THREE.BoxGeometry(0.36, 0.20, 1.15), new THREE.MeshBasicMaterial({ toneMapped: false }), 300);
-    this.sirens.count = 0; this.sirens.frustumCulled = false;
-    // Full-width amber roof lightbar strictly for Tow trucks
-    this.hazards = new THREE.InstancedMesh(new THREE.BoxGeometry(0.32, 0.22, 1.25), new THREE.MeshBasicMaterial({ toneMapped: false }), 300);
-    this.hazards.count = 0; this.hazards.frustumCulled = false;
-    // Discrete 4-corner amber hazard flashers for disabled/crashed civilian vehicles
+    // Discrete 4-corner amber hazard flashers for disabled/crashed civilian vehicles without a roof emergency lightbar
     this.blinkers = new THREE.InstancedMesh(new THREE.BoxGeometry(0.20, 0.14, 0.20), new THREE.MeshBasicMaterial({ toneMapped: false }), 600);
+    this.blinkers.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(600 * 3), 3);
     this.blinkers.count = 0; this.blinkers.frustumCulled = false;
 
     // ---- Parametric Pedestrians, Cyclists & Accessories with 3-tier Real-Time LOD ----
@@ -244,7 +323,7 @@ export class AgentsLayer {
     // Precompute local rolling luggage offset (beside tourist's left side, wheels at Y = 0.00)
     this.lugLocalM.makeTranslation(-0.14, 0, -0.36);
 
-    this.group.add(this.sirens, this.hazards, this.blinkers);
+    this.group.add(this.blinkers);
 
     // ---- Parametric Railway Rolling Stock & Metro with 3-tier Real-Time LOD ----
     // Indices 0..5 match src/sim/rail.ts: 0 loco, 1 passenger, 2 container, 3 hopper, 4 tank, 5 metro
@@ -372,9 +451,11 @@ export class AgentsLayer {
     // ---- vehicles ----
     const counts = this.vCounts;
     const gCounts = this.vGlowCounts;
+    const eCounts = this.vEmergCounts;
     counts.fill(0);
     gCounts.fill(0);
-    let ns = 0, nh = 0, nbl = 0;
+    eCounts.fill(0);
+    let nbl = 0;
     const cv = cur.veh;
     const old = (this.app.stats?.era ?? 0) === 0;
     const NV = cv.length / VEH_STRIDE;
@@ -416,46 +497,43 @@ export class AgentsLayer {
       im.setColorAt(counts[slot], this.col);
       counts[slot]++;
       const gm = this.vehGlow[slot];
-      if (gm && (night > 0.05 || (flags & (VEH_FLAG_SIREN | VEH_FLAG_HAZARD))) && gCounts[slot] < gm.instanceMatrix.count) {
+      if (gm && night > 0.05 && gCounts[slot] < gm.instanceMatrix.count) {
         gm.setMatrixAt(gCounts[slot]++, this.m);
       }
-      if (flags & VEH_FLAG_SIREN && type !== VType.Tow && ns < 300) {
-        const fwd = type === VType.Fire ? 3.55 : type === VType.Ambulance ? 1.35 : -0.15;
-        const dy = type === VType.Fire ? 2.94 : type === VType.Ambulance ? 2.16 : 1.56;
-        this.v.set(x + Math.cos(h) * fwd, y + dy, z + Math.sin(h) * fwd);
-        this.m.compose(this.v, this.q, this.sc);
-        this.sirens.setMatrixAt(ns, this.m);
-        const ph = Math.sin(this.t * 14 + i) > 0;
-        this.col.setRGB(ph ? 3 : 0.1, 0.1, ph ? 0.1 : 3);
-        this.sirens.setColorAt(ns, this.col);
-        ns++;
+      const em = this.vehEmerg[slot];
+      if (em && eCounts[slot] < em.instanceMatrix.count) {
+        const eIdx = eCounts[slot]++;
+        em.setMatrixAt(eIdx, this.m);
+        const emergencyOn = (flags & VEH_FLAG_SIREN) !== 0
+          || (type === VType.Tow && (flags & VEH_FLAG_HAZARD) !== 0);
+        if (emergencyOn) {
+          // Vivid HDR emissive strobe day & night whenever siren/emergency is active (single source of truth; no legacy box)
+          const pulse = 2.0 + 1.15 * Math.sin(this.t * 14 + i * 1.3);
+          this.col.setScalar(pulse);
+        } else if (type === VType.Garbage || type === VType.Construction) {
+          // Service warning beacons remain visibly lit during daytime work and brighter at night
+          const pulse = (0.95 + 0.65 * night) + 0.55 * Math.max(0, Math.sin(this.t * 6 + i * 1.7));
+          this.col.setScalar(pulse);
+        } else {
+          // Unlit colored lenses remain physically visible on roof when siren is off (no pulse)
+          this.col.setScalar(0.52 + 0.28 * night);
+        }
+        em.setColorAt(eIdx, this.col);
       }
-      if (type === VType.Tow && (flags & (VEH_FLAG_HAZARD | VEH_FLAG_SIREN)) !== 0 && nh < 300) {
-        this.v.set(x + Math.cos(h) * 3.2, y + 2.90, z + Math.sin(h) * 3.2);
-        this.m.compose(this.v, this.q, this.sc);
-        this.hazards.setMatrixAt(nh, this.m);
-        const on = Math.sin(this.t * 9 + i * 1.7) > -0.15;
-        this.col.setRGB(on ? 3.2 : 0.45, on ? 1.85 : 0.22, on ? 0.08 : 0.02);
-        this.hazards.setColorAt(nh, this.col);
-        nh++;
-      } else if (type !== VType.Tow && (flags & VEH_FLAG_HAZARD) !== 0 && nbl + 4 <= 600) {
-        // Discrete 4-corner amber hazard blinkers (front/rear bumper corners, never a roof lightbar)
-        const heavy = type === VType.Bus || type === VType.TourBus || type === VType.SchoolBus || type === VType.Truck || type === VType.Garbage || type === VType.Fire;
-        const moto = type === VType.Moto;
-        const hl = (VTYPE_LEN[type] ?? 4.6) * 0.46;
-        const hw = moto ? 0.26 : heavy ? 1.18 : 0.88;
-        const by = y + (moto ? 0.68 : heavy ? 0.85 : 0.62);
+      const canHaveBumperHazard = !em || type === VType.Garbage || type === VType.Construction;
+      if (canHaveBumperHazard && (flags & VEH_FLAG_HAZARD) !== 0 && nbl + 4 <= 600) {
+        // Discrete 4-corner amber hazard blinkers anchored to each variant's exact body/lamp geometry
+        const anchors = this.vehBlinkers[slot];
         const ch = Math.cos(h), sh = Math.sin(h);
         const on = Math.sin(this.t * 10 + i * 1.7) > -0.1;
         this.col.setRGB(on ? 3.0 : 0.22, on ? 1.55 : 0.10, on ? 0.05 : 0.01);
-        for (const sx of [hl, -hl]) {
-          for (const sz of [hw, -hw]) {
-            this.v.set(x + ch * sx - sh * sz, by, z + sh * sx + ch * sz);
-            this.m.compose(this.v, this.q, this.sc);
-            this.blinkers.setMatrixAt(nbl, this.m);
-            this.blinkers.setColorAt(nbl, this.col);
-            nbl++;
-          }
+        for (let k = 0; k < 4; k++) {
+          const ax = anchors[k * 3], ay = anchors[k * 3 + 1], az = anchors[k * 3 + 2];
+          this.v.set(x + ch * ax - sh * az, y + ay, z + sh * ax + ch * az);
+          this.m.compose(this.v, this.q, this.sc);
+          this.blinkers.setMatrixAt(nbl, this.m);
+          this.blinkers.setColorAt(nbl, this.col);
+          nbl++;
         }
       }
       void VEH_FLAG_BRAKE; void VEH_FLAG_YIELD;
@@ -475,18 +553,15 @@ export class AgentsLayer {
         gm.count = gCounts[s];
         if (gCounts[s] > 0 || prevG > 0) gm.instanceMatrix.needsUpdate = true;
       }
-    }
-    const prevNs = this.sirens.count;
-    this.sirens.count = ns;
-    if (ns > 0 || prevNs > 0) {
-      this.sirens.instanceMatrix.needsUpdate = true;
-      if (this.sirens.instanceColor) this.sirens.instanceColor.needsUpdate = true;
-    }
-    const prevNh = this.hazards.count;
-    this.hazards.count = nh;
-    if (nh > 0 || prevNh > 0) {
-      this.hazards.instanceMatrix.needsUpdate = true;
-      if (this.hazards.instanceColor) this.hazards.instanceColor.needsUpdate = true;
+      const em = this.vehEmerg[s];
+      if (em) {
+        const prevE = em.count;
+        em.count = eCounts[s];
+        if (eCounts[s] > 0 || prevE > 0) {
+          em.instanceMatrix.needsUpdate = true;
+          if (em.instanceColor) em.instanceColor.needsUpdate = true;
+        }
+      }
     }
     const prevNbl = this.blinkers.count;
     this.blinkers.count = nbl;

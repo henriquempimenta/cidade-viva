@@ -7,16 +7,16 @@ Este arquivo registra ressalvas aprovadas para iteração futura e o backlog de 
 ## TODO 1 — Ressalvas Pontuais do Piloto 1: Veículos (`src/render/vehicleGeom.ts`)
 *Origem: Avaliação Visual Rodada 2 (`APPROVED_WITH_RESERVATIONS`, média **8,3 / 10**, todas as notas ≥ 7,5).*
 
-- [ ] **`ambulance` — Z-fighting na lanterna traseira direita** (`src/render/vehicleGeom.ts` ~linha 1042):
+- [x] **`ambulance` — Z-fighting na lanterna traseira direita** (`src/render/vehicleGeom.ts` ~linha 1042):
   - A faixa vermelha traseira (`xRear - 0.012`) fica coplanar com o `glow` das lanternas traseiras (`xRear - 0.012`), causando artefato diagonal e encobrindo placa/molduras.
   - *Correção*: recuar a faixa traseira para `xRear - 0.004` (atrás de molduras/placa/lanternas) ou segmentá-la entre as lanternas.
-- [ ] **`fire` — Estribo traseiro flutuante e caixas de roda encobertas** (`src/render/vehicleGeom.ts` ~linhas 1137, 1350, 1421):
+- [x] **`fire` — Estribo traseiro flutuante e caixas de roda encobertas** (`src/render/vehicleGeom.ts` ~linhas 1137, 1350, 1421):
   - A plataforma metálica traseira (`Y = 0.52..0.66`) flutua ~28 cm abaixo da carroceria (`Y = 0.94`) porque o chassi foi omitido para `fire`. Conectar o estribo à carroceria/chassi com suportes ou longarinas.
   - Usar `cabWall` para a caixa de roda dianteira e ajustar a ordem de profundidade em `Z` da `fire-stripe` vs. caixas de roda para que os recortes das rodas apareçam limpos no perfil lateral.
-- [ ] **`bus` / `tourbus` — Ordem de profundidade faixa lateral vs. caixa de roda**:
+- [x] **`bus` / `tourbus` — Ordem de profundidade faixa lateral vs. caixa de roda**:
   - A faixa lateral (`+0.010 m`) passa na frente do topo da caixa de roda escura (`+0.006 m`), cortando o arco escuro no perfil lateral. Elevar o offset da caixa de roda acima da faixa (ou segmentar a faixa sobre os eixos).
   - *Opcional (`tourbus`)*: adicionar montantes intermediários no corrimão cromado superior para não depender apenas das extremidades.
-- [ ] **Integração de sirenes/giroflex independentes de faróis noturnos**:
+- [x] **Integração de sirenes/giroflex independentes de faróis noturnos**:
   - Hoje os giroflex fixos fazem parte da malha `glow` compartilhada com faróis/lanternas (além do pulso dinâmico de `sirens` em `agentsLayer.ts`). Separar ou modular o emissivo de emergência (`VEH_FLAG_SIREN`) para brilhar com intensidade total também durante o dia sem acender faróis de carros normais.
 
 ---

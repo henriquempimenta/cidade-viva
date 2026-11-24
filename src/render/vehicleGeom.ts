@@ -603,11 +603,12 @@ function addWheelArches(
   spec: VehicleSpec,
   detail: AssetDetail,
   wall: SideWallProfile,
-  opts: { axles?: number[]; flareLip?: boolean } = {},
+  opts: { axles?: number[]; flareLip?: boolean; wellOffset?: number } = {},
 ) {
   if (detail === 'low') return;
   const r = spec.wheelRadius;
-  const rWellIn = r * 0.62;
+  const wellOff = opts.wellOffset;
+  const rWellIn = wellOff !== undefined ? r * 0.80 : r * 0.62;
   const rIn = r + 0.032;
   const rOut = r + 0.088;
   const cy = wheelCenterY(r, wheelSegs(detail, false));
@@ -630,10 +631,12 @@ function addWheelArches(
       const y0i = Math.min(archYMax, cy + s0 * rIn);
       const y1i = Math.min(archYMax, cy + s1 * rIn);
 
-      const z0w = evalSideHalfWidth(wall, y0w) + 0.005;
-      const z1w = evalSideHalfWidth(wall, y1w) + 0.005;
-      const z0i = evalSideHalfWidth(wall, y0i) + 0.006;
-      const z1i = evalSideHalfWidth(wall, y1i) + 0.006;
+      const offW = wellOff ?? 0.005;
+      const offI = wellOff ?? 0.006;
+      const z0w = evalSideHalfWidth(wall, y0w) + offW;
+      const z1w = evalSideHalfWidth(wall, y1w) + offW;
+      const z0i = evalSideHalfWidth(wall, y0i) + offI;
+      const z1i = evalSideHalfWidth(wall, y1i) + offI;
 
       // Dark wheel-well backing sitting flush along the hull behind the tire
       b.quadMirroredZ(
@@ -799,6 +802,7 @@ function addRearFascia(
 function addRoofAccessories(
   b: MeshBuilder,
   g: MeshBuilder,
+  e: MeshBuilder,
   accessories: RoofAccessory[],
   ctx: RoofMountCtx,
   detail: AssetDetail,
@@ -810,8 +814,8 @@ function addRoofAccessories(
   for (const acc of accessories) {
     switch (acc) {
       case 'taxi': {
-        b.box(cx + 0.04, roofTopY - 0.01, 0, 0.24, 0.045, 0.62, RUBBER_DARK, SURF.rubber, { noBottom: true });
-        g.taperBox(cx + 0.04, roofTopY + 0.032, 0, 0.23, 0.56, 0.16, 0.48, 0.13, 0xffe45c, SURF.matte, { noBottom: true });
+        b.taperBox(cx + 0.04, roofTopY - 0.01, 0, 0.23, 0.58, 0.15, 0.47, 0.165, 0xf2c94c, SURF.paintFixed, { noBottom: true });
+        g.taperBox(cx + 0.04, roofTopY + 0.025, 0, 0.245, 0.595, 0.165, 0.485, 0.138, 0xffe45c, SURF.matte, { noBottom: true });
         break;
       }
 
@@ -826,15 +830,15 @@ function addRoofAccessories(
         const podZ = barW * 0.30;
         const leftGlow = acc === 'lightbar-amber' ? GLOW_AMBER : GLOW_TAIL;
         const rightGlow = acc === 'lightbar-amber' ? GLOW_AMBER : acc === 'lightbar-rb' ? GLOW_BLUE : GLOW_WHITE;
-        g.box(lx, y0 + 0.046, podZ, 0.19, 0.095, podW, leftGlow, SURF.matte, { noBottom: true });
-        g.box(lx, y0 + 0.046, -podZ, 0.19, 0.095, podW, rightGlow, SURF.matte, { noBottom: true });
+        e.box(lx, y0 + 0.046, podZ, 0.19, 0.095, podW, leftGlow, SURF.matte, { noBottom: true });
+        e.box(lx, y0 + 0.046, -podZ, 0.19, 0.095, podW, rightGlow, SURF.matte, { noBottom: true });
         break;
       }
 
       case 'beacon': {
         const bx = xFrontRoof - 0.36;
         b.box(bx, roofTopY - 0.01, 0, 0.20, 0.05, 0.20, RUBBER_DARK, SURF.rubber, { noBottom: true });
-        g.box(bx, roofTopY + 0.038, 0, 0.16, 0.12, 0.16, GLOW_AMBER, SURF.matte, { noBottom: true });
+        e.box(bx, roofTopY + 0.038, 0, 0.16, 0.12, 0.16, GLOW_AMBER, SURF.matte, { noBottom: true });
         break;
       }
 
@@ -891,7 +895,7 @@ function addRoofAccessories(
           b.quadMirroredZ([xCradle - 0.09, cY0, chw], [xCradle + 0.09, cY0, chw], [xCradle + 0.09, cY1, chw], [xCradle - 0.09, cY1, chw], STEEL, SURF.metal);
         }
 
-        // Twin side rails (clean 4-face lofted beams)
+        // Twin side rails (clean 4-face lofted beams + 2-tri front end cap)
         for (const s of [-1, 1] as const) {
           const z = s * lhw;
           const hw = 0.04;
@@ -899,7 +903,8 @@ function addRoofAccessories(
           b.loft([
             [[xBase - 0.26, yBase - hh, z + hw], [xBase - 0.26, yBase - hh, z - hw], [xBase - 0.26, yBase + hh, z - hw], [xBase - 0.26, yBase + hh, z + hw]],
             [[xTip, yTip - hh, z + hw], [xTip, yTip - hh, z - hw], [xTip, yTip + hh, z - hw], [xTip, yTip + hh, z + hw]],
-          ], CHROME, SURF.metal, { capStart: false, capEnd: true });
+          ], CHROME, SURF.metal, { capStart: false, capEnd: false });
+          quadFrontX(b, xTip, yTip - hh, yTip + hh, z, hw * 2, CHROME, SURF.metal);
         }
 
         // Metallic ladder rungs
@@ -938,10 +943,15 @@ function addRoofAccessories(
         const sideLen = sideEnd - sideStart;
         const sideCx = (sideStart + sideEnd) * 0.5;
 
-        // Rear parapet wall (full width) + recessed side parapet walls (zero coplanar corner overlap)
-        b.box(xRearRoof + rearWallT * 0.5, yDeck - 0.01, 0, rearWallT, sidePanelH, hw * 2, WHITE, SURF.paint, { noBottom: true });
-        b.box(sideCx, yDeck - 0.01, hw - 0.045, sideLen, sidePanelH, 0.09, WHITE, SURF.paint, { noBottom: true });
-        b.box(sideCx, yDeck - 0.01, -(hw - 0.045), sideLen, sidePanelH, 0.09, WHITE, SURF.paint, { noBottom: true });
+        // Rear parapet wall (full width) + recessed side parapet walls (zero coplanar corner overlap, no hidden end caps)
+        const spY0 = yDeck - 0.01;
+        const spY1 = spY0 + sidePanelH;
+        const spZOut = hw;
+        const spZIn = hw - 0.09;
+        b.box(xRearRoof + rearWallT * 0.5, spY0, 0, rearWallT, sidePanelH, hw * 2, WHITE, SURF.paint, { noBottom: true });
+        b.quadMirroredZ([sideStart, spY0, spZOut], [sideEnd, spY0, spZOut], [sideEnd, spY1, spZOut], [sideStart, spY1, spZOut], WHITE, SURF.paint);
+        b.quadMirroredZ([sideEnd, spY0, spZIn], [sideStart, spY0, spZIn], [sideStart, spY1, spZIn], [sideEnd, spY1, spZIn], WHITE, SURF.paint);
+        b.quadMirroredZ([sideStart, spY1, spZOut], [sideEnd, spY1, spZOut], [sideEnd, spY1, spZIn], [sideStart, spY1, spZIn], WHITE, SURF.paint);
 
         // Front sloped panoramic glass wind deflector
         b.taperBox(xFrontRoof - 0.24, yDeck - 0.01, 0, 0.54, hw * 1.98, 0.20, hw * 1.92, wallH + 0.16, GLASS_STD, SURF.glass, {
@@ -951,29 +961,51 @@ function addRoofAccessories(
           noBottom: true,
         });
 
-        // Perimeter chrome safety handrail
+        // Rear half-canopy shade + intermediate chrome handrail stanchions
+        const canopyLen = len * 0.28;
+        const canopyX = xRearRoof + canopyLen * 0.5;
+        const canopyY = yDeck + 1.00;
+        const canopyFrontPostX = xRearRoof + canopyLen - 0.05;
+        const pY0 = yDeck + sidePanelH - 0.02;
+        const pY1 = canopyY + 0.02;
+        const pz = hw - 0.055;
+
+        // Perimeter chrome safety handrail anchored cleanly into rear canopy pillar + closed rear caps + 3 intermediate stanchions
         if (detail !== 'low') {
-          for (const s of [-1, 1] as const) {
-            b.box(sideCx, railTop - 0.04, s * (hw - 0.045), sideLen, 0.045, 0.045, CHROME, SURF.metal, { noBottom: true });
+          const rY0 = railTop - 0.04;
+          const rY1 = rY0 + 0.045;
+          const rZOut = hw - 0.0225;
+          const rZIn = hw - 0.0675;
+          const railStart = xRearRoof + 0.075;
+          b.quadMirroredZ([railStart, rY0, rZOut], [sideEnd, rY0, rZOut], [sideEnd, rY1, rZOut], [railStart, rY1, rZOut], CHROME, SURF.metal);
+          b.quadMirroredZ([sideEnd, rY0, rZIn], [railStart, rY0, rZIn], [railStart, rY1, rZIn], [sideEnd, rY1, rZIn], CHROME, SURF.metal);
+          b.quadMirroredZ([railStart, rY1, rZOut], [sideEnd, rY1, rZOut], [sideEnd, rY1, rZIn], [railStart, rY1, rZIn], CHROME, SURF.metal);
+          b.quadMirroredZ([railStart, rY0, rZIn], [railStart, rY0, rZOut], [railStart, rY1, rZOut], [railStart, rY1, rZIn], CHROME, SURF.metal);
+
+          // 3 evenly spaced closed 4-sided chrome stanchions anchoring handrail to side parapet along open upper deck
+          const stZ = hw - 0.045;
+          const stHalf = 0.024;
+          const stY0 = spY1 - 0.015;
+          const stY1 = rY0 + 0.01;
+          for (const f of [0.25, 0.50, 0.75]) {
+            const sx = canopyFrontPostX + (sideEnd - canopyFrontPostX) * f;
+            b.quadMirroredZ([sx - stHalf, stY0, stZ + stHalf], [sx + stHalf, stY0, stZ + stHalf], [sx + stHalf, stY1, stZ + stHalf], [sx - stHalf, stY1, stZ + stHalf], CHROME, SURF.metal);
+            b.quadMirroredZ([sx + stHalf, stY0, stZ - stHalf], [sx - stHalf, stY0, stZ - stHalf], [sx - stHalf, stY1, stZ - stHalf], [sx + stHalf, stY1, stZ - stHalf], CHROME, SURF.metal);
+            b.quadMirroredZ([sx + stHalf, stY0, stZ + stHalf], [sx + stHalf, stY0, stZ - stHalf], [sx + stHalf, stY1, stZ - stHalf], [sx + stHalf, stY1, stZ + stHalf], CHROME, SURF.metal);
+            b.quadMirroredZ([sx - stHalf, stY0, stZ - stHalf], [sx - stHalf, stY0, stZ + stHalf], [sx - stHalf, stY1, stZ + stHalf], [sx - stHalf, stY1, stZ - stHalf], CHROME, SURF.metal);
           }
         }
 
         // Rear half-canopy shade supported by ALL 4 chrome corner pillars (outer + front + rear quads = 6 tris/post)
-        const canopyLen = len * 0.28;
-        const canopyX = xRearRoof + canopyLen * 0.5;
-        const canopyY = yDeck + 1.00;
-        const pY0 = yDeck + sidePanelH - 0.02;
-        const pY1 = canopyY + 0.02;
-        const pz = hw - 0.055;
         b.box(canopyX, canopyY, 0, canopyLen, 0.07, hw * 1.94, WHITE, SURF.paint, { noBottom: true });
-        for (const px of [xRearRoof + 0.06, xRearRoof + canopyLen - 0.05]) {
+        for (const px of [xRearRoof + 0.06, canopyFrontPostX]) {
           b.quadMirroredZ([px - 0.032, pY0, pz + 0.032], [px + 0.032, pY0, pz + 0.032], [px + 0.032, pY1, pz + 0.032], [px - 0.032, pY1, pz + 0.032], CHROME, SURF.metal);
           b.quadMirroredZ([px + 0.032, pY0, pz + 0.032], [px + 0.032, pY0, pz - 0.032], [px + 0.032, pY1, pz - 0.032], [px + 0.032, pY1, pz + 0.032], CHROME, SURF.metal);
           b.quadMirroredZ([px - 0.032, pY0, pz - 0.032], [px - 0.032, pY0, pz + 0.032], [px - 0.032, pY1, pz + 0.032], [px - 0.032, pY1, pz - 0.032], CHROME, SURF.metal);
         }
 
         // Sightseeing seat rows (3-face angled seat backs = 6 tris per bench, crisp & lightweight)
-        const rowCount = detail === 'low' ? 2 : 4;
+        const rowCount = detail === 'low' ? 2 : 3;
         for (let i = 0; i < rowCount; i++) {
           const t = (i + 0.65) / (rowCount + 0.75);
           const sx = xRearRoof + 0.55 + t * (len - 1.55);
@@ -1042,9 +1074,11 @@ function addLivery(
     case 'ambulance-cross': {
       const yStripe0 = yMid + (yBelt - yMid) * 0.35;
       const yStripe1 = yStripe0 + 0.18;
-      b.quadMirroredZ([x0, yStripe0, zAt(yStripe0)], [x1, yStripe0, zAt(yStripe0)], [x1, yStripe1, zAt(yStripe1)], [x0, yStripe1, zAt(yStripe1)], 0xd62424, SURF.paintFixed);
-      // Matching rear red stripe flush with patient lower hull
-      quadRearX(b, x0 - 0.092, yStripe0, yStripe1, 0, wall.hwMid * 1.92, 0xd62424, SURF.paintFixed);
+      b.quadMirroredZ([x0, yStripe0, zAt(yStripe0, 0.007)], [x1, yStripe0, zAt(yStripe0, 0.007)], [x1, yStripe1, zAt(yStripe1, 0.007)], [x0, yStripe1, zAt(yStripe1, 0.007)], 0xd62424, SURF.paintFixed);
+      // Matching rear red stripe recessed at xRear - 0.004 (behind plate -0.008, bezels -0.006, glow -0.012) & segmented cleanly between taillights
+      const xRearFace = -spec.length * 0.5;
+      const rearStripeW = (spec.width * 0.5 * 0.80 - 0.128) * 2;
+      quadRearX(b, xRearFace - 0.004, yStripe0, yStripe1, 0, rearStripeW, 0xd62424, SURF.paintFixed);
       // Crisp red medical cross hugging the tapered patient box wall
       const cx = (x0 + x1) * 0.5;
       const cy = yBelt + 0.56;
@@ -1077,14 +1111,14 @@ function addLivery(
     case 'bus-stripe': {
       const y0 = yMid + (yBelt - yMid) * 0.26;
       const y1 = y0 + 0.24;
-      b.quadMirroredZ([x0, y0, zAt(y0)], [x1, y0, zAt(y0)], [x1, y1, zAt(y1)], [x0, y1, zAt(y1)], 0xf2f4f8, SURF.paintFixed);
+      b.quadMirroredZ([x0, y0, zAt(y0, 0.007)], [x1, y0, zAt(y0, 0.007)], [x1, y1, zAt(y1, 0.007)], [x0, y1, zAt(y1, 0.007)], 0xf2f4f8, SURF.paintFixed);
       return;
     }
 
     case 'tour-stripe': {
       const y0 = yMid + (yBelt - yMid) * 0.32;
       const y1 = y0 + 0.22;
-      b.quadMirroredZ([x0, y0, zAt(y0)], [x1, y0, zAt(y0)], [x1, y1, zAt(y1)], [x0, y1, zAt(y1)], 0xf2cc44, SURF.paintFixed);
+      b.quadMirroredZ([x0, y0, zAt(y0, 0.007)], [x1, y0, zAt(y0, 0.007)], [x1, y1, zAt(y1, 0.007)], [x0, y1, zAt(y1, 0.007)], 0xf2cc44, SURF.paintFixed);
       return;
     }
 
@@ -1092,7 +1126,7 @@ function addLivery(
       for (const f of [0.22, 0.58]) {
         const y0 = yMid + (yBelt - yMid) * f;
         const y1 = y0 + 0.09;
-        b.quadMirroredZ([x0, y0, zAt(y0)], [x1, y0, zAt(y0)], [x1, y1, zAt(y1)], [x0, y1, zAt(y1)], RUBBER_DARK, SURF.rubber);
+        b.quadMirroredZ([x0, y0, zAt(y0, 0.007)], [x1, y0, zAt(y0, 0.007)], [x1, y1, zAt(y1, 0.007)], [x0, y1, zAt(y1, 0.007)], RUBBER_DARK, SURF.rubber);
       }
       return;
     }
@@ -1100,7 +1134,7 @@ function addLivery(
     case 'fire-stripe': {
       const y0 = yMid + (yBelt - yMid) * 0.32;
       const y1 = y0 + 0.16;
-      b.quadMirroredZ([x0, y0, zAt(y0)], [x1, y0, zAt(y0)], [x1, y1, zAt(y1)], [x0, y1, zAt(y1)], 0xf4f6fa, SURF.paintFixed);
+      b.quadMirroredZ([x0, y0, zAt(y0, 0.008)], [x1, y0, zAt(y0, 0.008)], [x1, y1, zAt(y1, 0.008)], [x0, y1, zAt(y1, 0.008)], 0xf4f6fa, SURF.paintFixed);
       return;
     }
 
@@ -1194,7 +1228,14 @@ function buildTruckCabAndChassis(
     if (detail === 'low') {
       quadFrontX(b, xFront + 0.03, yChassisBot + 0.10, yChassisBot + 0.36, 0, halfW * 1.94, CHROME, SURF.metal);
     } else {
-      b.box(xFront + 0.045, yChassisBot + 0.10, 0, 0.11, 0.26, halfW * 1.94, CHROME, SURF.metal, { noBottom: true });
+      const bx0 = xFront - 0.01;
+      const bx1 = xFront + 0.10;
+      const by0 = yChassisBot + 0.10;
+      const by1 = by0 + 0.26;
+      const bhz = halfW * 0.97;
+      quadFrontX(b, bx1, by0, by1, 0, bhz * 2, CHROME, SURF.metal);
+      b.quad([bx0, by1, bhz], [bx1, by1, bhz], [bx1, by1, -bhz], [bx0, by1, -bhz], CHROME, SURF.metal, [0, 1, 0]);
+      b.quadMirroredZ([bx0, by0, bhz], [bx1, by0, bhz], [bx1, by1, bhz], [bx0, by1, bhz], CHROME, SURF.metal);
     }
     quadFrontX(b, xFront + 0.008, yChassisBot + 0.28, yChassisBot + 0.84, 0, spec.width * 0.54, DARK_UNDER, SURF.rubber);
     if (detail !== 'low') {
@@ -1248,7 +1289,7 @@ function buildTruckCabAndChassis(
 }
 
 /** Archetype 1: Heavy Trucks (cargo, garbage, dump, fire). */
-function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
+function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, e: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
   const halfL = spec.length * 0.5;
   const halfW = spec.width * 0.5;
   const xRear = -halfL;
@@ -1282,7 +1323,7 @@ function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, 
         quadRearX(b, bodyRear - 0.012, chassisTopY + 0.25, chassisTopY + boxH - 0.25, s * halfW, 0.06, STEEL_DARK, SURF.metal);
       }
     }
-    addRoofAccessories(b, g, spec.roofAccessories, {
+    addRoofAccessories(b, g, e, spec.roofAccessories, {
       roofTopY: cabRoofTop, crownH, xRearRoof: xCabRear + 0.15, xFrontRoof: xCabFront - 0.2, hwRoof: halfW * 0.86,
     }, detail);
   } else if (spec.bodyKind === 'garbage') {
@@ -1301,7 +1342,7 @@ function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, 
       0xf2c629,
       SURF.paintFixed,
     );
-    addRoofAccessories(b, g, spec.roofAccessories, {
+    addRoofAccessories(b, g, e, spec.roofAccessories, {
       roofTopY: cabRoofTop, crownH, xRearRoof: xCabRear + 0.15, xFrontRoof: xCabFront - 0.2, hwRoof: halfW * 0.86,
     }, detail);
     // Declarative rear amber strobe firmly seated with dark rubber base on flat compactor crest (x >= bodyRear + 1.15)
@@ -1309,7 +1350,7 @@ function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, 
       const bx = bodyRear + 1.38;
       const yCrest = yTop - 0.025;
       b.box(bx, yCrest - 0.015, 0, 0.20, 0.055, 0.20, RUBBER_DARK, SURF.rubber, { noBottom: true });
-      g.box(bx, yCrest + 0.036, 0, 0.16, 0.12, 0.16, GLOW_AMBER, SURF.matte, { noBottom: true });
+      e.box(bx, yCrest + 0.036, 0, 0.16, 0.12, 0.16, GLOW_AMBER, SURF.matte, { noBottom: true });
     }
   } else if (spec.bodyKind === 'dump') {
     const bedH = 1.32;
@@ -1337,22 +1378,44 @@ function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, 
         );
       }
     }
-    addRoofAccessories(b, g, spec.roofAccessories, {
+    addRoofAccessories(b, g, e, spec.roofAccessories, {
       roofTopY: cabRoofTop, crownH, xRearRoof: xCabRear + 0.15, xFrontRoof: xCabFront - 0.2, hwRoof: halfW * 0.86,
     }, detail);
   } else if (spec.bodyKind === 'fire') {
     const appH = 1.62;
     const appTop = chassisTopY + appH;
+    const appBotY = spec.groundClearance + 0.18;
     const appRearX = bodyRear + 0.22;
     const appFrontX = bodyFront;
     const appLen = appFrontX - appRearX;
     const appCx = (appRearX + appFrontX) * 0.5;
     const appHalfW = halfW * 0.98;
 
-    // Main apparatus body + rear standing platform
-    b.box(appCx, chassisTopY - 0.16, 0, appLen, appH + 0.16, appHalfW * 2, WHITE, SURF.paint, { noBottom: true });
+    // Full-skirted apparatus body extending down to tailboard height (zero vertical air gap!)
+    b.box(appCx, appBotY, 0, appLen, appTop - appBotY, appHalfW * 2, WHITE, SURF.paint, { noBottom: true });
     if (detail !== 'low') {
-      b.box(bodyRear + 0.08, spec.groundClearance + 0.18, 0, 0.32, 0.14, spec.width * 0.94, STEEL, SURF.metal, { noBottom: true });
+      // Rear standing platform (tailboard) anchored directly into apparatus rear wall + twin steel gusset supports
+      const tbX0 = bodyRear - 0.08;
+      const tbX1 = appRearX + 0.02;
+      const tbY0 = appBotY;
+      const tbY1 = appBotY + 0.14;
+      const tbHz = spec.width * 0.47;
+      quadRearX(b, tbX0, tbY0, tbY1, 0, tbHz * 2, STEEL, SURF.metal);
+      b.quad([tbX0, tbY1, tbHz], [tbX1, tbY1, tbHz], [tbX1, tbY1, -tbHz], [tbX0, tbY1, -tbHz], STEEL, SURF.metal, [0, 1, 0]);
+      b.quadMirroredZ([tbX0, tbY0, tbHz], [tbX1, tbY0, tbHz], [tbX1, tbY1, tbHz], [tbX0, tbY1, tbHz], STEEL, SURF.metal);
+
+      // Twin 3D triangular steel support gussets bracing tailboard up into the apparatus rear wall
+      const gZ0 = 0.93;
+      const gZ1 = 0.99;
+      const gX0 = tbX0 + 0.04;
+      const gX1 = appRearX;
+      const gY0 = tbY1;
+      const gY1 = tbY1 + 0.28;
+      b.tri([gX0, gY0, gZ1], [gX1, gY0, gZ1], [gX1, gY1, gZ1], STEEL_DARK, SURF.metal);
+      b.tri([gX1, gY0, gZ0], [gX0, gY0, gZ0], [gX1, gY1, gZ0], STEEL_DARK, SURF.metal);
+      b.tri([gX1, gY0, -gZ1], [gX0, gY0, -gZ1], [gX1, gY1, -gZ1], STEEL_DARK, SURF.metal);
+      b.tri([gX0, gY0, -gZ0], [gX1, gY0, -gZ0], [gX1, gY1, -gZ0], STEEL_DARK, SURF.metal);
+      b.quadMirroredZ([gX0, gY0, gZ0], [gX0, gY0, gZ1], [gX1, gY1, gZ1], [gX1, gY1, gZ0], STEEL, SURF.metal);
     }
 
     // Framed equipment bays: recessed dark backing + 3 aluminum shutter bays + central pump panel detail
@@ -1410,36 +1473,39 @@ function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, 
     quadRearX(b, xBack - 0.005, chassisTopY + 0.08, chassisTopY + 0.30, 0, spec.width * 0.88, 0xf2c629, SURF.paintFixed);
     if (spec.rearFlashers === 'red-pair') {
       for (const s of [-0.72, 0.72]) {
-        quadRearX(g, xBack - 0.012, appTop - 0.24, appTop - 0.08, s * appHalfW, 0.28, GLOW_TAIL, SURF.matte);
+        quadRearX(e, xBack - 0.012, appTop - 0.24, appTop - 0.08, s * appHalfW, 0.28, GLOW_TAIL, SURF.matte);
       }
     }
 
-    // Flush dark wheel-well arch on front axle + continuous tandem wheel-well cutout on rear bogie!
-    const fireWall: SideWallProfile = {
-      yBot: spec.groundClearance,
-      yMid: chassisTopY - 0.16,
-      yTop: appTop,
-      hwBot: appHalfW,
-      hwMid: appHalfW,
-      hwTop: appHalfW,
-    };
-    addWheelArches(b, spec, detail, fireWall, { axles: [spec.axles[spec.axles.length - 1]], flareLip: false });
+    // Flush dark wheel-well arch on front cab axle (using true cabWall!) + full-height tandem wheel-well cutout on rear bogie
+    addWheelArches(b, spec, detail, cabWall, { axles: [spec.axles[spec.axles.length - 1]], flareLip: false, wellOffset: 0.015 });
     if (detail !== 'low') {
-      const zWell = appHalfW + 0.006;
+      const zWell = appHalfW + 0.015;
       const xBogie0 = spec.axles[0] - spec.wheelRadius - 0.08;
       const xBogie1 = spec.axles[1] + spec.wheelRadius + 0.08;
       b.quadMirroredZ(
-        [xBogie0, chassisTopY - 0.16, zWell],
-        [xBogie1, chassisTopY - 0.16, zWell],
+        [xBogie0, appBotY, zWell],
+        [xBogie1, appBotY, zWell],
         [xBogie1 - 0.12, spec.wheelRadius * 2 + 0.04, zWell],
         [xBogie0 + 0.12, spec.wheelRadius * 2 + 0.04, zWell],
         DARK_UNDER,
         SURF.rubber,
       );
     }
-    addLivery(b, spec, appRearX + 0.06, xCabFront - 0.18, cabWall, detail);
+    // Split fire-stripe cleanly across apparatus (hugging appHalfW + 0.008) and cab (hugging cabWall + 0.008), behind wheel wells (+0.015)
+    const fStripeY0 = cabWall.yMid + (cabWall.yTop - cabWall.yMid) * 0.32;
+    const fStripeY1 = fStripeY0 + 0.16;
+    b.quadMirroredZ(
+      [appRearX + 0.06, fStripeY0, appHalfW + 0.008],
+      [appFrontX - 0.06, fStripeY0, appHalfW + 0.008],
+      [appFrontX - 0.06, fStripeY1, appHalfW + 0.008],
+      [appRearX + 0.06, fStripeY1, appHalfW + 0.008],
+      0xf4f6fa,
+      SURF.paintFixed,
+    );
+    addLivery(b, spec, xCabRear + 0.06, xCabFront - 0.24, cabWall, detail);
 
-    addRoofAccessories(b, g, spec.roofAccessories, {
+    addRoofAccessories(b, g, e, spec.roofAccessories, {
       roofTopY: cabRoofTop,
       crownH,
       xRearRoof: xCabRear + 0.18,
@@ -1507,17 +1573,17 @@ function buildHeavyTruckBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, 
     }
     // Rear-facing amber work lamps on top corners of headboard
     for (const s of [-0.62, 0.62]) {
-      quadRearX(g, hbX - 0.128, hbTop - 0.18, hbTop - 0.05, s * (halfW * 0.80), 0.22, GLOW_AMBER, SURF.matte);
+      quadRearX(e, hbX - 0.128, hbTop - 0.18, hbTop - 0.05, s * (halfW * 0.80), 0.22, GLOW_AMBER, SURF.matte);
     }
 
-    addRoofAccessories(b, g, spec.roofAccessories, {
+    addRoofAccessories(b, g, e, spec.roofAccessories, {
       roofTopY: cabRoofTop, crownH, xRearRoof: xCabRear + 0.15, xFrontRoof: xCabFront - 0.20, hwRoof: halfW * 0.86,
     }, detail);
   }
 }
 
 /** Archetype 2: Buses & Coaches (urban bus, conventional-nose schoolbus, double-decker tourbus). */
-function buildBusBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
+function buildBusBody(b: MeshBuilder, g: MeshBuilder, e: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
   const halfL = spec.length * 0.5;
   const halfW = spec.width * 0.5;
   const xRear = -halfL;
@@ -1596,11 +1662,11 @@ function buildBusBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail:
   }
 
   addLivery(b, spec, xRear + 0.25, noseStart - 0.15, busWall, detail);
-  // Discreet wheel wells + flush arches on all buses (schoolbus front wheel is inside narrower hood)
+  // Discreet wheel wells + flush arches on all buses (elevated above side livery stripe for clean profile cutouts)
   if (isSchool) {
-    addWheelArches(b, spec, detail, busWall, { axles: [spec.axles[0]], flareLip: false });
+    addWheelArches(b, spec, detail, busWall, { axles: [spec.axles[0]], flareLip: false, wellOffset: 0.015 });
   } else {
-    addWheelArches(b, spec, detail, busWall, { flareLip: false });
+    addWheelArches(b, spec, detail, busWall, { flareLip: false, wellOffset: 0.015 });
   }
 
   const frontHalfW = isSchool ? halfW * 0.78 : halfW * 0.95;
@@ -1629,7 +1695,7 @@ function buildBusBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail:
   });
 
   addSideMirrors(b, xCabFront - 0.15, yBelt + 0.28, halfW * 0.98, 1.4, detail);
-  addRoofAccessories(b, g, spec.roofAccessories, {
+  addRoofAccessories(b, g, e, spec.roofAccessories, {
     roofTopY: spec.roofY,
     crownH,
     xRearRoof: xRear + 0.12,
@@ -1639,7 +1705,7 @@ function buildBusBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail:
 }
 
 /** Archetype 3: Vans & Modular Ambulances. */
-function buildVanBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
+function buildVanBody(b: MeshBuilder, g: MeshBuilder, e: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
   const halfL = spec.length * 0.5;
   const halfW = spec.width * 0.5;
   const xRear = -halfL;
@@ -1740,12 +1806,12 @@ function buildVanBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail:
       for (const s of [-0.72, 0.72]) {
         const cz = s * halfW;
         const hwF = 0.12;
-        g.quad([xf0, fY0, cz + hwF], [xf0, fY0, cz - hwF], [xf1, fY1, cz - hwF], [xf1, fY1, cz + hwF], GLOW_TAIL, SURF.matte);
-        g.quad([xr0, fY0, cz - hwF], [xr0, fY0, cz + hwF], [xr1, fY1, cz + hwF], [xr1, fY1, cz - hwF], GLOW_TAIL, SURF.matte);
+        e.quad([xf0, fY0, cz + hwF], [xf0, fY0, cz - hwF], [xf1, fY1, cz - hwF], [xf1, fY1, cz + hwF], GLOW_TAIL, SURF.matte);
+        e.quad([xr0, fY0, cz - hwF], [xr0, fY0, cz + hwF], [xr1, fY1, cz + hwF], [xr1, fY1, cz - hwF], GLOW_TAIL, SURF.matte);
       }
     }
 
-    addRoofAccessories(b, g, spec.roofAccessories, {
+    addRoofAccessories(b, g, e, spec.roofAccessories, {
       roofTopY: cabRoof,
       crownH,
       xRearRoof: xCabRear + 0.08,
@@ -1816,7 +1882,7 @@ function buildVanBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail:
     lightZ: halfW * 0.80,
   });
   addSideMirrors(b, xCowl - 0.20, yBelt + 0.12, halfW * 0.96, 1.15, detail);
-  addWheelArches(b, spec, detail, vanWall);
+  addWheelArches(b, spec, detail, vanWall, { wellOffset: isAmb ? 0.012 : undefined });
 }
 
 /** Archetype 4: Pickup Truck (continuous dark rocker cladding, clean corner butt joints, SURF.rubber bed rails). */
@@ -1941,7 +2007,7 @@ function buildPickupBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, deta
 }
 
 /** Archetype 5: Passenger Cars (sedan, hatch, suv, vintage, taxi, police, hearse). */
-function buildPassengerBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
+function buildPassengerBody(b: MeshBuilder, g: MeshBuilder, e: MeshBuilder, spec: VehicleSpec, detail: AssetDetail) {
   const halfL = spec.length * 0.5;
   const halfW = spec.width * 0.5;
   const xRear = -halfL;
@@ -2087,7 +2153,7 @@ function buildPassengerBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, d
   // Keep cars with heavy accessories (rack/pushbar/tailfins/taxi) crisp with dark wheel wells; pure silhouettes get full 3D flare lip
   const useFlareLip = !spec.pushBar && !spec.tailfins && spec.roofAccessories.length === 0;
   addWheelArches(b, spec, detail, wall, { flareLip: useFlareLip });
-  addRoofAccessories(b, g, spec.roofAccessories, {
+  addRoofAccessories(b, g, e, spec.roofAccessories, {
     roofTopY: spec.roofY,
     crownH,
     xRearRoof: xGhRear + spec.rearRake,
@@ -2100,22 +2166,23 @@ function buildPassengerBody(b: MeshBuilder, g: MeshBuilder, spec: VehicleSpec, d
 export function buildFourWheeler(spec: VehicleSpec, detail: AssetDetail = 'high'): AssetBuildResult {
   const b = new MeshBuilder();
   const g = new MeshBuilder();
+  const e = new MeshBuilder();
 
   addWheels(b, spec, detail);
 
   if (spec.bodyKind === 'cargo' || spec.bodyKind === 'garbage' || spec.bodyKind === 'dump' || spec.bodyKind === 'fire' || spec.bodyKind === 'tow') {
-    buildHeavyTruckBody(b, g, spec, detail);
+    buildHeavyTruckBody(b, g, e, spec, detail);
   } else if (spec.bodyKind === 'bus' || spec.bodyKind === 'schoolbus' || spec.bodyKind === 'tourbus') {
-    buildBusBody(b, g, spec, detail);
+    buildBusBody(b, g, e, spec, detail);
   } else if (spec.bodyKind === 'van' || spec.bodyKind === 'ambulance') {
-    buildVanBody(b, g, spec, detail);
+    buildVanBody(b, g, e, spec, detail);
   } else if (spec.bodyKind === 'pickup') {
     buildPickupBody(b, g, spec, detail);
   } else {
-    buildPassengerBody(b, g, spec, detail);
+    buildPassengerBody(b, g, e, spec, detail);
   }
 
-  return finalizeAsset(spec.id, spec.label, 'vehicles', b, g);
+  return finalizeAsset(spec.id, spec.label, 'vehicles', b, g, e);
 }
 
 /**

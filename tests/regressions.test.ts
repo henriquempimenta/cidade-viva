@@ -255,7 +255,7 @@ describe('câmera não altera a simulação (determinismo sob carga)', () => {
 
 describe('transição de interseção: reserva comprimento real', () => {
   it('ônibus não entra em faixa de saída onde só cabem 5 m livres', () => {
-    const w = run(world(17), 0.4);
+    const w = run(world(17), 1);
     const R = w.roads, T = w.traffic;
     // find two connected usable edges: e1 -> node -> e2
     let e1: REdge | null = null, e2: REdge | null = null, dir1 = 0, dir2 = 0;

@@ -1,5 +1,10 @@
 import { PED_FLAG_UMBRELLA, PED_FLAG_WAITING, PED_STRIDE } from '../shared/constants';
+import {
+  edgeHalfWidth, sampleRoadSurfaceY, sampleUnderpassWalkY, SIDEWALK_WIDTH,
+  UNDERPASS_DEPTH, UNDERPASS_FLAT_HALF, UNDERPASS_HALF_LEN,
+} from '../shared/roadGeom';
 import { MinHeap } from './heap';
+import type { RoadNetwork } from './roads';
 import type { Terrain } from './terrain';
 
 export const PED_FLAG_BIKE = 256;
@@ -171,6 +176,144 @@ export class Peds {
   remainingTime(i: number): number {
     if (!this.active[i]) return 0;
     return Number.isFinite(this.arrive[i]) ? Math.max(0, this.arrive[i] - this.time) : 0;
+  }
+
+  /**
+   * Reproject `ptsY` (subdividing collinear segments where needed) for ALL active pedestrians
+   * whose trajectory crosses a newly opened or updated rail underpass (`c.under`), so walkers
+   * already en route descend smoothly along the sunken ramp instead of walking in mid-air.
+   */
+  reprojectUnderpasses(roads: RoadNetwork) {
+    interface UnderZone {
+      ax: number; az: number; ux: number; uz: number; nx: number; nz: number;
+      hw: number; latMax: number; urban: boolean;
+      sCenter: number; halfLenNeg: number; halfLenPos: number; flatHalf: number; depth: number; ry: number;
+      minX: number; maxX: number; minZ: number; maxZ: number;
+    }
+    const zones: UnderZone[] = [];
+    let uMinX = Infinity, uMaxX = -Infinity, uMinZ = Infinity, uMaxZ = -Infinity;
+    for (const e of roads.edges) {
+      if (!e.alive || !e.underpasses?.length) continue;
+      const a = roads.nodes[e.a], b = roads.nodes[e.b];
+      if (!a || !b) continue;
+      const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz) || 1;
+      const ux = dx / len, uz = dz / len, nx = -uz, nz = ux;
+      const hw = edgeHalfWidth(e);
+      const urban = roads.hasSidewalk(e.id);
+      const latMax = hw + (urban ? SIDEWALK_WIDTH + 1.5 : 1.8);
+      for (const up of e.underpasses) {
+        const sCenter = up.t * e.len;
+        const halfLenNeg = up.halfLenNeg ?? UNDERPASS_HALF_LEN;
+        const halfLenPos = up.halfLenPos ?? UNDERPASS_HALF_LEN;
+        const flatHalf = up.flatHalf ?? UNDERPASS_FLAT_HALF;
+        const depth = up.depth ?? UNDERPASS_DEPTH;
+        const cx = a.x + ux * sCenter, cz = a.z + uz * sCenter;
+        // Include 12 m approach margin beyond both mouths so stale 10 m chords approaching the mouth are also conformed
+        const pad = Math.max(halfLenNeg, halfLenPos) + 12 + latMax + 2;
+        const zMinX = cx - pad, zMaxX = cx + pad, zMinZ = cz - pad, zMaxZ = cz + pad;
+        if (zMinX < uMinX) uMinX = zMinX; if (zMaxX > uMaxX) uMaxX = zMaxX;
+        if (zMinZ < uMinZ) uMinZ = zMinZ; if (zMaxZ > uMaxZ) uMaxZ = zMaxZ;
+        zones.push({
+          ax: a.x, az: a.z, ux, uz, nx, nz, hw, latMax, urban,
+          sCenter, halfLenNeg, halfLenPos, flatHalf, depth, ry: up.ry,
+          minX: zMinX, maxX: zMaxX, minZ: zMinZ, maxZ: zMaxZ,
+        });
+      }
+    }
+    if (!zones.length) return;
+
+    const meshGround = (gx: number, gz: number) => this.T.meshY(gx, gz);
+    const evalZoneY = (px: number, pz: number, curY: number): number | null => {
+      let bestY: number | null = null;
+      for (const z of zones) {
+        if (px < z.minX || px > z.maxX || pz < z.minZ || pz > z.maxZ) continue;
+        const rx = px - z.ax, rz = pz - z.az;
+        const s = rx * z.ux + rz * z.uz;
+        const u = s - z.sCenter;
+        if (u < -z.halfLenNeg - 12 || u > z.halfLenPos + 12) continue;
+        const across = Math.abs(rx * z.nx + rz * z.nz);
+        if (across > z.latMax) continue;
+        const cx = z.ax + z.ux * s, cz = z.az + z.uz * s;
+        const surfRoadY = sampleRoadSurfaceY(cx, cz, z.nx, z.nz, z.hw, meshGround);
+        // Never pull down walkers crossing an elevated viaduct overhead
+        if (curY > surfRoadY + 2.8) continue;
+        const wy = sampleUnderpassWalkY(
+          u, surfRoadY, meshGround(px, pz), z.ry,
+          z.halfLenNeg, z.halfLenPos, z.flatHalf, z.depth, z.urban,
+        );
+        if (bestY === null || wy < bestY) bestY = wy;
+      }
+      return bestY;
+    };
+
+    for (let i = 0; i < this.max; i++) {
+      if (!this.active[i]) continue;
+      if (this.maxX[i] < uMinX || this.minX[i] > uMaxX || this.maxZ[i] < uMinZ || this.minZ[i] > uMaxZ) continue;
+      const P = this.pts[i];
+      const C = this.cum[i];
+      if (!P || !C || P.length < 4) continue;
+      const nPts = P.length / 2;
+      const oldY = this.ptsY[i];
+      const getY = (idx: number) => (oldY ? oldY[idx] : (this.elevation ? this.elevation(P[idx * 2], P[idx * 2 + 1]) : Math.max(0.2, meshGround(P[idx * 2], P[idx * 2 + 1])) + 0.15));
+
+      // Held pedestrian: update its held elevation directly if inside an underpass
+      if (!Number.isFinite(this.arrive[i])) {
+        const ny = evalZoneY(this.x[i], this.z[i], this.y[i]);
+        if (ny !== null && Math.abs(ny - this.y[i]) > 0.01) {
+          this.y[i] = ny;
+          if (oldY) for (let k = 0; k < oldY.length; k++) oldY[k] = ny;
+          else this.ptsY[i] = new Float32Array(nPts).fill(ny);
+        }
+        continue;
+      }
+
+      const newP: number[] = [];
+      const newY: number[] = [];
+      let changed = false;
+
+      for (let k = 0; k < nPts - 1; k++) {
+        const ax = P[k * 2], az = P[k * 2 + 1], ya = getY(k);
+        const bx = P[(k + 1) * 2], bz = P[(k + 1) * 2 + 1], yb = getY(k + 1);
+        const sMinX = Math.min(ax, bx), sMaxX = Math.max(ax, bx);
+        const sMinZ = Math.min(az, bz), sMaxZ = Math.max(az, bz);
+        let hitsZone = false;
+        for (const z of zones) {
+          if (sMaxX >= z.minX && sMinX <= z.maxX && sMaxZ >= z.minZ && sMinZ <= z.maxZ) { hitsZone = true; break; }
+        }
+        const segLen = Math.hypot(bx - ax, bz - az);
+        const sub = hitsZone ? Math.max(1, Math.ceil(segLen / 1.0)) : 1;
+        for (let st = 0; st < sub; st++) {
+          const f = st / sub;
+          const px = ax + (bx - ax) * f, pz = az + (bz - az) * f;
+          const pyOrig = ya + (yb - ya) * f;
+          const ny = hitsZone ? evalZoneY(px, pz, pyOrig) : null;
+          const py = ny !== null ? ny : pyOrig;
+          if (ny !== null && Math.abs(ny - pyOrig) > 0.01) changed = true;
+          newP.push(px, pz);
+          newY.push(py);
+        }
+      }
+      // Final endpoint
+      const lx = P[(nPts - 1) * 2], lz = P[(nPts - 1) * 2 + 1], lyOrig = getY(nPts - 1);
+      const lny = evalZoneY(lx, lz, lyOrig);
+      const ly = lny !== null ? lny : lyOrig;
+      if (lny !== null && Math.abs(lny - lyOrig) > 0.01) changed = true;
+      newP.push(lx, lz);
+      newY.push(ly);
+
+      if (!changed) continue;
+      const mNew = newY.length;
+      const nextP = new Float32Array(newP);
+      const nextY = new Float32Array(newY);
+      const nextC = new Float32Array(mNew);
+      for (let k = 1; k < mNew; k++) {
+        nextC[k] = nextC[k - 1] + Math.hypot(nextP[k * 2] - nextP[k * 2 - 2], nextP[k * 2 + 1] - nextP[k * 2 - 1]);
+      }
+      this.pts[i] = nextP;
+      this.ptsY[i] = nextY;
+      this.cum[i] = nextC;
+      this.pose(i);
+    }
   }
 
   step(dt: number) {

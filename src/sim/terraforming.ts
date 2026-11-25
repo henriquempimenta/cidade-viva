@@ -1,8 +1,20 @@
 import { RoadClass } from '../shared/constants';
-import { edgeHalfWidth, hasUrbanSidewalk, nodeRenderRadius, SIDEWALK_WIDTH } from '../shared/roadGeom';
+import { edgeHalfWidth, nodeRenderRadius, SIDEWALK_WIDTH } from '../shared/roadGeom';
 import { clamp, lerp, smoothstep } from '../shared/rng';
 import type { REdge, RNode, RoadNetwork } from './roads';
 import type { Terrain } from './terrain';
+
+/**
+ * Compute geotechnical embankment/cut slope blend width proportional to actual vertical delta `dh`.
+ * - Cuts into hillsides (`isFill = false`) hold a steeper ~1:1.65 batter.
+ * - Fill embankments (`isFill = true`) spread on a gentler ~1:2.05 slope.
+ * Bounded to `[minW, maxW]` (default `6..26 m`) to avoid both vertical cliffs on steep hillsides
+ * and overly wide earthworks on nearly flat ground.
+ */
+export function geotechnicalBlendWidth(dh: number, isFill = false, minW = 6, maxW = 26): number {
+  const ratio = isFill ? 2.05 : 1.65;
+  return clamp(Math.abs(dh) * ratio + 3.5, minW, maxW);
+}
 
 /**
  * Deterministic terrain grading (cut-and-fill terraforming) under at-grade roads,
@@ -54,7 +66,7 @@ export class Terraforming {
     return false;
   }
 
-  /** Grade terrain along an at-grade road edge (carriageway + sidewalk/shoulder + smoothstep embankment). */
+  /** Grade terrain along an at-grade road edge (carriageway + sidewalk/shoulder + geotechnical cut/fill slope). */
   gradeRoad(e: REdge, roads: RoadNetwork): { changed: boolean; cx: number; cz: number; radius: number } {
     const na = roads.nodes[e.a], nb = roads.nodes[e.b];
     if (!e.alive || !na || !nb || e.bridge || e.elevated || e.tunnel || e.deck !== undefined) {
@@ -64,10 +76,12 @@ export class Terraforming {
     const { hres, step } = T;
     const minDry = T.seaLevel + 0.35;
     const hw = edgeHalfWidth(e);
-    const urban = hasUrbanSidewalk(e) || (e.cls === RoadClass.Highway && (na.edges.length >= 3 || nb.edges.length >= 3));
-    const flatW = urban ? hw + SIDEWALK_WIDTH + 1.5 : hw + 1.5;
-    const blendW = 18;
-    const maxR = flatW + blendW;
+    const urban = roads.hasSidewalk(e.id);
+    // Keep the level roadbed wide enough to clear carriageway + sidewalks without interior heightmap ridges,
+    // while scaling the outer cut/fill embankment slope dynamically via geotechnicalBlendWidth().
+    const flatW = urban ? hw + SIDEWALK_WIDTH + 2.0 : hw + 2.0;
+    const maxBlendW = 26;
+    const searchR = flatW + maxBlendW;
 
     const steps = Math.max(2, Math.ceil(e.len / 10));
     const ys = new Float32Array(steps + 1);
@@ -86,12 +100,13 @@ export class Terraforming {
 
     const dx = nb.x - na.x, dz = nb.z - na.z;
     const l2 = dx * dx + dz * dz || 1;
-    const i0 = Math.max(0, Math.floor((Math.min(na.x, nb.x) - maxR) / step));
-    const i1 = Math.min(hres - 1, Math.ceil((Math.max(na.x, nb.x) + maxR) / step));
-    const j0 = Math.max(0, Math.floor((Math.min(na.z, nb.z) - maxR) / step));
-    const j1 = Math.min(hres - 1, Math.ceil((Math.max(na.z, nb.z) + maxR) / step));
+    const i0 = Math.max(0, Math.floor((Math.min(na.x, nb.x) - searchR) / step));
+    const i1 = Math.min(hres - 1, Math.ceil((Math.max(na.x, nb.x) + searchR) / step));
+    const j0 = Math.max(0, Math.floor((Math.min(na.z, nb.z) - searchR) / step));
+    const j1 = Math.min(hres - 1, Math.ceil((Math.max(na.z, nb.z) + searchR) / step));
 
     let changed = false;
+    let maxUsedR = flatW + 6;
     for (let j = j0; j <= j1; j++) {
       const gz = j * step;
       for (let i = i0; i <= i1; i++) {
@@ -99,12 +114,20 @@ export class Terraforming {
         const t = clamp(((gx - na.x) * dx + (gz - na.z) * dz) / l2, 0, 1);
         const px = na.x + dx * t, pz = na.z + dz * t;
         const d = Math.hypot(gx - px, gz - pz);
-        if (d >= maxR) continue;
+        if (d >= searchR) continue;
         const sf = t * steps;
         const si = Math.min(steps - 1, Math.floor(sf));
         const targetY = lerp(ys[si], ys[si + 1], sf - si);
-        const u = d <= flatW ? 1 : 1 - smoothstep(flatW, maxR, d);
-        if (this.gradeCell(i, j, targetY, u, 1.0)) changed = true;
+        const oldH = T.heights[j * hres + i];
+        const dh = targetY - oldH;
+        const blendW = geotechnicalBlendWidth(dh, dh > 0, 6, maxBlendW);
+        const cellMaxR = flatW + blendW;
+        if (d >= cellMaxR) continue;
+        const u = d <= flatW ? 1 : 1 - smoothstep(flatW, cellMaxR, d);
+        if (this.gradeCell(i, j, targetY, u, 1.0)) {
+          changed = true;
+          if (cellMaxR > maxUsedR) maxUsedR = cellMaxR;
+        }
       }
     }
 
@@ -112,7 +135,7 @@ export class Terraforming {
       changed,
       cx: (na.x + nb.x) * 0.5,
       cz: (na.z + nb.z) * 0.5,
-      radius: e.len * 0.5 + maxR,
+      radius: e.len * 0.5 + maxUsedR,
     };
   }
 
@@ -130,9 +153,9 @@ export class Terraforming {
     const T = this.terrain;
     const { hres, step } = T;
     const minDry = T.seaLevel + 0.35;
-    const r = Math.max(n.radius, nodeRenderRadius(n.control, surf)) + 2.5;
-    const blendW = 16;
-    const maxR = r + blendW;
+    const r = Math.max(n.radius, nodeRenderRadius(n.control, surf)) + 3.0;
+    const maxBlendW = 24;
+    const searchR = r + maxBlendW;
 
     let sumY = Math.max(minDry, T.heightAt(n.x, n.z)) * 2;
     let cnt = 2;
@@ -146,24 +169,33 @@ export class Terraforming {
     }
     const targetY = Math.max(minDry, sumY / cnt);
 
-    const i0 = Math.max(0, Math.floor((n.x - maxR) / step));
-    const i1 = Math.min(hres - 1, Math.ceil((n.x + maxR) / step));
-    const j0 = Math.max(0, Math.floor((n.z - maxR) / step));
-    const j1 = Math.min(hres - 1, Math.ceil((n.z + maxR) / step));
+    const i0 = Math.max(0, Math.floor((n.x - searchR) / step));
+    const i1 = Math.min(hres - 1, Math.ceil((n.x + searchR) / step));
+    const j0 = Math.max(0, Math.floor((n.z - searchR) / step));
+    const j1 = Math.min(hres - 1, Math.ceil((n.z + searchR) / step));
 
     let changed = false;
+    let maxUsedR = r + 6;
     for (let j = j0; j <= j1; j++) {
       const gz = j * step;
       for (let i = i0; i <= i1; i++) {
         const gx = i * step;
         const d = Math.hypot(gx - n.x, gz - n.z);
-        if (d >= maxR) continue;
-        const u = d <= r ? 1 : 1 - smoothstep(r, maxR, d);
-        if (this.gradeCell(i, j, targetY, u, 1.3)) changed = true;
+        if (d >= searchR) continue;
+        const oldH = T.heights[j * hres + i];
+        const dh = targetY - oldH;
+        const blendW = geotechnicalBlendWidth(dh, dh > 0, 6, maxBlendW);
+        const cellMaxR = r + blendW;
+        if (d >= cellMaxR) continue;
+        const u = d <= r ? 1 : 1 - smoothstep(r, cellMaxR, d);
+        if (this.gradeCell(i, j, targetY, u, 1.3)) {
+          changed = true;
+          if (cellMaxR > maxUsedR) maxUsedR = cellMaxR;
+        }
       }
     }
 
-    return { changed, cx: n.x, cz: n.z, radius: maxR };
+    return { changed, cx: n.x, cz: n.z, radius: maxUsedR };
   }
 
   /** Grade terrain along a ground-level railway polyline (skipping elevated lines and bridge spans). */
@@ -172,9 +204,9 @@ export class Terraforming {
     const T = this.terrain;
     const { hres, step } = T;
     const minDry = T.seaLevel + 0.35;
-    const flatW = tracks * 2.1 + 2.0;
-    const blendW = 18;
-    const maxR = flatW + blendW;
+    const flatW = tracks * 2.1 + 1.6;
+    const maxBlendW = 26;
+    const searchR = flatW + maxBlendW;
 
     let changed = false;
     for (let seg = 0; seg < xs.length - 1; seg++) {
@@ -189,10 +221,10 @@ export class Terraforming {
 
       const dx = bx - ax, dz = bz - az;
       const l2 = dx * dx + dz * dz || 1;
-      const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - maxR) / step));
-      const i1 = Math.min(hres - 1, Math.ceil((Math.max(ax, bx) + maxR) / step));
-      const j0 = Math.max(0, Math.floor((Math.min(az, bz) - maxR) / step));
-      const j1 = Math.min(hres - 1, Math.ceil((Math.max(az, bz) + maxR) / step));
+      const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - searchR) / step));
+      const i1 = Math.min(hres - 1, Math.ceil((Math.max(ax, bx) + searchR) / step));
+      const j0 = Math.max(0, Math.floor((Math.min(az, bz) - searchR) / step));
+      const j1 = Math.min(hres - 1, Math.ceil((Math.max(az, bz) + searchR) / step));
 
       for (let j = j0; j <= j1; j++) {
         const gz = j * step;
@@ -201,11 +233,16 @@ export class Terraforming {
           const t = clamp(((gx - ax) * dx + (gz - az) * dz) / l2, 0, 1);
           const px = ax + dx * t, pz = az + dz * t;
           const d = Math.hypot(gx - px, gz - pz);
-          if (d >= maxR) continue;
+          if (d >= searchR) continue;
           const trackY = lerp(ay, by, t);
-          if (trackY - Math.max(0, T.heights[j * hres + i]) > 3.5) continue;
+          const oldH = T.heights[j * hres + i];
+          if (trackY - Math.max(0, oldH) > 3.5) continue;
           const targetY = Math.max(minDry, trackY - 0.22);
-          const u = d <= flatW ? 1 : 1 - smoothstep(flatW, maxR, d);
+          const dh = targetY - oldH;
+          const blendW = geotechnicalBlendWidth(dh, dh > 0, 6, maxBlendW);
+          const cellMaxR = flatW + blendW;
+          if (d >= cellMaxR) continue;
+          const u = d <= flatW ? 1 : 1 - smoothstep(flatW, cellMaxR, d);
           if (this.gradeCell(i, j, targetY, u, 1.1)) changed = true;
         }
       }
@@ -213,7 +250,7 @@ export class Terraforming {
     return changed;
   }
 
-  /** Grade a level terrace under an oriented building / station footprint. */
+  /** Grade a level terrace under an oriented building / station footprint with proportional geotechnical slopes. */
   gradeBuilding(x: number, z: number, angle: number, w: number, d: number): { changed: boolean; radius: number } {
     const T = this.terrain;
     if (T.isWater(x, z)) return { changed: false, radius: 0 };
@@ -232,18 +269,22 @@ export class Terraforming {
     }
     const padY = Math.max(minDry, sum / cnt);
 
-    const hw = w * 0.5 + 3.0;
-    const hd = d * 0.5 + 3.0;
-    const blendW = Math.max(w, d) > 35 ? 24 : 16;
-    const maxR = Math.hypot(hw + blendW, hd + blendW);
+    // Tight footprint terrace (+1.4 m yard margin for ordinary lots, +2.2 m for large complexes)
+    const large = Math.max(w, d) > 35;
+    const margin = large ? 2.2 : 1.4;
+    const hw = w * 0.5 + margin;
+    const hd = d * 0.5 + margin;
+    const maxBlendW = large ? 26 : 22;
+    const searchR = Math.hypot(hw + maxBlendW, hd + maxBlendW);
 
-    const i0 = Math.max(0, Math.floor((x - maxR) / step));
-    const i1 = Math.min(hres - 1, Math.ceil((x + maxR) / step));
-    const j0 = Math.max(0, Math.floor((z - maxR) / step));
-    const j1 = Math.min(hres - 1, Math.ceil((z + maxR) / step));
+    const i0 = Math.max(0, Math.floor((x - searchR) / step));
+    const i1 = Math.min(hres - 1, Math.ceil((x + searchR) / step));
+    const j0 = Math.max(0, Math.floor((z - searchR) / step));
+    const j1 = Math.min(hres - 1, Math.ceil((z + searchR) / step));
 
     let changed = false;
-    const padWeight = Math.max(w, d) > 35 ? 2.4 : 1.4;
+    let maxUsedBlend = 6;
+    const padWeight = large ? 2.2 : 1.3;
     for (let j = j0; j <= j1; j++) {
       const gz = j * step;
       for (let i = i0; i <= i1; i++) {
@@ -254,11 +295,18 @@ export class Terraforming {
         const ex = Math.max(0, Math.abs(lx) - hw);
         const ez = Math.max(0, Math.abs(lz) - hd);
         const dist = Math.hypot(ex, ez);
+        if (dist >= maxBlendW) continue;
+        const oldH = T.heights[j * hres + i];
+        const dh = padY - oldH;
+        const blendW = geotechnicalBlendWidth(dh, dh > 0, 6, maxBlendW);
         if (dist >= blendW) continue;
         const u = dist <= 0 ? 1 : 1 - smoothstep(0, blendW, dist);
-        if (this.gradeCell(i, j, padY, u, padWeight)) changed = true;
+        if (this.gradeCell(i, j, padY, u, padWeight)) {
+          changed = true;
+          if (blendW > maxUsedBlend) maxUsedBlend = blendW;
+        }
       }
     }
-    return { changed, radius: maxR };
+    return { changed, radius: Math.hypot(hw + maxUsedBlend, hd + maxUsedBlend) };
   }
 }

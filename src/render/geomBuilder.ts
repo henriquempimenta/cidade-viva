@@ -20,6 +20,59 @@ export class GB {
   }
   private n(x: number, y: number, z: number) { this.nor.push(x * this.ca - z * this.sa, y, x * this.sa + z * this.ca); }
 
+  /** Zero-allocation upward-facing quad in world coordinates (fast path for road ribbons & junctions). */
+  quadUp(
+    ax: number, ay: number, az: number,
+    bx: number, by: number, bz: number,
+    cx: number, cy: number, cz: number,
+    dx: number, dy: number, dz: number,
+    c: THREE.Color,
+  ) {
+    const pos = this.pos, nor = this.nor, col = this.col, uv = this.uv, win = this.win;
+    const r = c.r, g = c.g, b = c.b;
+    const w0 = this.winParams[0], w1 = this.winParams[1], w2 = this.winParams[2];
+    if (this.tx === 0 && this.ty === 0 && this.tz === 0 && this.ca === 1 && this.sa === 0) {
+      pos.push(ax, ay, az, bx, by, bz, cx, cy, cz, ax, ay, az, cx, cy, cz, dx, dy, dz);
+    } else {
+      const ca = this.ca, sa = this.sa, tx = this.tx, ty = this.ty, tz = this.tz;
+      const axw = tx + ax * ca - az * sa, azw = tz + ax * sa + az * ca, ayw = ty + ay;
+      const bxw = tx + bx * ca - bz * sa, bzw = tz + bx * sa + bz * ca, byw = ty + by;
+      const cxw = tx + cx * ca - cz * sa, czw = tz + cx * sa + cz * ca, cyw = ty + cy;
+      const dxw = tx + dx * ca - dz * sa, dzw = tz + dx * sa + dz * ca, dyw = ty + dy;
+      pos.push(axw, ayw, azw, bxw, byw, bzw, cxw, cyw, czw, axw, ayw, azw, cxw, cyw, czw, dxw, dyw, dzw);
+    }
+    nor.push(0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0);
+    col.push(r, g, b, r, g, b, r, g, b, r, g, b, r, g, b, r, g, b);
+    uv.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    win.push(w0, w1, w2, 0, w0, w1, w2, 0, w0, w1, w2, 0, w0, w1, w2, 0, w0, w1, w2, 0, w0, w1, w2, 0);
+  }
+
+  /** Zero-allocation upward-facing single triangle in world coordinates. */
+  triUp(
+    ax: number, ay: number, az: number,
+    bx: number, by: number, bz: number,
+    cx: number, cy: number, cz: number,
+    c: THREE.Color,
+  ) {
+    const pos = this.pos, nor = this.nor, col = this.col, uv = this.uv, win = this.win;
+    const r = c.r, g = c.g, b = c.b;
+    const w0 = this.winParams[0], w1 = this.winParams[1], w2 = this.winParams[2];
+    if (this.tx === 0 && this.ty === 0 && this.tz === 0 && this.ca === 1 && this.sa === 0) {
+      pos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+    } else {
+      const ca = this.ca, sa = this.sa, tx = this.tx, ty = this.ty, tz = this.tz;
+      pos.push(
+        tx + ax * ca - az * sa, ty + ay, tz + ax * sa + az * ca,
+        tx + bx * ca - bz * sa, ty + by, tz + bx * sa + bz * ca,
+        tx + cx * ca - cz * sa, ty + cy, tz + cx * sa + cz * ca,
+      );
+    }
+    nor.push(0, 1, 0, 0, 1, 0, 0, 1, 0);
+    col.push(r, g, b, r, g, b, r, g, b);
+    uv.push(0, 0, 0, 0, 0, 0);
+    win.push(w0, w1, w2, 0, w0, w1, w2, 0, w0, w1, w2, 0);
+  }
+
   /** triangle-pair quad, p0..p3 counter-clockwise seen from outside */
   quad(p: number[][], normal: number[], c: THREE.Color, wtype = 0, uvs?: number[][]) {
     const idx = [0, 1, 2, 0, 2, 3];

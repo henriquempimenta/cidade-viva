@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { WorldInit } from '../shared/protocol';
+import { sampleCutsMinY } from '../shared/roadGeom';
 import { Noise2D } from '../shared/rng';
 import { U } from './uniforms';
 
@@ -77,7 +78,7 @@ export class TerrainView {
     const nor = this.geo.attributes.normal as THREE.BufferAttribute;
     const col = new Float32Array(pos.count * 3);
     const grass = new THREE.Color(0x7da653), grass2 = new THREE.Color(0x9bb85f), dry = new THREE.Color(0xb6b071);
-    const forestC = new THREE.Color(0x4f7a3a), rock = new THREE.Color(0x8b8478), sand = new THREE.Color(0xd9c690), bed = new THREE.Color(0x8a7a5c);
+    const forestC = new THREE.Color(0x4f7a3a), rock = new THREE.Color(0x8b8478), bankEarth = new THREE.Color(0x8f8266), sand = new THREE.Color(0xd9c690), bed = new THREE.Color(0x8a7a5c);
     const wet = new THREE.Color(0x5f8a4a), snowC = new THREE.Color(0xf2f4f8);
     const c = new THREE.Color();
     for (let i = 0; i < pos.count; i++) {
@@ -93,6 +94,8 @@ export class TerrainView {
       if (flood[k]) c.lerp(wet, 0.5);
       if (h < 2.2) c.lerp(sand, Math.min(1, (2.2 - h) / 1.6));
       if (h < 0) c.copy(bed);
+      // Natural geotechnical embankment / cut-slope earth-to-rock shading on moderate-to-steep slopes
+      if (ny < 0.92 && h >= 0.4) c.lerp(bankEarth, Math.min(0.65, (0.92 - ny) * 4.5));
       c.lerp(rock, Math.min(1, Math.max(0, (0.86 - ny) * 4)));
       if (h > 95) c.lerp(snowC, Math.min(1, (h - 95) / 20));
       col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
@@ -110,6 +113,14 @@ export class TerrainView {
     return u + v <= 1 ? ha + (hd - ha) * u + (hb - ha) * v : hc + (hb - hc) * (1 - u) + (hd - hc) * (1 - v);
   }
 
+  /** Rendered fine-resolution mesh replacing coarse terrain cells crossed by active `setCuts()` trenches. */
+  get cutPatch(): THREE.Mesh | null { return this.patch; }
+
+  /** Rendered terrain elevation at (x, z) including any active `setCuts` excavations (always <= meshY). */
+  cutY(x: number, z: number): number {
+    return sampleCutsMinY(x, z, this.meshY(x, z), this.lastCuts);
+  }
+
   /**
    * Carve road cuts into the terrain. Each cut is a centre line with the floor height of the road and a
    * half width. The coarse cells it touches are removed from the terrain mesh and replaced by a fine patch
@@ -124,10 +135,10 @@ export class TerrainView {
     const gx = hres - 1;
     if (!this.fullIndex) this.fullIndex = (this.geo.index as THREE.BufferAttribute).clone();
     if (this.patch) { this.mesh.remove(this.patch); this.patch.geometry.dispose(); this.patch = null; }
-    // 1. cells touched by any cut (with margin for the sloped edge)
+    // 1. cells touched by any cut (with generous margin so outer borders never bridge over internal walkways)
     const cells = new Set<number>();
     for (const c of cuts) {
-      const r = c.hw + 2;
+      const r = c.hw + 3.2;
       for (let k = 0; k + 3 < c.pts.length; k += 3) {
         const ax = c.pts[k], az = c.pts[k + 2], bx = c.pts[k + 3], bz = c.pts[k + 5];
         const L = Math.hypot(bx - ax, bz - az), n = Math.max(1, Math.ceil(L / (step * 0.25)));
@@ -166,7 +177,7 @@ export class TerrainView {
           const t = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L2));
           const d = Math.hypot(ax + dx * t - x, az + dz * t - z);
           if (d > c.hw + 1.6) continue;
-          const floor = ay + (by - ay) * t - 0.2;
+          const floor = ay + (by - ay) * t - 0.45;
           if (floor >= h) continue;
           // flat floor inside, a steep bank just outside (hidden behind the retaining walls)
           const f = d <= c.hw ? 1 : 1 - (d - c.hw) / 1.6;
@@ -176,13 +187,25 @@ export class TerrainView {
       }
       return [y, cut];
     };
+    const hasCell = (i: number, j: number) => i >= 0 && j >= 0 && i < gx && j < gx && cells.has(j * gx + i);
+    const isOuterBorder = (ci: number, cj: number, a: number, b: number): boolean => {
+      if (a === 0 && !hasCell(ci - 1, cj)) return true;
+      if (a === sub && !hasCell(ci + 1, cj)) return true;
+      if (b === 0 && !hasCell(ci, cj - 1)) return true;
+      if (b === sub && !hasCell(ci, cj + 1)) return true;
+      if (a === 0 && b === 0 && !hasCell(ci - 1, cj - 1)) return true;
+      if (a === sub && b === 0 && !hasCell(ci + 1, cj - 1)) return true;
+      if (a === 0 && b === sub && !hasCell(ci - 1, cj + 1)) return true;
+      if (a === sub && b === sub && !hasCell(ci + 1, cj + 1)) return true;
+      return false;
+    };
     for (const cell of cells) {
       const ci = cell % gx, cj = Math.floor(cell / gx);
       const base = pos.length / 3;
       for (let b = 0; b <= sub; b++) for (let a = 0; a <= sub; a++) {
         const x = (ci + a / sub) * step, z = (cj + b / sub) * step;
         const h = this.meshY(x, z);
-        const [y, cut] = (a === 0 || b === 0 || a === sub || b === sub) ? [h, 0] : carve(x, z, h);
+        const [y, cut] = isOuterBorder(ci, cj, a, b) ? [h, 0] : carve(x, z, h);
         pos.push(x, y, z);
         carved.push(cut);
         const u = a / sub, v = b / sub;

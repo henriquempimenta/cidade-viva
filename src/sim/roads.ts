@@ -1,5 +1,8 @@
 import { HOUR_SECONDS, LOT_SETBACK, ROAD_HALF_WIDTH, ROAD_LANES, ROAD_SPEED, RoadClass } from '../shared/constants';
-import { nodeRenderRadius } from '../shared/roadGeom';
+import {
+  computeUrbanSidewalkSet, edgeHalfWidth, nodeRenderRadius, sampleRoadSurfaceY, sampleUnderpassY,
+  UNDERPASS_DEPTH, UNDERPASS_FLAT_HALF, UNDERPASS_HALF_LEN,
+} from '../shared/roadGeom';
 import type { EdgeView, NodeView } from '../shared/protocol';
 import { MinHeap } from './heap';
 import { dijkstraTree, InlineBackend, runTreeJob, type RouteBackend, type RouteGraph } from './routeKernel';
@@ -28,6 +31,8 @@ export interface RNode {
 }
 
 export const DECK_CLEAR = 7.5, DECK_DEPTH = 8;
+/** Minimum bridge deck elevation for an intermediate node over water shared by consecutive bridge spans. */
+export const BRIDGE_WATER_DECK_Y = 6.5;
 
 export interface REdge {
   id: number; a: number; b: number;
@@ -50,6 +55,12 @@ export interface REdge {
   len: number;
   progress: number; // 1 = usable
   upgrading: boolean; upgradeTo?: Partial<REdge>; workP: number;
+  /** pavement surface wear 0..1 (accumulates daily with traffic, heavies and rain; reset by CityHall resurfacing) */
+  wear: number;
+  /** last wear value emitted in a WorldDiff (prevents visual diff spam) */
+  sentWear: number;
+  /** rail underpass trenches along this edge (`c.under`), driving depressed vehicle/pedestrian ramp elevation */
+  underpasses?: { t: number; ry: number; halfLenNeg: number; halfLenPos: number; flatHalf: number; depth: number }[];
   name: string;
   pts: number[];
   // traffic stats (per direction)
@@ -204,18 +215,67 @@ export class RoadNetwork {
     return n;
   }
 
+  /** True when a node sits over water and is shared by 2+ bridge spans with no at-grade land edge attached. */
+  isWaterBridgeNode(n: RNode): boolean {
+    if (!n || !n.alive || n.deck) return false;
+    const T = this.terrain;
+    const overWater = T.heightAt(n.x, n.z) < T.seaLevel + 0.5 || T.isWater(n.x, n.z);
+    if (!overWater) return false;
+    let bridges = 0;
+    for (const id of n.edges) {
+      const e = this.edges[id];
+      if (!e || !e.alive) continue;
+      if (!e.bridge && !e.elevated && e.deck === undefined) return false;
+      if (e.bridge) bridges++;
+    }
+    return bridges >= 2;
+  }
+
+  /** Compute ground or elevated bridge-deck Y for a road node. */
+  computeNodeY(n: RNode): number {
+    const groundY = Math.max(this.terrain.meshY(n.x, n.z), this.terrain.heightAt(n.x, n.z), 0.3) + 0.1;
+    if (this.isWaterBridgeNode(n)) return Math.max(groundY, n.y, BRIDGE_WATER_DECK_Y);
+    return groundY;
+  }
+
+  /** Synchronize a water bridge node's elevation (both raising on 2nd bridge span and lowering on span removal). */
+  private syncBridgeNodeHeight(n: RNode, skipEdgeId = -1) {
+    if (!n || !n.alive || n.deck) return;
+    const T = this.terrain;
+    const overWater = T.heightAt(n.x, n.z) < T.seaLevel + 0.5 || T.isWater(n.x, n.z);
+    if (!overWater) return;
+    const targetY = this.isWaterBridgeNode(n)
+      ? Math.max(n.y, BRIDGE_WATER_DECK_Y)
+      : Math.max(T.meshY(n.x, n.z), T.heightAt(n.x, n.z), 0.3) + 0.1;
+    if (Math.abs(targetY - n.y) > 1e-4) {
+      n.y = targetY;
+      this.dirtyNodes.add(n.id);
+      for (const id of n.edges) {
+        if (id === skipEdgeId) continue;
+        const sib = this.edges[id];
+        if (!sib || !sib.alive) continue;
+        this.computePts(sib);
+        this.dirtyEdges.add(sib.id);
+      }
+    }
+  }
+
   addEdge(a: number, b: number, cls: RoadClass, opts: { progress?: number; bridge?: boolean; name?: string; day?: number; oneway?: number; lanes?: number; elevated?: boolean; tunnel?: boolean; deck?: number; deckS0?: number; deckTot?: number } = {}): REdge {
     const na = this.nodes[a], nb = this.nodes[b];
     const len = Math.hypot(nb.x - na.x, nb.z - na.z);
     const e: REdge = {
       id: this.edges.length, a, b, cls, lanes: opts.lanes ?? ROAD_LANES[cls], oneway: opts.oneway ?? 0,
       bridge: !!opts.bridge, tunnel: !!opts.tunnel, elevated: !!opts.elevated, deck: opts.deck, deckS0: opts.deckS0, deckTot: opts.deckTot, busLane: false, len,
-      progress: opts.progress ?? 0, upgrading: false, workP: 1, name: opts.name ?? this.streetName(cls), pts: [],
+      progress: opts.progress ?? 0, upgrading: false, workP: 1, wear: 0, sentWear: 0, name: opts.name ?? this.streetName(cls), pts: [],
       count: [0, 0], volume: [0, 0], peakVC: 0, vcHistory: [], congestedDays: 0, stopped: [0, 0], alive: true,
       builtDay: opts.day ?? 0, odLog: [], odPtr: 0,
     };
     this.edges.push(e);
     na.edges.push(e.id); nb.edges.push(e.id);
+    if (e.bridge) {
+      this.syncBridgeNodeHeight(na, e.id);
+      this.syncBridgeNodeHeight(nb, e.id);
+    }
     this.computePts(e);
     this.hashInsert(this.edgeHash, e.id, na.x, na.z, nb.x, nb.z);
     this.rasterize(e);
@@ -242,6 +302,17 @@ export class RoadNetwork {
 
   private nodeGeomCacheVer = -1;
   private nodeGeomCache = new Map<number, { renderR: number; deg: number; hasUrban: boolean }>();
+  private sidewalkCacheVer = -1;
+  private sidewalkSet = new Set<number>();
+
+  /** Single-source-of-truth sidewalk classification matching RoadsLayer and walkPath 100%. */
+  hasSidewalk(eid: number): boolean {
+    if (this.sidewalkCacheVer !== this.topoVer) {
+      this.sidewalkCacheVer = this.topoVer;
+      this.sidewalkSet = computeUrbanSidewalkSet(this.edges, this.nodes);
+    }
+    return this.sidewalkSet.has(eid);
+  }
 
   /** Cached junction surface metrics (invalidated on topoVer change) for O(1) Traffic stop-line queries. */
   nodeCrosswalkInfo(nid: number): { renderR: number; deg: number; hasUrban: boolean } {
@@ -307,24 +378,39 @@ export class RoadNetwork {
 
   computePts(e: REdge) {
     const a = this.nodes[e.a], b = this.nodes[e.b];
-    const n = Math.max(1, Math.ceil(e.len / 10));
+    const hasUnder = !!(e.underpasses && e.underpasses.length);
+    const n = Math.max(1, Math.ceil(e.len / (hasUnder ? 0.5 : 10)));
     const xs = new Float64Array(n + 1);
     const ys = new Float64Array(n + 1);
     const zs = new Float64Array(n + 1);
     const minG = new Float64Array(n + 1);
+    const meshGround = (gx: number, gz: number) => this.terrain.meshY(gx, gz);
     const isBridgeSpan = e.bridge && !e.elevated && e.deck === undefined;
+    const aWaterBridge = isBridgeSpan && this.isWaterBridgeNode(a);
+    const bWaterBridge = isBridgeSpan && this.isWaterBridgeNode(b);
+    const ay = aWaterBridge ? Math.max(a.y, BRIDGE_WATER_DECK_Y) : a.y;
+    const by = bWaterBridge ? Math.max(b.y, BRIDGE_WATER_DECK_Y) : b.y;
+    if (aWaterBridge && ay > a.y) { a.y = ay; this.dirtyNodes.add(a.id); }
+    if (bWaterBridge && by > b.y) { b.y = by; this.dirtyNodes.add(b.id); }
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const el = Math.hypot(dx, dz) || 1;
+    const nx = -dz / el, nz = dx / el;
+    const hw = edgeHalfWidth(e);
     for (let i = 0; i <= n; i++) {
       const t = i / n;
-      const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+      const x = a.x + dx * t, z = a.z + dz * t;
       xs[i] = x; zs[i] = z;
       let y: number;
       if (e.deck !== undefined) {
         y = this.deckY(e, a, b, t, x, z);
       } else if (e.bridge || e.elevated) {
-        const base = a.y + (b.y - a.y) * t;
-        const clearance = e.elevated ? 7 : 6.5;
-        const ramp = Math.min(1, Math.min(t, 1 - t) * e.len / 40);
-        y = Math.max(base, base * (1 - ramp) + clearance * ramp + Math.sin(Math.PI * t) * (e.elevated ? 0 : 2));
+        const base = ay + (by - ay) * t;
+        const clearance = e.elevated ? 7 : BRIDGE_WATER_DECK_Y;
+        const distA = aWaterBridge ? 40 : t * e.len;
+        const distB = bWaterBridge ? 40 : (1 - t) * e.len;
+        const ramp = Math.min(1, Math.min(distA, distB) / 40);
+        const arch = e.elevated ? 0 : (aWaterBridge && bWaterBridge ? 0 : (aWaterBridge || bWaterBridge ? 0.6 : 2));
+        y = Math.max(base, base * (1 - ramp) + Math.max(clearance, base) * ramp + Math.sin(Math.PI * t) * arch);
         if (e.elevated) {
           y = base + ramp * clearance;
         } else {
@@ -333,7 +419,25 @@ export class RoadNetwork {
           y = Math.max(y, g);
         }
       } else {
-        y = Math.max(this.terrain.meshY(x, z), this.terrain.heightAt(x, z), 0.3) + 0.14;
+        // Exact shared cross-section surface clearance using terrain.meshY (matches RoadsLayer & RailLayer 100%)
+        let surfY = sampleRoadSurfaceY(x, z, nx, nz, hw, meshGround);
+        if (hasUnder) {
+          const s = t * e.len;
+          for (const up of e.underpasses!) {
+            const u = s - up.t * e.len;
+            const py = sampleUnderpassY(
+              u,
+              surfY,
+              up.ry,
+              up.halfLenNeg ?? UNDERPASS_HALF_LEN,
+              up.halfLenPos ?? UNDERPASS_HALF_LEN,
+              up.flatHalf ?? UNDERPASS_FLAT_HALF,
+              up.depth ?? UNDERPASS_DEPTH,
+            );
+            if (py < surfY) surfY = py;
+          }
+        }
+        y = surfY;
       }
       ys[i] = y;
     }
@@ -389,6 +493,8 @@ export class RoadNetwork {
     const e1 = this.addEdge(e.a, n.id, e.cls, props);
     const e2 = this.addEdge(n.id, e.b, e.cls, props);
     e1.busLane = e2.busLane = busLane;
+    e1.wear = e2.wear = e.wear;
+    e1.sentWear = e2.sentWear = e.sentWear;
     e1.volume = [...e.volume] as [number, number]; e2.volume = [...e.volume] as [number, number];
     e1.vcHistory = [...e.vcHistory]; e2.vcHistory = [...e.vcHistory];
     this.onSplit?.(e, e1, e2, t);
@@ -407,6 +513,10 @@ export class RoadNetwork {
     this.dirtyEdges.delete(eid);
     this.incidentPenalty.delete(eid * 2);
     this.incidentPenalty.delete(eid * 2 + 1);
+    if (e.bridge && !splitting) {
+      this.syncBridgeNodeHeight(a);
+      this.syncBridgeNodeHeight(b);
+    }
     this.updateNodeGeom(a); this.updateNodeGeom(b);
     this.topoVer++;
     if (!splitting) this.onRemove?.(eid);
@@ -642,9 +752,21 @@ export class RoadNetwork {
     }
     for (const n of this.nodes) { if (!n.alive) continue; n.delay = n.delay * 0.5 + n.waitAcc * 0.5 / Math.max(1, n.edges.length); n.waitAcc = 0; }
   }
-  dayTick() {
+  dayTick(rain = 0) {
+    const rainF = Math.max(0, Math.min(1, rain));
     for (const e of this.edges) {
       if (!e.alive) continue;
+      if (e.progress >= 1 && e.cls !== RoadClass.Dirt && !e.upgrading) {
+        const cap = Math.max(1, this.capacity(e));
+        const volNorm = Math.min(1.5, Math.max(e.peakVC, (e.volume[0] + e.volume[1]) / (cap * 2)));
+        const heavyNorm = e.sndMean ? Math.min(1, e.sndMean[2] / 8) : 0;
+        const dw = Math.max(0.004, Math.min(0.025, 0.004 + volNorm * 0.010 + heavyNorm * 0.005 + rainF * 0.006));
+        e.wear = Math.min(1, e.wear + dw);
+        if (Math.abs(e.wear - e.sentWear) >= 0.08) {
+          e.sentWear = e.wear;
+          this.dirtyEdges.add(e.id);
+        }
+      }
       e.vcHistory.push(e.peakVC);
       if (e.vcHistory.length > 7) e.vcHistory.shift();
       e.congestedDays = e.peakVC > 0.85 ? e.congestedDays + 1 : 0;
@@ -894,12 +1016,14 @@ export class RoadNetwork {
 
   // ---------- views ----------
   nodeView(n: RNode): NodeView {
-    return { id: n.id, x: n.x, z: n.z, y: n.y, control: n.control, deg: n.edges.length, radius: n.radius, interchange: n.interchange };
+    const y = this.isWaterBridgeNode(n) ? Math.max(n.y, BRIDGE_WATER_DECK_Y) : n.y;
+    return { id: n.id, x: n.x, z: n.z, y, control: n.control, deg: n.edges.length, radius: n.radius, interchange: n.interchange };
   }
   edgeView(e: REdge): EdgeView {
     return {
       id: e.id, a: e.a, b: e.b, cls: e.cls, lanes: e.viewLanes ?? e.lanes, oneway: e.oneway, hole: e.lat !== undefined ? 1 : undefined, bridge: e.bridge, tunnel: e.tunnel,
-      elevated: e.elevated, deck: e.deck, busLane: e.busLane, progress: e.upgrading ? e.workP : e.progress, upgrading: e.upgrading, pts: e.pts, name: e.name,
+      elevated: e.elevated, deck: e.deck, busLane: e.busLane, progress: e.upgrading ? e.workP : e.progress, upgrading: e.upgrading,
+      wear: Math.round(e.wear * 100) / 100, pts: e.pts, name: e.name,
     };
   }
 }

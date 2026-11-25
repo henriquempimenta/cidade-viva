@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import { DAYS_PER_YEAR, DAYS_PER_SEASON, SEASONS, MAX_VEHICLES } from './shared/constants';
 import { sanitizeParams, sanitizeWarmup, type SimParams } from './shared/params';
+import { combineTerrainCuts, type TerrainCut } from './shared/roadGeom';
 import type { FromWorker, SimEvent, Snapshot, Stats, ToWorker, WorldDiff, WorldInit } from './shared/protocol';
 import { SceneRig } from './render/scene';
 import { TerrainView } from './render/terrainMesh';
@@ -65,6 +66,19 @@ export class App {
   fixedHour: number | null = null;
   tiltShift = 0;
   private lastSimT = 0;
+  private roadCuts: TerrainCut[] = [];
+  private railCuts: TerrainCut[] = [];
+  private lastCutKey = '';
+
+  private syncTerrainCuts() {
+    const combined = combineTerrainCuts(this.roadCuts, this.railCuts);
+    const key = combined.map((c) => c.hw.toFixed(1) + ':' + c.pts.length).join('|');
+    this.terrain.setCuts(combined);
+    if (key !== this.lastCutKey) {
+      this.lastCutKey = key;
+      if (this.rail?.hasElevatedOrBridge()) this.rail.markDirty();
+    }
+  }
 
   constructor(private canvas: HTMLCanvasElement, public uiRoot: HTMLElement) {}
 
@@ -119,10 +133,18 @@ export class App {
     scene.add(this.trees.group);
     this.roads = new RoadsLayer();
     this.roads.ground = (x, z) => this.terrain.meshY(x, z);
-    this.roads.onCuts = (c) => this.terrain.setCuts(c);
+    this.roads.cutGround = (x, z) => this.terrain.cutY(x, z);
+    this.roads.onCuts = (c) => { this.roadCuts = c; this.syncTerrainCuts(); };
     scene.add(this.roads.group);
     this.rail = new RailLayer();
     this.rail.ground = (x, z) => this.terrain.meshY(x, z);
+    this.rail.cutGround = (x, z) => this.terrain.cutY(x, z);
+    this.rail.roadClearance = (x, z, r) => this.roads.queryRoadClearance(x, z, r);
+    this.rail.onCuts = (c) => {
+      this.railCuts = c;
+      this.roads.setExternalCuts(c);
+      this.syncTerrainCuts();
+    };
     scene.add(this.rail.group);
     this.smoke = new Particles(6000, false);
     this.glow = new Particles(5000, true);
@@ -197,6 +219,9 @@ export class App {
     d.nodes?.forEach((n) => this.roads.upsertNode(n));
     d.edges?.forEach((e) => this.roads.upsertEdge(e));
     d.removedEdges?.forEach((id) => this.roads.removeEdge(id));
+    if ((d.edges?.length || d.removedEdges?.length) && this.rail.hasElevatedOrBridge()) {
+      this.rail.markDirty();
+    }
     if (d.buildings) {
       for (const b of d.buildings) this.buildings.upsert(b);
       this.updateCityExtent();

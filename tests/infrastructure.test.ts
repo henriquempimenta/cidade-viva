@@ -342,12 +342,21 @@ describe('Entrega de Infraestrutura — Terraplenagem, Junções, Ferrovias, Pon
       const T = w.terrain;
       const R = w.roads;
 
-      // 1. At-grade roads AND river bridges: every sampled centerline point clears meshY
+      // 1. At-grade roads AND river bridges: every sampled centerline point clears meshY (except real carved c.under trenches)
       let roadSamples = 0, roadBuried = 0, bridgeSamples = 0;
       for (const e of R.edges) {
         if (!e.alive || e.progress < 1 || e.elevated || e.tunnel || e.deck !== undefined) continue;
-        for (let i = 0; i < e.pts.length; i += 3) {
+        const nPts = Math.floor(e.pts.length / 3);
+        for (let idx = 0; idx < nPts; idx++) {
+          const i = idx * 3;
           const x = e.pts[i], y = e.pts[i + 1], z = e.pts[i + 2];
+          // Excavated rail underpass trenches intentionally dip below uncarved heightmap
+          if (e.underpasses?.length) {
+            const s = (idx / Math.max(1, nPts - 1)) * e.len;
+            if (e.underpasses.some((up) => s >= up.t * e.len - up.halfLenNeg && s <= up.t * e.len + up.halfLenPos)) {
+              continue;
+            }
+          }
           const my = T.meshY(x, z);
           roadSamples++;
           if (e.bridge) bridgeSamples++;

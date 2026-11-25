@@ -26,6 +26,7 @@ export interface CityHallLog { day: number; chosen: string[]; rejected: string[]
 export class CityHall {
   log: CityHallLog[] = [];
   lastCrimeReaction = -10;
+  lastResurfaceEventDay = -10;
   queue: string[] = [];
   /** money in/out, newest first (shown in the Prefeitura tab) */
   ledger: { day: number; text: string; value: number }[] = [];
@@ -39,7 +40,7 @@ export class CityHall {
 
   get money() { return this.w.budget.money; }
 
-  /** daily accounting */
+  /** daily accounting + periodic budget-linked pavement resurfacing */
   daily() {
     const w = this.w, B = w.budget, p = w.params;
     let maint = 0;
@@ -47,15 +48,62 @@ export class CityHall {
     const upkeep = maint;
     let roadKm = 0;
     for (const e of w.roads.edges) if (e.alive && e.progress >= 1) roadKm += (e.len / 1000) * (e.deck === undefined ? 1 : e.tunnel ? 15 : 6); // structures cost far more to keep
-    const roads = roadKm * (10 + w.era * 6), staff = w.population * (0.9 + w.era * 0.45), transit = (w.transitCost?.() ?? 0);
+    let roads = roadKm * (10 + w.era * 6);
+    const staff = w.population * (0.9 + w.era * 0.45), transit = (w.transitCost?.() ?? 0);
     maint += roads + staff + transit;
     const tariffs = w.population * 0.35 * w.economy.priceIndex; // water/power/garbage fees
     const transfers = (250 + w.population * 0.25) * p.budgetMult; // state & federal transfers
     const municipalTax = w.population * p.taxRate * 18 * w.economy.priceIndex; // IPTU/ISS-like, bounded per capita
     const income = municipalTax * p.budgetMult + tariffs + transfers + (w.tourismTax?.() ?? 0);
     const interest = B.debt * 0.004;
-    B.income = income; B.expenses = maint + interest;
     B.money += income - maint - interest;
+
+    // Periodic pavement resurfacing linked to available municipal cash:
+    // resurfaces the most worn paved segments (wear >= 0.45) when budget allows; skips when cash is tight.
+    let resurfaceCost = 0;
+    const resurfaced: import('./roads').REdge[] = [];
+    const cashReserve = 1200;
+    const available = Math.max(0, B.money - cashReserve);
+    if (available > 40) {
+      const budgetCap = Math.min(available * 0.25, 950);
+      const worn = w.roads.edges
+        .filter((e) => e.alive && e.progress >= 1 && !e.upgrading && e.cls !== RoadClass.Dirt && e.wear >= 0.45)
+        .sort((a, b) => (b.wear - a.wear) || (b.cls - a.cls) || (a.id - b.id));
+      for (const e of worn) {
+        if (resurfaced.length >= 6) break;
+        const cost = Math.max(18, e.len * (0.45 + e.lanes * 0.25) * (e.cls >= RoadClass.Avenue ? 1.25 : 1));
+        if (resurfaceCost + cost > budgetCap && resurfaced.length > 0) break;
+        if (cost > available - resurfaceCost) continue;
+        resurfaceCost += cost;
+        e.wear = 0.05;
+        e.sentWear = 0.05;
+        w.roads.dirtyEdges.add(e.id);
+        resurfaced.push(e);
+      }
+      if (resurfaceCost > 0) {
+        B.money -= resurfaceCost;
+        roads += resurfaceCost;
+        maint += resurfaceCost;
+        this.book(`Recapeamento viário (${resurfaced.length} trecho${resurfaced.length > 1 ? 's' : ''})`, -resurfaceCost);
+        if (w.day - this.lastResurfaceEventDay >= 7) {
+          this.lastResurfaceEventDay = w.day;
+          const first = resurfaced[0];
+          const na = w.roads.nodes[first.a], nb = w.roads.nodes[first.b];
+          const mx = (na.x + nb.x) * 0.5, mz = (na.z + nb.z) * 0.5;
+          w.events.emit(
+            'road_maintenance', mx, mz, 0.38,
+            `Prefeitura recapeia ${resurfaced.length} trecho${resurfaced.length > 1 ? 's' : ''} desgastado${resurfaced.length > 1 ? 's' : ''}, incluindo ${first.name}`,
+            {
+              entity: { kind: 'edge', id: first.id },
+              ref: first.id,
+              headline: resurfaced.length >= 2 ? `Operação de recapeamento recupera ${first.name} e vias desgastadas` : undefined,
+            },
+          );
+        }
+      }
+    }
+
+    B.income = income; B.expenses = maint + interest;
     const tourism = w.tourismTax?.() ?? 0;
     this.breakdown = { taxes: municipalTax * p.budgetMult, tariffs, transfers, tourism, upkeep, roads, staff, transit, interest };
     this.book('Resultado do dia (receitas − custeio)', income - maint - interest);

@@ -1,5 +1,8 @@
 import { RoadClass } from '../shared/constants';
-import { CROSSWALK_INSET, edgePtsCum, hasEndCrosswalk, hasUrbanSidewalk, pedWalkOffset, sampleEdgePts } from '../shared/roadGeom';
+import {
+  CROSSWALK_INSET, edgeHalfWidth, edgePtsCum, hasEndCrosswalk, pedWalkOffset, sampleEdgePts,
+  sampleRoadSurfaceY, sampleUnderpassWalkY, widthTaperLength,
+} from '../shared/roadGeom';
 import type { Building } from './buildings';
 import type { REdge, RoadNetwork } from './roads';
 
@@ -180,6 +183,24 @@ interface WalkHop {
   cwEnd: number;
   off: number;
   urban: boolean;
+  /** Tapered sidewalk zone at start/end of this hop when joining a wider straight road (`local <-> highway`). */
+  taperStart: number;
+  offStart: number;
+  taperEnd: number;
+  offEnd: number;
+}
+
+/** Exact sidewalk lateral offset at longitudinal coordinate `s` along `h`, matching RoadsLayer's width taper. */
+function hopOffsetAt(h: WalkHop, s: number): number {
+  if (h.taperStart > 0 && s < h.taperStart) {
+    const f = Math.max(0, Math.min(1, s / h.taperStart));
+    return h.offStart + (h.off - h.offStart) * f;
+  }
+  if (h.taperEnd > 0 && s > h.totalLen - h.taperEnd) {
+    const f = Math.max(0, Math.min(1, (s - (h.totalLen - h.taperEnd)) / h.taperEnd));
+    return h.off + (h.offEnd - h.off) * f;
+  }
+  return h.off;
 }
 
 function pushPt(out: number[], outY: number[], x: number, y: number, z: number) {
@@ -195,10 +216,10 @@ function groundWalkY(R: RoadNetwork, x: number, z: number, lift = 0.15): number 
   return Math.max(0.2, R.terrain.meshY(x, z), R.terrain.heightAt(x, z)) + lift;
 }
 
-function swPt3D(R: RoadNetwork, h: WalkHop, s: number, side: number): [number, number, number] {
+function swPt3DAtOff(R: RoadNetwork, h: WalkHop, s: number, side: number, off: number): [number, number, number] {
   const p = sampleEdgePts(h.e.pts, s, h.dir, h.cum);
-  const wx = p[0] - p[4] * h.off * side;
-  const wz = p[2] + p[3] * h.off * side;
+  const wx = p[0] - p[4] * off * side;
+  const wz = p[2] + p[3] * off * side;
   const e = h.e;
   // Level-accurate elevation: structures (bridges, elevated decks, tunnels) strictly follow their own e.pts level;
   // surface streets clear meshY without ever snapping up to overhead viaducts or dropping into tunnels below.
@@ -209,12 +230,40 @@ function swPt3D(R: RoadNetwork, h: WalkHop, s: number, side: number): [number, n
     wy = p[1] + 0.12;
   } else if (e.bridge) {
     const nearEnd = s < 10 || s > h.totalLen - 10;
-    wy = nearEnd ? Math.max(p[1], R.terrain.meshY(wx, wz) + 0.14) + 0.12 : p[1] + 0.12;
+    wy = nearEnd ? Math.max(p[1], R.terrain.meshY(wx, wz) + 0.18) + 0.12 : p[1] + 0.12;
   } else {
-    const gY = Math.max(0.2, R.terrain.meshY(wx, wz), R.terrain.heightAt(wx, wz));
-    wy = Math.max(p[1], gY + 0.14) + (h.urban ? 0.13 : 0.04);
+    // Inside a carved rail underpass (`c.under`), use the exact shared transverse-aware walkway profile
+    let underY: number | null = null;
+    if (e.underpasses && e.underpasses.length) {
+      const sFwd = h.dir === 0 ? s : h.totalLen - s;
+      const hw = edgeHalfWidth(e);
+      const meshGround = (gx: number, gz: number) => R.terrain.meshY(gx, gz);
+      for (const up of e.underpasses) {
+        const u = sFwd - up.t * e.len;
+        if (u >= -up.halfLenNeg - 0.05 && u <= up.halfLenPos + 0.05) {
+          const surfRoadY = sampleRoadSurfaceY(p[0], p[2], -p[4], p[3], hw, meshGround);
+          const candidate = sampleUnderpassWalkY(
+            u, surfRoadY, meshGround(wx, wz), up.ry,
+            up.halfLenNeg, up.halfLenPos, up.flatHalf, up.depth, h.urban,
+          );
+          if (underY === null || candidate < underY) underY = candidate;
+        }
+      }
+    }
+    if (underY !== null) {
+      wy = underY;
+    } else {
+      const gY = Math.max(0.2, R.terrain.meshY(wx, wz));
+      wy = h.urban
+        ? Math.max(p[1] + 0.12, gY + 0.30)
+        : Math.max(p[1] + 0.04, gY + 0.18);
+    }
   }
   return [wx, wy, wz];
+}
+
+function swPt3D(R: RoadNetwork, h: WalkHop, s: number, side: number): [number, number, number] {
+  return swPt3DAtOff(R, h, s, side, hopOffsetAt(h, s));
 }
 
 function pushAlongEdge(R: RoadNetwork, out: number[], outY: number[], h: WalkHop, sA: number, sB: number, side: number) {
@@ -224,43 +273,42 @@ function pushAlongEdge(R: RoadNetwork, out: number[], outY: number[], h: WalkHop
   const n = h.cum.length;
   const total = h.totalLen;
   const forward = sB >= sA;
-  // follow intermediate vertices of e.pts so curved roads and bridges keep walkers on the exact sidewalk/deck height
+  const lo = Math.min(sA, sB), hi = Math.max(sA, sB);
+  const sList: number[] = [];
+  // Include intermediate vertices of e.pts so curved roads, bridges, and underpasses follow exact height
   if (h.dir === 0) {
-    if (forward) {
-      for (let i = 1; i < n - 1; i++) {
-        const si = h.cum[i];
-        if (si > sA + 0.5 && si < sB - 0.5) {
-          const [px, py, pz] = swPt3D(R, h, si, side);
-          pushPt(out, outY, px, py, pz);
-        }
-      }
-    } else {
-      for (let i = n - 2; i >= 1; i--) {
-        const si = h.cum[i];
-        if (si < sA - 0.5 && si > sB + 0.5) {
-          const [px, py, pz] = swPt3D(R, h, si, side);
-          pushPt(out, outY, px, py, pz);
-        }
-      }
+    for (let i = 1; i < n - 1; i++) {
+      const si = h.cum[i];
+      if (si > lo + 0.4 && si < hi - 0.4) sList.push(si);
     }
   } else {
-    if (forward) {
-      for (let i = n - 2; i >= 1; i--) {
-        const si = total - h.cum[i];
-        if (si > sA + 0.5 && si < sB - 0.5) {
-          const [px, py, pz] = swPt3D(R, h, si, side);
-          pushPt(out, outY, px, py, pz);
-        }
-      }
-    } else {
-      for (let i = 1; i < n - 1; i++) {
-        const si = total - h.cum[i];
-        if (si < sA - 0.5 && si > sB + 0.5) {
-          const [px, py, pz] = swPt3D(R, h, si, side);
-          pushPt(out, outY, px, py, pz);
-        }
-      }
+    for (let i = 1; i < n - 1; i++) {
+      const si = total - h.cum[i];
+      if (si > lo + 0.4 && si < hi - 0.4) sList.push(si);
     }
+  }
+  // Include exact width-taper breakpoints and fine samples inside any taper zone overlapped by [lo, hi]
+  if (h.taperStart > 0 && lo < h.taperStart) {
+    const tHi = Math.min(hi, h.taperStart);
+    for (let st = 1; st <= 4; st++) {
+      const sp = lo + ((tHi - lo) * st) / 4;
+      if (sp > lo + 0.25 && sp < hi - 0.25) sList.push(sp);
+    }
+  }
+  if (h.taperEnd > 0 && hi > total - h.taperEnd) {
+    const tLo = Math.max(lo, total - h.taperEnd);
+    for (let st = 0; st < 4; st++) {
+      const sp = tLo + ((hi - tLo) * st) / 4;
+      if (sp > lo + 0.25 && sp < hi - 0.25) sList.push(sp);
+    }
+  }
+  sList.sort((u, v) => (forward ? u - v : v - u));
+  let lastS = sA;
+  for (const si of sList) {
+    if (Math.abs(si - lastS) <= 0.3) continue;
+    lastS = si;
+    const [px, py, pz] = swPt3D(R, h, si, side);
+    pushPt(out, outY, px, py, pz);
   }
   const [bx, by, bz] = swPt3D(R, h, sB, side);
   pushPt(out, outY, bx, by, bz);
@@ -337,12 +385,35 @@ export function walkPath(
     const incEnd = R.surfaceEdgesAt(nEnd);
     const hasCwStart = hasEndCrosswalk(e, totalLen, incStart.length, incStart.some((q) => q.cls >= RoadClass.Local && q.cls <= RoadClass.Avenue), !!R.nodes[nStart]?.interchange);
     const hasCwEnd = hasEndCrosswalk(e, totalLen, incEnd.length, incEnd.some((q) => q.cls >= RoadClass.Local && q.cls <= RoadClass.Avenue), !!R.nodes[nEnd]?.interchange);
-    const urban = hasUrbanSidewalk(e) || (e.cls === RoadClass.Highway && !e.bridge && !e.elevated && !e.tunnel && e.deck === undefined && (hasCwStart || hasCwEnd));
+    const urban = R.hasSidewalk(e.id);
     const cwStart = rStart > 0 && (urban || hasCwStart) && totalLen > 20 ? Math.min(swStart + CROSSWALK_INSET, totalLen * 0.5) : swStart;
     const cwEnd = rEnd > 0 && (urban || hasCwEnd) && totalLen > 20 ? Math.max(swEnd - CROSSWALK_INSET, totalLen * 0.5) : swEnd;
+    const myOff = pedWalkOffset(e);
+    const myHW = edgeHalfWidth(e);
+    // Compute exact straight width-taper zones at start/end matching RoadsLayer.taperMap
+    const endTaper = (nid: number, inc: REdge[]): { len: number; off: number } => {
+      if (!urban || e.bridge || e.elevated || e.tunnel || e.deck !== undefined || inc.length !== 2) return { len: 0, off: myOff };
+      const other = inc[0].id === e.id ? inc[1] : inc[0];
+      if (!other || other.bridge || other.elevated || other.tunnel || other.deck !== undefined) return { len: 0, off: myOff };
+      if (!R.hasSidewalk(other.id)) return { len: 0, off: myOff };
+      const oHW = edgeHalfWidth(other);
+      if (oHW <= myHW + 0.25) return { len: 0, off: myOff };
+      // Confirm straight joint (turn < 0.1 rad, matching RoadsLayer.taperMap)
+      const pMe = sampleEdgePts(e.pts, e.a === nid ? 0 : totalLen, e.a === nid ? 0 : 1, cum);
+      const oCum = edgePtsCum(other.pts), oLen = oCum[oCum.length - 1] || other.len || 1;
+      const pOt = sampleEdgePts(other.pts, other.a === nid ? 0 : oLen, other.a === nid ? 0 : 1, oCum);
+      const turn = Math.acos(Math.max(-1, Math.min(1, -(pMe[3] * pOt[3] + pMe[4] * pOt[4]))));
+      if (turn >= 0.1) return { len: 0, off: myOff };
+      const tLen = widthTaperLength(myHW, oHW, totalLen);
+      return tLen > 0.5 ? { len: tLen, off: pedWalkOffset(other) } : { len: 0, off: myOff };
+    };
+    const tS = endTaper(nStart, incStart);
+    const tE = endTaper(nEnd, incEnd);
     hops.push({
       e, dir, cum, totalLen, nStart, nEnd, rStart, rEnd, swStart, swEnd, cwStart, cwEnd,
-      off: pedWalkOffset(e), urban,
+      off: myOff, urban,
+      taperStart: tS.len, offStart: tS.off,
+      taperEnd: tE.len, offEnd: tE.off,
     });
   }
   if (!hops.length) {
@@ -510,7 +581,25 @@ export function walkPath(
         pushCornerFillet(out, outY, pAhead, [-sUx, -sUz], mouth2, u2, R, surf);
         return;
       }
-      // No side arm (T-junction straight side): continuous sidewalk straight through
+      // No side arm (T-junction straight side): follow smooth sidewalk transition when road width changes
+      if (Math.abs(h1.off - h2.off) > 0.25) {
+        const midX = (mouth1[0] + mouth2[0]) * 0.5, midZ = (mouth1[2] + mouth2[2]) * 0.5;
+        const maxOff = Math.max(h1.off, h2.off);
+        const nd = R.nodes[h1.nEnd];
+        // Push midpoint outward to the wider sidewalk alignment so the path stays 100% on rendered corner sidewalk
+        const cX = nd ? nd.x - u1[1] * maxOff * sd : midX;
+        const cZ = nd ? nd.z + u1[0] * maxOff * sd : midZ;
+        for (let st = 1; st <= 4; st++) {
+          const f = st / 4, inv = 1 - f;
+          const x = inv * inv * mouth1[0] + 2 * inv * f * cX + f * f * mouth2[0];
+          const z = inv * inv * mouth1[2] + 2 * inv * f * cZ + f * f * mouth2[2];
+          const yLin = mouth1[1] + (mouth2[1] - mouth1[1]) * f;
+          const y = surf ? Math.max(yLin, groundWalkY(R, x, z, 0.30)) : yLin;
+          pushPt(out, outY, x, y, z);
+        }
+        return;
+      }
+      // Equal widths: continuous sidewalk straight through
       pushPt(out, outY, mouth2[0], mouth2[1], mouth2[2]);
       return;
     }
@@ -524,20 +613,21 @@ export function walkPath(
     const s1 = curSide;
     const s2 = sides[k + 1];
 
-    // Deg <= 2 bend (no intersection box, including bridge abutments)
+    // Deg <= 2 bend (no intersection box, including bridge abutments and straight width tapers handled by hopOffsetAt)
     if (h1.rEnd === 0) {
       if (s1 === s2) {
         pushAlongEdge(R, out, outY, h1, curS, h1.totalLen, s1);
         const [bx, by, bz] = swPt3D(R, h2, 0, s2);
         pushPt(out, outY, bx, by, bz);
+        curS = 0;
       } else {
         const sCross = Math.max(curS, h1.totalLen - 3);
         pushAlongEdge(R, out, outY, h1, curS, sCross, s1);
         const [cx, cy, cz] = swPt3D(R, h1, sCross, s2);
         pushPt(out, outY, cx, cy, cz);
         pushAlongEdge(R, out, outY, h1, sCross, h1.totalLen, s2);
+        curS = 0;
       }
-      curS = 0;
       curSide = s2;
       continue;
     }

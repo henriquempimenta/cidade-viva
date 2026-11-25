@@ -19,11 +19,12 @@ export type V3 = [number, number, number];
 
 const RETAIN_COL = new THREE.Color(0x8e8980);
 
-/** upward-facing triangle regardless of the winding we were given */
+/** upward-facing triangle regardless of the winding we were given (zero-allocation fast path) */
 function up(g: GB, a: V3, b: V3, c: V3, col: THREE.Color) {
   const ux = b[0] - a[0], uz = b[2] - a[2], vx = c[0] - a[0], vz = c[2] - a[2];
   // flat up normal like the road ribbons, so seams between tilted triangles don't show
-  if (uz * vx - ux * vz >= 0) g.quad([a, b, c, c], [0, 1, 0], col); else g.quad([a, c, b, b], [0, 1, 0], col);
+  if (uz * vx - ux * vz >= 0) g.triUp(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], col);
+  else g.triUp(a[0], a[1], a[2], c[0], c[1], c[2], b[0], b[1], b[2], col);
 }
 function upQuad(g: GB, a: V3, b: V3, c: V3, d: V3, col: THREE.Color) { up(g, a, b, c, col); up(g, a, c, d, col); }
 
@@ -124,47 +125,116 @@ export function computeCornerSidewalk(
 
 export interface JunctionStyle { surface: THREE.Color; walk: THREE.Color; curb: THREE.Color }
 
+/** Emit an upward-facing triangle, subdividing adaptively ONLY when a terrain ridge pokes > 0.02 m into it. */
+function upAdaptive(
+  g: GB,
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  cx: number, cy: number, cz: number,
+  col: THREE.Color,
+  ground: (x: number, z: number) => number,
+  minClear: number,
+  depth: number,
+) {
+  const mcx = (ax + bx + cx) / 3, mcz = (az + bz + cz) / 3, mcy = (ay + by + cy) / 3;
+  let maxNeed = ground(mcx, mcz) + minClear - mcy;
+  const abx = (ax + bx) * 0.5, abz = (az + bz) * 0.5, aby = (ay + by) * 0.5;
+  const bcx = (bx + cx) * 0.5, bcz = (bz + cz) * 0.5, bcy = (by + cy) * 0.5;
+  const cax = (cx + ax) * 0.5, caz = (cz + az) * 0.5, cay = (cy + ay) * 0.5;
+  const gAB = ground(abx, abz), gBC = ground(bcx, bcz), gCA = ground(cax, caz);
+  const nAB = gAB + minClear - aby; if (nAB > maxNeed) maxNeed = nAB;
+  const nBC = gBC + minClear - bcy; if (nBC > maxNeed) maxNeed = nBC;
+  const nCA = gCA + minClear - cay; if (nCA > maxNeed) maxNeed = nCA;
+  const lAB = (bx - ax) * (bx - ax) + (bz - az) * (bz - az);
+  const lBC = (cx - bx) * (cx - bx) + (cz - bz) * (cz - bz);
+  const lCA = (ax - cx) * (ax - cx) + (az - cz) * (az - cz);
+  const lMax = Math.max(lAB, lBC, lCA);
+  if (lMax > 16) {
+    let nQ = ground(ax * 0.5 + bx * 0.25 + cx * 0.25, az * 0.5 + bz * 0.25 + cz * 0.25) + minClear - (ay * 0.5 + by * 0.25 + cy * 0.25);
+    if (nQ > maxNeed) maxNeed = nQ;
+    nQ = ground(ax * 0.25 + bx * 0.5 + cx * 0.25, az * 0.25 + bz * 0.5 + cz * 0.25) + minClear - (ay * 0.25 + by * 0.5 + cy * 0.25);
+    if (nQ > maxNeed) maxNeed = nQ;
+    nQ = ground(ax * 0.25 + bx * 0.25 + cx * 0.5, az * 0.25 + bz * 0.25 + cz * 0.5) + minClear - (ay * 0.25 + by * 0.25 + cy * 0.5);
+    if (nQ > maxNeed) maxNeed = nQ;
+  }
+
+  if (maxNeed <= 0) {
+    up(g, [ax, ay, az], [bx, by, bz], [cx, cy, cz], col);
+    return;
+  }
+  if (depth > 0 && maxNeed > 0.015) {
+    if (lMax > 5.0) { // edge > 2.24 m -> refine locally into 4 sub-triangles
+      const mabY = Math.max(aby, gAB + minClear);
+      const mbcY = Math.max(bcy, gBC + minClear);
+      const mcaY = Math.max(cay, gCA + minClear);
+      upAdaptive(g, ax, ay, az, abx, mabY, abz, cax, mcaY, caz, col, ground, minClear, depth - 1);
+      upAdaptive(g, abx, mabY, abz, bx, by, bz, bcx, mbcY, bcz, col, ground, minClear, depth - 1);
+      upAdaptive(g, cax, mcaY, caz, bcx, mbcY, bcz, cx, cy, cz, col, ground, minClear, depth - 1);
+      upAdaptive(g, abx, mabY, abz, bcx, mbcY, bcz, cax, mcaY, caz, col, ground, minClear, depth - 1);
+      return;
+    }
+  }
+  // Leaf guarantee: lift minimally so centroid and all 3 edge midpoints clear terrain with 0 intrusion
+  const bump = maxNeed + 0.005;
+  up(g, [ax, ay + bump, az], [bx, by + bump, bz], [cx, cy + bump, cz], col);
+}
+
+function upQuadAdaptive(
+  g: GB, a: V3, b: V3, c: V3, d: V3, col: THREE.Color,
+  ground: (x: number, z: number) => number, minClear: number, depth = 2,
+) {
+  upAdaptive(g, a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], col, ground, minClear, depth);
+  upAdaptive(g, a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2], col, ground, minClear, depth);
+}
+
 /** junction of 3+ arms: C0-continuous filleted pavement polygon plus wrapped kerbs, sidewalks & retaining skirts */
 export function junction(g: GB, cx: number, cy: number, cz: number, arms: Arm[], st: JunctionStyle, ground: (x: number, z: number) => number = () => -1e9) {
-  const lift = (p: V3, m = 0.14): V3 => [p[0], Math.max(p[1], ground(p[0], p[2]) + m), p[2]];
+  const lift = (p: V3, m = 0.18): V3 => [p[0], Math.max(p[1], ground(p[0], p[2]) + m), p[2]];
   if (arms.length < 2) return;
   const A = [...arms].sort((p, q) => Math.atan2(p.dz, p.dx) - Math.atan2(q.dz, q.dx));
   const outline: V3[] = [];
   for (let i = 0; i < A.length; i++) {
     const a = A[i], b = A[(i + 1) % A.length];
-    // Explicit -perp corner of arm a uses EXACTLY a.y (C0 match with road ribbon mouth)
-    outline.push([a.x + a.dz * a.hw, a.y + 0.01, a.z - a.dx * a.hw]);
-    outline.push(...fillet(a, b, a.hw, b.hw, 0.01, cx, cz));
+    // Lightweight base mouth + fillet (flat junctions stay ultra-light; sloped ridges subdivide adaptively)
+    const mSegs = a.hw > 5 ? 2 : 1;
+    for (let s = 0; s < mSegs; s++) {
+      const f = s / mSegs;
+      const off = a.hw * (1 - 2 * f);
+      outline.push([a.x + a.dz * off, a.y + 0.01, a.z - a.dx * off]);
+    }
+    outline.push(...fillet(a, b, a.hw, b.hw, 0.01, cx, cz, 6));
   }
-  const c: V3 = [cx, A.reduce((m, a) => m + a.y, 0) / A.length + 0.01, cz];
-  // three concentric rings so even wide 14 m avenue junctions conform cleanly to interior terrain vertices on steep slopes
-  const O = outline.map((p) => lift(p, 0.14));
-  const M2 = O.map((p) => lift([c[0] + (p[0] - c[0]) * (2 / 3), c[1] + (p[1] - c[1]) * (2 / 3), c[2] + (p[2] - c[2]) * (2 / 3)], 0.14));
-  const M1 = O.map((p) => lift([c[0] + (p[0] - c[0]) * (1 / 3), c[1] + (p[1] - c[1]) * (1 / 3), c[2] + (p[2] - c[2]) * (1 / 3)], 0.14));
-  const C = lift(c, 0.14);
+  const armMeanY = A.reduce((m, a) => m + a.y, 0) / A.length;
+  const c: V3 = [cx, Math.max(cy, armMeanY) + 0.01, cz];
+  const O = outline.map((p) => lift(p, 0.18));
+  const R1 = O.map((p) => lift([(c[0] + p[0]) * 0.5, (c[1] + p[1]) * 0.5, (c[2] + p[2]) * 0.5], 0.18));
+  const C = lift(c, 0.18);
+
   for (let k = 0; k < O.length; k++) {
     const k1 = (k + 1) % O.length;
-    up(g, C, M1[k], M1[k1], st.surface);
-    upQuad(g, M1[k], M2[k], M2[k1], M1[k1], st.surface);
-    upQuad(g, M2[k], O[k], O[k1], M2[k1], st.surface);
+    upAdaptive(g, C[0], C[1], C[2], R1[k][0], R1[k][1], R1[k][2], R1[k1][0], R1[k1][1], R1[k1][2], st.surface, ground, 0.18, 2);
+    upQuadAdaptive(g, R1[k], O[k], O[k1], R1[k1], st.surface, ground, 0.18, 2);
   }
   // sidewalks, kerbs, mixed-sidewalk end caps, and downhill retaining skirts
   for (let i = 0; i < A.length; i++) {
     const a = A[i], b = A[(i + 1) % A.length];
     if (a.walk && b.walk) {
-      const sw = computeCornerSidewalk(a, b, cx, cz, SIDEWALK_WIDTH);
+      const sw = computeCornerSidewalk(a, b, cx, cz, SIDEWALK_WIDTH, 6);
       if (!sw.valid) continue;
-      for (let k = 0; k < sw.inner.length - 1; k++) {
-        const i0 = lift(sw.inner[k], 0.26), i1 = lift(sw.inner[k + 1], 0.26);
-        const o0 = lift(sw.outer[k], 0.26), o1 = lift(sw.outer[k + 1], 0.26);
-        const k0 = lift([sw.inner[k][0], sw.inner[k][1] + 0.02, sw.inner[k][2]], 0.28);
-        const k1 = lift([sw.inner[k + 1][0], sw.inner[k + 1][1] + 0.02, sw.inner[k + 1][2]], 0.28);
-        const ko0 = lift(sw.kerbOut[k], 0.28), ko1 = lift(sw.kerbOut[k + 1], 0.28);
-        upQuad(g, i0, i1, o1, o0, st.walk);
-        upQuad(g, k0, k1, ko1, ko0, st.curb);
+      const inPts = sw.inner.map((p) => lift(p, 0.30));
+      const outPts = sw.outer.map((p) => lift(p, 0.30));
+      const kInPts = sw.inner.map((p) => lift([p[0], p[1] + 0.02, p[2]], 0.32));
+      const kOutPts = sw.kerbOut.map((p) => lift(p, 0.32));
+      for (let k = 0; k < inPts.length - 1; k++) {
+        const i0 = inPts[k], i1 = inPts[k + 1];
+        const o0 = outPts[k], o1 = outPts[k + 1];
+        const k0 = kInPts[k], k1 = kInPts[k + 1];
+        const ko0 = kOutPts[k], ko1 = kOutPts[k + 1];
+        upQuadAdaptive(g, i0, i1, o1, o0, st.walk, ground, 0.30, 2);
+        upQuadAdaptive(g, k0, k1, ko1, ko0, st.curb, ground, 0.32, 1);
         // vertical curb riser facing carriageway
-        const roadY0 = Math.max(sw.inner[k][1] - 0.12, ground(i0[0], i0[2]) + 0.12);
-        const roadY1 = Math.max(sw.inner[k + 1][1] - 0.12, ground(i1[0], i1[2]) + 0.12);
+        const roadY0 = Math.max(sw.inner[k][1] - 0.12, ground(i0[0], i0[2]) + 0.14);
+        const roadY1 = Math.max(sw.inner[k + 1][1] - 0.12, ground(i1[0], i1[2]) + 0.14);
         skirtQuad(g, i1, i0, roadY1, roadY0, st.curb);
         // downhill retaining skirt on outer sidewalk edge when above terrain
         const g0 = ground(o0[0], o0[2]), g1 = ground(o1[0], o1[2]);
@@ -174,7 +244,7 @@ export function junction(g: GB, cx: number, cy: number, cz: number, arms: Arm[],
       }
     } else if (a.walk !== b.walk) {
       // Mixed sidewalk corner: taper the urban arm's sidewalk cleanly to a rounded kerb return
-      const sw = computeCornerSidewalk(a, b, cx, cz, SIDEWALK_WIDTH, 8);
+      const sw = computeCornerSidewalk(a, b, cx, cz, SIDEWALK_WIDTH, 6);
       if (!sw.valid) continue;
       const fromStart = a.walk;
       const segs = 3;
@@ -186,20 +256,26 @@ export function junction(g: GB, cx: number, cy: number, cz: number, arms: Arm[],
         const pIn0 = sw.inner[k], pIn1 = sw.inner[kn];
         const pOut0: V3 = [pIn0[0] + (sw.outer[k][0] - pIn0[0]) * t0, pIn0[1], pIn0[2] + (sw.outer[k][2] - pIn0[2]) * t0];
         const pOut1: V3 = [pIn1[0] + (sw.outer[kn][0] - pIn1[0]) * t1, pIn1[1], pIn1[2] + (sw.outer[kn][2] - pIn1[2]) * t1];
-        const i0 = lift(pIn0, 0.26), i1 = lift(pIn1, 0.26);
-        const o0 = lift(pOut0, 0.26), o1 = lift(pOut1, 0.26);
-        upQuad(g, i0, i1, o1, o0, st.walk);
+        const i0 = lift(pIn0, 0.30), i1 = lift(pIn1, 0.30);
+        const o0 = lift(pOut0, 0.30), o1 = lift(pOut1, 0.30);
+        upQuadAdaptive(g, i0, i1, o1, o0, st.walk, ground, 0.30, 2);
+        // vertical curb riser facing carriageway along the tapered return
+        const roadY0 = Math.max(pIn0[1] - 0.12, ground(i0[0], i0[2]) + 0.14);
+        const roadY1 = Math.max(pIn1[1] - 0.12, ground(i1[0], i1[2]) + 0.14);
+        if (fromStart) skirtQuad(g, i1, i0, roadY1, roadY0, st.curb);
+        else skirtQuad(g, i0, i1, roadY0, roadY1, st.curb);
         // kerb edge along the tapered outer boundary
         const g0 = ground(o0[0], o0[2]), g1 = ground(o1[0], o1[2]);
         if (g0 > -1e8 && g1 > -1e8 && (o0[1] - g0 > 0.12 || o1[1] - g1 > 0.12)) {
-          skirtQuad(g, o0, o1, g0 - 0.35, g1 - 0.35, st.curb);
+          if (fromStart) skirtQuad(g, o0, o1, g0 - 0.35, g1 - 0.35, st.curb);
+          else skirtQuad(g, o1, o0, g1 - 0.35, g0 - 0.35, st.curb);
         }
       }
     } else {
       // Unpaved / highway corner: add a subtle embankment skirt if the edge is above sloped ground
       const kerb = fillet(a, b, a.hw, b.hw, 0.01, cx, cz, 6);
       for (let k = 0; k < kerb.length - 1; k++) {
-        const p0 = lift(kerb[k], 0.14), p1 = lift(kerb[k + 1], 0.14);
+        const p0 = lift(kerb[k], 0.18), p1 = lift(kerb[k + 1], 0.18);
         const g0 = ground(p0[0], p0[2]), g1 = ground(p1[0], p1[2]);
         if (g0 > -1e8 && g1 > -1e8 && (p0[1] - g0 > 0.18 || p1[1] - g1 > 0.18)) {
           skirtQuad(g, p0, p1, g0 - 0.35, g1 - 0.35, RETAIN_COL);

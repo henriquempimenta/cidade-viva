@@ -831,6 +831,26 @@ async function main() {
       });
     }
 
+    // 09b: Dedicated railway underpass (c.under) close-up when present
+    const underpassTarget = await cdp.eval(`(() => {
+      const a = window.app;
+      const u = (a.rail.crossings || []).find((c) => c.under);
+      if (!u) return null;
+      return { kind: 'underpass', x: u.x, y: Math.max(u.y, a.terrain.meshY(u.x, u.z)), z: u.z, angle: u.angle, hw: u.hw, walk: !!u.walk };
+    })()`);
+    if (underpassTarget) {
+      await lookAtPoint(underpassTarget.x, underpassTarget.z, 42, 20, underpassTarget.y - 1.2);
+      await sleep(500);
+      await snapFrozen('09b-rail-underpass.png', 1, async () => {
+        const time = await cdp.eval(`window.app.timeLabel()`);
+        return {
+          kind: 'rail-underpass', state: 'observing', mode: 'infrastructure', gen: -1,
+          cameraMode: 'free', insideBuilding: false, inconclusive: false,
+          rail: underpassTarget, time,
+        };
+      });
+    }
+
     // 10: Steepest hillside buildings + terraced streets (plinths, terraforming, retaining skirts)
     const hillCluster = await cdp.eval(`(() => {
       const a = window.app;

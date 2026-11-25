@@ -1,5 +1,5 @@
 import { HOUR_SECONDS, MAX_TRAIN_CARS, ROAD_HALF_WIDTH, RoadClass, TRAIN_STRIDE, VType } from '../shared/constants';
-import { edgeHalfWidth, SIDEWALK_WIDTH } from '../shared/roadGeom';
+import { edgeHalfWidth, SIDEWALK_WIDTH, UNDERPASS_DEPTH, UNDERPASS_FLAT_HALF, UNDERPASS_HALF_LEN } from '../shared/roadGeom';
 import type { CrossingView, RailEdgeView, RailStationView } from '../shared/protocol';
 import type { Building, Candidate } from './buildings';
 import { segRectDist } from './geom';
@@ -559,6 +559,7 @@ export class Rail {
     for (const c of out) if (this.underpasses.some((u) => u.line === c.line && Math.abs(u.s - c.s) < 15)) { c.separated = true; c.under = true; }
     for (const c of out) { const p = prevByS.find((q) => q.line === c.line && Math.abs(q.s - c.s) < 12); if (p) { c.wait = p.wait; c.hot = p.hot; c.bypassed = p.bypassed; } }
     this.crossings = out;
+    this.syncUnderpassEdges();
     // arterials never get gates: their crossing is built grade-separated
     for (const c of out) {
       const e = R.edges[c.edge];
@@ -566,6 +567,53 @@ export class Rail {
       if (!c.separated && e.cls >= RoadClass.Avenue && this.canLift(c)) this.separate(c, true);
     }
     this.crossingsDirty = true;
+  }
+
+  /** Compute safe ramp reaches along -angle/+angle so an underpass never invades adjacent junction mouths. */
+  private underpassReaches(c: Crossing): { halfLenNeg: number; halfLenPos: number } {
+    const R = this.w.roads;
+    const e = R.edges[c.edge];
+    if (!e || !e.alive) return { halfLenNeg: UNDERPASS_HALF_LEN, halfLenPos: UNDERPASS_HALF_LEN };
+    const trimA = R.nodeRenderR(e.a) * 0.92;
+    const trimB = R.nodeRenderR(e.b) * 0.92;
+    const distA = Math.max(0, c.t * e.len - trimA - 1.5);
+    const distB = Math.max(0, (1 - c.t) * e.len - trimB - 1.5);
+    return {
+      halfLenNeg: Math.min(UNDERPASS_HALF_LEN, Math.max(UNDERPASS_FLAT_HALF + 4, distA)),
+      halfLenPos: Math.min(UNDERPASS_HALF_LEN, Math.max(UNDERPASS_FLAT_HALF + 4, distB)),
+    };
+  }
+
+  /** Attach real depressed underpass ramp geometry (`e.underpasses`) to road edges so vehicles & peds descend cleanly. */
+  syncUnderpassEdges() {
+    const R = this.w.roads;
+    const byEdge = new Map<number, { t: number; ry: number; halfLenNeg: number; halfLenPos: number; flatHalf: number; depth: number }[]>();
+    for (const c of this.crossings) {
+      if (!c.under) continue;
+      const e = R.edges[c.edge];
+      if (!e || !e.alive) continue;
+      const l = this.lines[c.line];
+      const ry = this.at(l, c.s)[1];
+      const { halfLenNeg, halfLenPos } = this.underpassReaches(c);
+      let arr = byEdge.get(e.id);
+      if (!arr) byEdge.set(e.id, (arr = []));
+      arr.push({ t: c.t, ry, halfLenNeg, halfLenPos, flatHalf: UNDERPASS_FLAT_HALF, depth: UNDERPASS_DEPTH });
+    }
+    let anyChanged = false;
+    for (const e of R.edges) {
+      if (!e.alive) continue;
+      const next = byEdge.get(e.id);
+      const had = !!(e.underpasses && e.underpasses.length);
+      if (!next && !had) continue;
+      const key = (a?: typeof next) => (a ?? []).map((u) => `${u.t.toFixed(4)}:${u.ry.toFixed(2)}:${u.halfLenNeg.toFixed(1)}:${u.halfLenPos.toFixed(1)}`).join('|');
+      if (key(next) !== key(e.underpasses)) {
+        e.underpasses = next;
+        R.computePts(e);
+        R.dirtyEdges.add(e.id);
+        anyChanged = true;
+      }
+    }
+    if (anyChanged) this.w.peds?.reprojectUnderpasses(R);
   }
   /** a level crossing needs the rails flush with the street: ease the track down to road level around it */
   private seat(c: Crossing) {
@@ -588,9 +636,18 @@ export class Rail {
     return false;
   }
   crossingViews(): CrossingView[] {
+    const R = this.w.roads;
     return this.crossings.map((c) => {
-      const l = this.lines[c.line], e = this.w.roads.edges[c.edge];
-      return { x: c.x, z: c.z, y: c.y, angle: c.angle, closed: c.closed, separated: c.separated, under: c.under, hw: e ? ROAD_HALF_WIDTH[e.cls] : 4, rail: this.at(l, c.s)[3], ry: this.at(l, c.s)[1] };
+      const l = this.lines[c.line], e = R.edges[c.edge];
+      const pRail = this.at(l, c.s);
+      const { halfLenNeg, halfLenPos } = c.under ? this.underpassReaches(c) : { halfLenNeg: undefined, halfLenPos: undefined };
+      return {
+        x: c.x, z: c.z, y: c.y, angle: c.angle, closed: c.closed, separated: c.separated, under: c.under,
+        hw: e ? edgeHalfWidth(e) : 4,
+        walk: e ? R.hasSidewalk(e.id) : false,
+        rail: pRail[3], ry: pRail[1], tracks: l.tracks,
+        halfLenNeg, halfLenPos,
+      };
     });
   }
   crossingsSnapshot = (): Uint8Array => { const a = new Uint8Array(this.crossings.length); this.crossings.forEach((c, i) => (a[i] = c.closed ? 1 : 0)); return a; };
@@ -668,7 +725,7 @@ export class Rail {
     }
     // duplication of the single track
     if (!this.duplicated && this.waitingSingle > 40 && w.era >= 1) {
-      out.push({ kind: 'rail_dup', label: 'Duplicação da ferrovia', motive: `Trens esperando em via singela (${this.waitingSingle} esperas)`, benefit: 30, cost: 2500, run: () => { main.tracks = 2; this.duplicated = true; this.gradeLineTerrain(main); this.dirtyViews = true; const p = this.at(main, main.len / 2); w.events.emit('rail_build', p[0], p[2], 0.85, 'Ferrovia é duplicada: trens passam a cruzar sem esperar', { headline: 'Linha férrea ganha segunda via', visual: 0.8 }); return true; } });
+      out.push({ kind: 'rail_dup', label: 'Duplicação da ferrovia', motive: `Trens esperando em via singela (${this.waitingSingle} esperas)`, benefit: 30, cost: 2500, run: () => { main.tracks = 2; this.duplicated = true; this.gradeLineTerrain(main); this.dirtyViews = true; this.crossingsDirty = true; const p = this.at(main, main.len / 2); w.events.emit('rail_build', p[0], p[2], 0.85, 'Ferrovia é duplicada: trens passam a cruzar sem esperar', { headline: 'Linha férrea ganha segunda via', visual: 0.8 }); return true; } });
     }
     // grade separation of level crossings that stay jammed day after day (not a one-off peak)
     let worst: Crossing | null = null;
@@ -741,6 +798,7 @@ export class Rail {
   private underpass(c: Crossing): boolean {
     c.separated = true; c.under = true;
     this.underpasses.push({ line: c.line, s: c.s });
+    this.syncUnderpassEdges();
     this.crossingsDirty = true;
     const e = this.w.roads.edges[c.edge];
     this.w.events.emit('road_upgrade', c.x, c.z, 0.75, `${e?.name ?? 'A rua'} ganha passagem inferior sob a ferrovia`, { headline: 'Trincheira acaba com a espera nas cancelas', visual: 0.85 });

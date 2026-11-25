@@ -925,7 +925,7 @@ export class Traffic {
       for (let idx = arr.length - 1; idx >= 0; idx--) {
         const i = arr[idx];
         if (!this.active[i]) continue;
-        if (idx < arr.length - 1 && !this.legitWait[i] && this.v[i] < 0.5) {
+        if (idx < arr.length - 1 && !this.legitWait[i] && this.v[i] < 3.0) {
           const o = arr[idx + 1];
           if (this.active[o] && this.legitWait[o]) {
             const bgap = this.s[o] - this.s[i] - (this.len[o] + this.len[i]) * 0.5;

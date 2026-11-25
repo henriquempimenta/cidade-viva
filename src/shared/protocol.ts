@@ -45,6 +45,8 @@ export interface EdgeView {
   busLane: boolean;
   progress: number; // construction 0..1 (1 = done)
   upgrading: boolean;
+  /** pavement surface wear 0..1 (0 = fresh asphalt, 1 = severely worn) */
+  wear?: number;
   pts: number[]; // polyline [x,y,z,...] sampled along terrain
   name: string;
 }
@@ -53,7 +55,18 @@ export interface RailEdgeView { id: number; pts: number[]; tracks: number; progr
 export interface RailStationView { id: number; x: number; z: number; y: number; angle: number; len: number; kind: 'pass' | 'freight' | 'metro'; name: string }
 export interface TransitLineView { id: number; kind: 'bus' | 'brt' | 'rail' | 'metro' | 'freight'; color: string; name: string; pts: number[]; stops: number[]; stopPoses?: number[]; riders: number; vehicles: number }
 export interface PowerLineView { id: number; pts: number[]; progress: number }
-export interface CrossingView { x: number; z: number; y: number; angle: number; closed: boolean; separated: boolean; /** road dips under the track (trincheira) */ under?: boolean; /** road half width, rail heading, rail top height */ hw?: number; rail?: number; ry?: number }
+export interface CrossingView {
+  x: number; z: number; y: number; angle: number; closed: boolean; separated: boolean;
+  /** road dips under the track (trincheira) */
+  under?: boolean;
+  /** road carriageway half width, rail heading, rail top height, track count */
+  hw?: number; rail?: number; ry?: number; tracks?: number;
+  /** whether the road has urban sidewalks (adds raised walkways inside the underpass trench) */
+  walk?: boolean;
+  /** longitudinal ramp reach along -angle and +angle from crossing center */
+  halfLenNeg?: number;
+  halfLenPos?: number;
+}
 
 export type RoadIncidentKind = 'breakdown' | 'minor_crash' | 'major_crash' | 'ped_crash';
 export type RoadIncidentStage = 'active' | 'responding' | 'clearing';

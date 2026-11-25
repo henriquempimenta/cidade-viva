@@ -33,11 +33,18 @@ export function buildingGeometry(b: BuildingView): BuildResult {
   const kind = b.kind;
   const def = KINDS[kind];
   g.winParams = [3.2, 3, (b.seed % 1000) / 1000];
-  // concrete/stone foundation plinth descending 12 m below base so hillside buildings never float even in serra
+  // Terraced architectural concrete/stone retaining foundation descending 12 m below base so hillside buildings never float even in serra
   const lotC: Record<string, number> = { res: 0x86a35e, informal: 0x9a8a6a, com: 0xb3aea4, off: 0xaaa69e, ind: 0x9a948a };
   const topPadC = C(lotC[def.cat] ?? (def.cat === 'park' || def.cat === 'deathcare' ? 0x6f9a50 : 0xa9a99a));
+  const copingC = C(def.cat === 'park' || def.cat === 'deathcare' ? 0x949288 : 0xb0aba1);
   const foundC = C(def.cat === 'park' || def.cat === 'deathcare' ? 0x7c7b72 : 0x8f8a80);
-  g.box(0, -12.0, 0, w + 0.6, 12.02, d + 0.6, foundC, 0, { top: topPadC, noBottom: true });
+  const deepFoundC = C(def.cat === 'park' || def.cat === 'deathcare' ? 0x6b6a62 : 0x78746c);
+  // Crisp terrace slab + coping lip at lot grade
+  g.box(0, -0.35, 0, w + 0.72, 0.37, d + 0.72, copingC, 0, { top: topPadC, noBottom: true });
+  // Upper retaining wall (visible on moderate hillsides)
+  g.box(0, -4.2, 0, w + 0.56, 3.86, d + 0.56, foundC, 0, { noBottom: true });
+  // Deep structural retaining plinth down to -12 m (for steep serra slopes)
+  g.box(0, -12.0, 0, w + 0.44, 7.82, d + 0.44, deepFoundC, 0, { noBottom: true });
   switch (def.cat) {
     case 'res': residential(ctx); break;
     case 'informal': informal(ctx); break;

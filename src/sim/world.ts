@@ -126,6 +126,7 @@ export class World {
   households = 0;
   private hhSeq = 1;
   private foundingDone = false;
+  private dailyRainMax = 0;
 
   constructor(params: SimParams) {
     this.params = { ...params };
@@ -279,7 +280,7 @@ export class World {
     for (const b of this.buildings.list) this.terraforming.gradeBuilding(b.x, b.z, b.angle, b.w, b.d);
     for (const n of this.roads.nodes) {
       if (!n.alive || n.deck) continue;
-      n.y = Math.max(this.terrain.meshY(n.x, n.z), this.terrain.heightAt(n.x, n.z), 0.3) + 0.1;
+      n.y = this.roads.computeNodeY(n);
       this.roads.dirtyNodes.add(n.id);
     }
     for (const e of this.roads.edges) {
@@ -338,7 +339,7 @@ export class World {
     const touchedNodes = new Set<number>();
     for (const n of R.nodesNear(cx, cz, rNodes)) {
       if (!n.alive || n.deck) continue;
-      const ny = Math.max(T.meshY(n.x, n.z), T.heightAt(n.x, n.z), 0.3) + 0.1;
+      const ny = R.computeNodeY(n);
       if (Math.abs(ny - n.y) > 0.01) {
         n.y = ny;
         R.dirtyNodes.add(n.id);
@@ -1068,6 +1069,8 @@ export class World {
     e.upgrading = false;
     if (e.upgradeTo) Object.assign(e, e.upgradeTo);
     e.upgradeTo = undefined;
+    e.wear = 0;
+    e.sentWear = 0;
     this.terraformRoadEdge(e);
     this.roads.computePts(e);
     this.clearTreesForEdge(e);
@@ -1079,6 +1082,7 @@ export class World {
   }
 
   hourly() {
+    if (this.weather.rain > this.dailyRainMax) this.dailyRainMax = this.weather.rain;
     this.structures.hourly();
     this.roads.hourTick();
     updateFields(this);
@@ -1098,7 +1102,8 @@ export class World {
   }
 
   daily() {
-    this.roads.dayTick();
+    this.roads.dayTick(Math.max(this.weather.rain, this.dailyRainMax));
+    this.dailyRainMax = 0;
     this.citizens.daily();
     this.economy.daily();
     this.utils.daily();
